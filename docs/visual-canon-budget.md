@@ -98,8 +98,17 @@ The simulator does not call external image APIs and does not route image
 generation through `codex exec`. It exposes player-visible jobs for Codex App to
 consume through its host image-generation capability.
 
-For normal Codex App play, image jobs are consumed by the same prep worker used
-for text turns:
+For normal Codex App play, the `싱귤러리 월드 준비해줘` prep worker must not
+consume image jobs:
+
+```bash
+singulari-world --store-root .world-store host-worker \
+  --text-backend codex-app-server \
+  --no-visual-jobs \
+  --interval-ms 750
+```
+
+Image jobs are consumed only by an explicit visual worker:
 
 ```bash
 singulari-world --store-root .world-store host-worker \
@@ -111,7 +120,8 @@ singulari-world --store-root .world-store host-worker \
 
 That worker uses Codex App `imageGeneration`, reads the generated item's
 `savedPath`, verifies PNG bytes through completion, and writes the asset into
-the world store. Manual claim/complete remains a fallback contract.
+the world store. Do not start it automatically on main-menu prep. Manual
+claim/complete remains a fallback contract.
 
 Worker loop:
 

@@ -99,8 +99,7 @@ Codex App prep flow:
 ```bash
 singulari-world host-worker \
   --text-backend codex-app-server \
-  --claim-visual-jobs \
-  --visual-backend codex-app-server \
+  --no-visual-jobs \
   --interval-ms 750
 ```
 
@@ -108,9 +107,10 @@ This is what the Codex App agent should start when the operator says
 `싱귤러리 월드 준비해줘`. The intended packaged-app backend is
 `codex-app-server`. By default, the worker starts `codex app-server` on a
 managed loopback port, records the runtime URL in the store-root `agent_bridge`
-directory, and dispatches only when a pending world turn or image job exists.
-It can be started before any world exists; it idles until the browser creates or
-loads the active world. Keep Codex App open while playing. Hosts that already
+directory, and dispatches only when a pending world turn exists. It can be
+started before any world exists; it idles until the browser creates or loads the
+active world. Prep mode disables visual jobs so main-menu/background image jobs
+do not start unexpectedly. Keep Codex App open while playing. Hosts that already
 own the websocket may pass `--codex-app-server-url`. `codex-exec-resume` remains
 the on-demand CLI backend for hosts that do not run a websocket app-server.
 

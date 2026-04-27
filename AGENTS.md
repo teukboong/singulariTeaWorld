@@ -81,16 +81,16 @@ cargo build --locked --bin singulari-world
 
 target/debug/singulari-world --store-root .world-store host-worker \
   --text-backend codex-app-server \
-  --claim-visual-jobs \
-  --visual-backend codex-app-server \
+  --no-visual-jobs \
   --interval-ms 750
 ```
 
 That worker starts a managed loopback `codex app-server` when no
-`--codex-app-server-url` is provided. It consumes both pending text turns and
-redacted CG jobs through Codex App, then writes completed results back into the
-world store. Keep Codex App open while playing; idle worker ticks spend zero
-model tokens and wait for browser-created work.
+`--codex-app-server-url` is provided. In prep mode it consumes pending text
+turns only and deliberately disables visual job handling, so opening the main
+menu or creating a fresh world cannot start image generation by surprise. Keep
+Codex App open while playing; idle worker ticks spend zero model tokens and wait
+for browser-created text work.
 
 After prep, the only user-facing runtime that still needs to run is the VN app:
 
@@ -221,6 +221,8 @@ binding and let the next dispatch rebuild from the world store.
 ## Visual Job Worker
 
 Image jobs are host-consumed jobs, not `codex exec` jobs.
+Do not include this mode in the `싱귤러리 월드 준비해줘` prep worker. Start it only
+when the operator explicitly wants Codex App to consume pending visual jobs.
 
 Preferred packaged-app path:
 

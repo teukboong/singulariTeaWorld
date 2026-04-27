@@ -54,17 +54,16 @@ world turns without a manual chat turn. The app-facing entrypoint is
 ```bash
 singulari-world --store-root .world-store host-worker \
   --text-backend codex-app-server \
-  --claim-visual-jobs \
-  --visual-backend codex-app-server \
+  --no-visual-jobs \
   --interval-ms 750
 ```
 
 Codex App should remain open while the VN browser is used. The worker starts a
 managed loopback `codex app-server` when no `--codex-app-server-url` is passed,
-dispatches pending text turns through that websocket, claims redacted visual
-jobs, asks Codex App for `imageGeneration`, and commits the completed text/image
-results back into the world store. When there is no active world or no pending
-work, it idles.
+dispatches pending text turns through that websocket, and commits completed
+text results back into the world store. Prep mode passes `--no-visual-jobs`
+because menu/stage/turn CG jobs can exist before the player has asked for image
+work. When there is no active world or no pending text work, it idles.
 
 For a packaged app, Codex App should own this cross-platform background process
 instead of relying on OS-specific schedulers such as launchd or Windows Task
@@ -108,7 +107,8 @@ exactly to `destination_path`, then refresh `worldsim_current` or
 Image generation is not dispatched through `codex exec`. It is also queue-based:
 the simulator exposes a redacted visual job, then Codex App's agent/host layer
 consumes the job with its image-generation capability and saves the PNG. The
-normal Codex App worker does that directly:
+explicit visual worker does that directly. Do not use this worker for generic
+`싱귤러리 월드 준비해줘` prep:
 
 ```bash
 singulari-world --store-root .world-store host-worker \

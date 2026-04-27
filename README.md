@@ -45,8 +45,7 @@ cargo build --locked --bin singulari-world
 target/debug/singulari-world --store-root .world-store host-worker \
   --interval-ms 750 \
   --text-backend codex-app-server \
-  --claim-visual-jobs \
-  --visual-backend codex-app-server
+  --no-visual-jobs
 ```
 
 Then start the VN app:
@@ -70,10 +69,13 @@ loopback port, records the runtime URL under the store-root `agent_bridge`
 directory, and stops it when the worker exits. Keep Codex App open while the web
 app is in use. Idle ticks spend zero model tokens.
 
-Image jobs are queue-based too: `--visual-backend codex-app-server` claims
-redacted visual jobs, asks Codex App for a real `imageGeneration` item, reads
-its `savedPath`, then completes the job into the world store. There is no
-external provider or local placeholder path.
+Prep mode passes `--no-visual-jobs` on purpose. Opening the main menu, creating
+a fresh world, or loading a world with pending menu/stage/turn CG jobs must not
+start image generation by surprise. Image jobs are a separate explicit worker
+mode: `--visual-backend codex-app-server` claims redacted visual jobs, asks
+Codex App for a real `imageGeneration` item, reads its `savedPath`, then
+completes the job into the world store. There is no external provider or local
+placeholder path.
 
 Each world owns a durable Codex `thread_id` under
 `worlds/<world-id>/agent_bridge/codex_thread_binding.json`. That thread keeps

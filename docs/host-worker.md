@@ -14,15 +14,16 @@ and keep Codex App open while the VN browser is used:
 ```bash
 singulari-world --store-root .world-store host-worker \
   --text-backend codex-app-server \
-  --claim-visual-jobs \
-  --visual-backend codex-app-server \
+  --no-visual-jobs \
   --interval-ms 750
 ```
 
 This prepares the managed loopback `codex app-server`, realtime text dispatch,
-and automatic CG job consumption. It is safe to start before a world exists; the
+and no image queue consumption. It is safe to start before a world exists; the
 worker emits `worker_waiting_for_active_world` until the browser creates or
-loads one. Idle ticks do not start model turns.
+loads one. Idle ticks do not start model turns. Visual jobs are disabled here so
+main-menu/background/turn CG work cannot start before the operator explicitly
+asks for image generation.
 
 After that, the web-facing process can be started independently:
 
