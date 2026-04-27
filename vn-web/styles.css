@@ -524,6 +524,10 @@ select {
   color: color-mix(in srgb, #f1b5b5 70%, var(--paper));
 }
 
+.turn-cg-status.is-ready {
+  color: var(--world-accent);
+}
+
 .story-ident span:first-child {
   border-left: 2px solid var(--gold);
 }
@@ -1020,6 +1024,13 @@ select {
   gap: 7px;
 }
 
+.runtime-status-panel {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.runtime-status-pill,
 .cg-job-row {
   display: grid;
   gap: 3px;
@@ -1029,17 +1040,45 @@ select {
   padding: 8px;
 }
 
+.runtime-status-pill[data-status="connected"],
+.runtime-status-pill[data-status="ready"],
+.cg-job-row[data-status="saved"] {
+  border-color: color-mix(in srgb, var(--world-accent) 42%, var(--line-soft));
+}
+
+.runtime-status-pill[data-status="pending"],
+.runtime-status-pill[data-status="claimed"],
+.runtime-status-pill[data-status="rebuilt"],
+.cg-job-row[data-status="pending"] {
+  border-color: color-mix(in srgb, var(--gold) 45%, var(--line-soft));
+}
+
+.runtime-status-pill[data-status="needs_connection"] {
+  border-color: color-mix(in srgb, #f1b5b5 44%, var(--line-soft));
+}
+
+.runtime-status-pill span,
 .cg-job-row span {
   color: var(--gold);
   font-family: var(--font-sans);
   font-size: 0.72rem;
 }
 
+.runtime-status-pill strong,
 .cg-job-row strong {
   color: var(--paper);
   font-size: 0.78rem;
   line-height: 1.48;
   overflow-wrap: anywhere;
+}
+
+.cg-job-status,
+.cg-job-note {
+  margin: 0;
+  color: var(--muted);
+  font-family: var(--font-sans);
+  font-size: 0.74rem;
+  line-height: 1.45;
 }
 
 .console-action {

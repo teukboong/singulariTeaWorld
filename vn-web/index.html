@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Singulari World VN</title>
     <link rel="icon" href="data:," />
-    <link rel="stylesheet" href="./styles.css?v=20260428-design-system-audit" />
-    <script defer src="./app.js?v=20260428-design-system-audit"></script>
+    <link rel="stylesheet" href="./styles.css?v=20260428-visual-runtime2" />
+    <script defer src="./app.js?v=20260428-visual-runtime2"></script>
   </head>
   <body>
     <main class="vn-shell" data-world-theme="default">
@@ -203,7 +203,16 @@
 
           <div id="sideConsole" class="side-pane">
             <section class="console-block">
+              <h2>운영 상태</h2>
+              <div id="runtimeStatusPanel" class="runtime-status-panel"></div>
+              <details class="raw-markdown">
+                <summary>기술 상세</summary>
+                <pre id="runtimeDetails"></pre>
+              </details>
+            </section>
+            <section class="console-block">
               <h2>CG 백그라운드</h2>
+              <p id="cgJobStatus" class="cg-job-status"></p>
               <div id="cgJobPanel" class="cg-job-panel"></div>
               <button id="requestTurnCgRetry" class="console-action" type="button">
                 백그라운드 재시도 요청

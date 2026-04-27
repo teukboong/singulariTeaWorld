@@ -3,6 +3,7 @@ const fallbackPacketUrl = explicitPacketUrl || "current-vn.json";
 const currentApiUrl = "/api/vn/current";
 const chooseApiUrl = "/api/vn/choose";
 const agentPendingApiUrl = "/api/vn/agent/pending";
+const runtimeStatusApiUrl = "/api/vn/runtime-status";
 const worldsApiUrl = "/api/vn/worlds";
 const selectWorldApiUrl = "/api/vn/worlds/select";
 const newWorldApiUrl = "/api/vn/worlds/new";
@@ -13,6 +14,8 @@ const launchSeenKey = "singulari.vn.launchSeen";
 const launchTransitionMs = 520;
 const LOG_PAGE_SIZE = 5;
 const SIDE_DOCK_RIGHT_EXIT_GRACE_MS = 900;
+const VISUAL_JOB_POLL_MS = 2500;
+const RUNTIME_STATUS_POLL_MS = 3000;
 const AGENT_WAITING_BADGE = "흐름 수렴 중";
 const AGENT_WAITING_COPY = {
   initial: [
@@ -47,9 +50,12 @@ const state = {
   logPage: 0,
   baseImagePrompt: "",
   visualAssets: null,
+  runtimeStatus: null,
   worlds: [],
   activeWorldId: "",
   agentPollTimer: null,
+  visualPollTimer: null,
+  runtimePollTimer: null,
   awaitingAgent: false,
   settings: loadSettings(),
   viewMode: loadViewMode(),
@@ -105,6 +111,8 @@ const els = {
   currentTextLog: document.getElementById("currentTextLog"),
   fullTurnMarkdown: document.getElementById("fullTurnMarkdown"),
   monitoringGrid: document.getElementById("monitoringGrid"),
+  runtimeStatusPanel: document.getElementById("runtimeStatusPanel"),
+  runtimeDetails: document.getElementById("runtimeDetails"),
   scanList: document.getElementById("scanList"),
   turnLogList: document.getElementById("turnLogList"),
   logPrevPage: document.getElementById("logPrevPage"),
@@ -125,6 +133,7 @@ const els = {
   settingLoadWorldBundle: document.getElementById("settingLoadWorldBundle"),
   settingWorldStatus: document.getElementById("settingWorldStatus"),
   cgJobPanel: document.getElementById("cgJobPanel"),
+  cgJobStatus: document.getElementById("cgJobStatus"),
   requestTurnCgRetry: document.getElementById("requestTurnCgRetry"),
   viewModeButtons: Array.from(document.querySelectorAll("[data-view-mode]")),
 };
@@ -201,19 +210,8 @@ function renderPacket(packet) {
   els.locationId.textContent = packet.scene.location;
   els.eventId.textContent = packet.scene.current_event;
   els.outcomeBadge.textContent = packet.scene.adjudication?.outcome || packet.mode;
-  state.baseImagePrompt = packet.image.image_prompt;
-  state.visualAssets = packet.visual_assets || null;
-  syncImagePrompt();
-  applyWorldVisuals(packet);
+  applyPacketVisualState(packet);
   els.shell.classList.remove("is-loading", "is-awaiting-agent");
-
-  if (packet.image.existing_image_url) {
-    els.sceneImage.classList.add("has-image");
-    els.sceneImage.style.backgroundImage = `url("${cssUrl(packet.image.existing_image_url)}")`;
-  } else {
-    els.sceneImage.classList.remove("has-image");
-    els.sceneImage.style.backgroundImage = "";
-  }
 
   state.storyLines = buildStoryLines(packet);
   state.visibleLineCount = state.storyLines.length ? 1 : 0;
@@ -229,10 +227,12 @@ function renderPacket(packet) {
     selectCommand(firstChoice.command_template);
   }
   renderCodexSurface(packet);
-  renderCgJobPanel();
   if (state.settings.autoReveal) {
     revealChoices();
   }
+  refreshRuntimeStatus();
+  scheduleRuntimeStatusPoll();
+  startVisualJobPolling();
 }
 
 async function hydrateWorldLauncher() {
@@ -449,7 +449,7 @@ async function requestTurnCgRetry(options = {}) {
   state.busy = true;
   setTurnCgStatus("loading", "요청 중");
   syncTurnCgButton();
-  setWorldOperationStatus("턴 CG 백그라운드 생성 요청 중...");
+  setCgJobStatus("턴 CG 요청 중...");
   try {
     const packet = await fetchJson(cgRetryApiUrl, {
       method: "POST",
@@ -460,9 +460,10 @@ async function requestTurnCgRetry(options = {}) {
     if (openConsole) {
       selectSideTab("console");
     }
-    setWorldOperationStatus("턴 CG 백그라운드 생성 요청됨.");
+    setCgJobStatus("Codex App host 대기 중");
+    startVisualJobPolling();
   } catch (error) {
-    setWorldOperationStatus(`턴 CG 생성 요청 실패: ${error.message}`);
+    setCgJobStatus(`턴 CG 요청 실패: ${error.message}`);
     setTurnCgStatus("error", "요청 실패");
   } finally {
     state.busy = false;
@@ -528,8 +529,48 @@ function setWorldOperationStatus(text) {
   setSettingWorldStatus(text);
 }
 
+function setCgJobStatus(text) {
+  if (els.cgJobStatus) {
+    els.cgJobStatus.textContent = text || "";
+  }
+}
+
 function delay(ms) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function applyPacketVisualState(packet) {
+  state.baseImagePrompt = packet.image?.image_prompt || "";
+  state.visualAssets = packet.visual_assets || null;
+  syncImagePrompt();
+  applyWorldVisuals(packet);
+  applySceneImage(packet);
+  renderCgJobPanel();
+}
+
+function refreshVisualStateFromPacket(packet) {
+  if (
+    !state.packet ||
+    packet.world_id !== state.packet.world_id ||
+    packet.turn_id !== state.packet.turn_id
+  ) {
+    renderPacket(packet);
+    return;
+  }
+  state.packet.image = packet.image;
+  state.packet.visual_assets = packet.visual_assets || null;
+  state.packet.generated_at = packet.generated_at;
+  applyPacketVisualState(state.packet);
+}
+
+function applySceneImage(packet) {
+  if (packet.image?.existing_image_url) {
+    els.sceneImage.classList.add("has-image");
+    els.sceneImage.style.backgroundImage = `url("${cssUrl(packet.image.existing_image_url)}")`;
+  } else {
+    els.sceneImage.classList.remove("has-image");
+    els.sceneImage.style.backgroundImage = "";
+  }
 }
 
 function applyWorldVisuals(packet) {
@@ -967,6 +1008,66 @@ function renderMonitoring(surface, packet) {
   appendKeyValue(els.monitoringGrid, "generated", packet.generated_at);
 }
 
+async function refreshRuntimeStatus() {
+  if (!state.apiAvailable || explicitPacketUrl || !els.runtimeStatusPanel) {
+    return;
+  }
+  try {
+    const status = await fetchJson(runtimeStatusApiUrl);
+    state.runtimeStatus = status;
+    renderRuntimeStatus(status);
+  } catch (error) {
+    renderRuntimeStatus({
+      narrative: { label: "Codex 연결 필요", status: "needs_connection" },
+      visual: { label: "Codex 이미지 연결 필요", status: "needs_connection" },
+      details: { error: error.message },
+    });
+  }
+}
+
+function scheduleRuntimeStatusPoll() {
+  if (state.runtimePollTimer) {
+    window.clearTimeout(state.runtimePollTimer);
+  }
+  if (!state.apiAvailable || explicitPacketUrl) {
+    return;
+  }
+  state.runtimePollTimer = window.setTimeout(async () => {
+    await refreshRuntimeStatus();
+    scheduleRuntimeStatusPoll();
+  }, RUNTIME_STATUS_POLL_MS);
+}
+
+function renderRuntimeStatus(status) {
+  if (!els.runtimeStatusPanel) {
+    return;
+  }
+  els.runtimeStatusPanel.replaceChildren();
+  const narrative = status?.narrative || {};
+  const visual = status?.visual || {};
+  els.runtimeStatusPanel.append(
+    runtimeStatusPill("서사", narrative.label || "Codex 연결 필요", narrative.status),
+    runtimeStatusPill("CG", visual.label || "Codex 이미지 연결 필요", visual.status),
+  );
+  if (els.runtimeDetails) {
+    els.runtimeDetails.textContent = JSON.stringify(status?.details || {}, null, 2);
+  }
+}
+
+function runtimeStatusPill(label, value, status) {
+  const pill = document.createElement("article");
+  pill.className = "runtime-status-pill";
+  if (status) {
+    pill.dataset.status = status;
+  }
+  const key = document.createElement("span");
+  key.textContent = label;
+  const text = document.createElement("strong");
+  text.textContent = value;
+  pill.append(key, text);
+  return pill;
+}
+
 function renderScan(scanTargets) {
   els.scanList.replaceChildren();
   if (!scanTargets.length) {
@@ -1203,34 +1304,36 @@ function renderCgJobPanel() {
     appendEmpty(els.cgJobPanel, "턴 CG 상태 없음.");
     return;
   }
-  const rows = [
-    ["mode", state.settings.cgEnabled ? state.settings.turnCgMode : "off"],
-    ["status", image.exists ? "saved" : image.image_generation_job ? "background pending" : "idle"],
-    ["action", image.auto_decision?.action || "-"],
-    ["refs", String(image.image_generation_job?.reference_paths?.length || 0)],
-    ["decision", image.auto_decision?.reason || "no decision"],
-    ["path", image.recommended_path],
-  ];
-  for (const [label, value] of rows) {
-    const row = document.createElement("div");
-    row.className = "cg-job-row";
-    const key = document.createElement("span");
-    key.textContent = label;
-    const text = document.createElement("strong");
-    text.textContent = value || "-";
-    row.append(key, text);
-    els.cgJobPanel.append(row);
+  const visualJobs = pendingVisualJobs();
+  const savedAssets = savedVisualAssets();
+  els.cgJobPanel.append(
+    visualSummaryRow("현재 턴 CG", turnCgSummaryText(image), image.exists ? "saved" : image.image_generation_job ? "pending" : "idle"),
+    visualSummaryRow("월드 배경", worldBackgroundSummaryText(), missingWorldBackgroundJobs().length ? "pending" : "saved"),
+  );
+  for (const job of visualJobs) {
+    els.cgJobPanel.append(visualJobRow(job));
   }
-  if (image.image_generation_job && turnCgJobsEnabled()) {
+  if (!visualJobs.length && savedAssets.length) {
+    const saved = document.createElement("p");
+    saved.className = "cg-job-note";
+    saved.textContent = `저장된 비주얼: ${savedAssets.map(visualJobLabel).join(", ")}`;
+    els.cgJobPanel.append(saved);
+  }
+  if (!visualJobs.length && !savedAssets.length) {
+    appendEmpty(els.cgJobPanel, "Codex 이미지 host가 아직 연결되지 않았어.");
+  }
+  if (visualJobs.length) {
     const details = document.createElement("details");
     details.className = "raw-markdown";
     const summary = document.createElement("summary");
-    summary.textContent = "background job prompt";
+    summary.textContent = "대기 중인 job 상세";
     const pre = document.createElement("pre");
-    const refs = image.image_generation_job.reference_paths?.length
-      ? `\n\nrefs:\n${image.image_generation_job.reference_paths.join("\n")}`
-      : "";
-    pre.textContent = `${image.image_generation_job.prompt}${refs}\n\n-> ${image.image_generation_job.destination_path}`;
+    pre.textContent = visualJobs
+      .map((job) => {
+        const refs = job.reference_paths?.length ? `\nrefs:\n${job.reference_paths.join("\n")}` : "";
+        return `[${job.slot}] ${job.prompt}${refs}\n-> ${job.destination_path}`;
+      })
+      .join("\n\n");
     details.append(summary, pre);
     els.cgJobPanel.append(details);
   }
@@ -1238,6 +1341,144 @@ function renderCgJobPanel() {
     els.requestTurnCgRetry.disabled = !turnCgJobsEnabled() || image.exists;
   }
   syncTurnCgButton();
+}
+
+function visualSummaryRow(label, value, status) {
+  const row = document.createElement("div");
+  row.className = "cg-job-row cg-job-summary";
+  row.dataset.status = status;
+  const key = document.createElement("span");
+  key.textContent = label;
+  const text = document.createElement("strong");
+  text.textContent = value;
+  row.append(key, text);
+  return row;
+}
+
+function visualJobRow(job) {
+  const row = document.createElement("div");
+  row.className = "cg-job-row";
+  row.dataset.status = "pending";
+  const key = document.createElement("span");
+  key.textContent = "생성 대기";
+  const text = document.createElement("strong");
+  text.textContent = `${visualJobLabel(job.slot)} 준비 중`;
+  row.append(key, text);
+  return row;
+}
+
+function pendingVisualJobs() {
+  if (!state.settings.cgEnabled) {
+    return [];
+  }
+  const jobs = [];
+  const image = state.packet?.image;
+  const worldJobs = state.visualAssets?.image_generation_jobs || [];
+  jobs.push(...worldJobs);
+  if (image?.image_generation_job && turnCgJobsEnabled()) {
+    jobs.push(image.image_generation_job);
+  }
+  return jobs;
+}
+
+function missingWorldBackgroundJobs() {
+  if (!state.settings.cgEnabled) {
+    return [];
+  }
+  return (state.visualAssets?.image_generation_jobs || []).filter((job) =>
+    ["menu_background", "stage_background"].includes(job.slot),
+  );
+}
+
+function savedVisualAssets() {
+  const assets = [];
+  if (state.visualAssets?.menu_background?.exists) {
+    assets.push("menu_background");
+  }
+  if (state.visualAssets?.stage_background?.exists) {
+    assets.push("stage_background");
+  }
+  if (state.packet?.image?.exists) {
+    assets.push("turn_cg");
+  }
+  return assets;
+}
+
+function turnCgSummaryText(image) {
+  if (image.exists) {
+    return "저장됨";
+  }
+  if (image.image_generation_job && turnCgJobsEnabled()) {
+    return "Codex App host 대기";
+  }
+  return "이번 턴은 자동 생성 예산을 쓰지 않음";
+}
+
+function worldBackgroundSummaryText() {
+  if (!state.settings.cgEnabled) {
+    return "CG 생성 꺼짐";
+  }
+  const missing = missingWorldBackgroundJobs().map((job) => visualJobLabel(job.slot));
+  if (missing.length) {
+    return `${missing.join(", ")} 대기`;
+  }
+  return "메뉴/VN 배경 준비됨";
+}
+
+function visualJobLabel(slot) {
+  if (slot === "menu_background") {
+    return "메인 메뉴 배경";
+  }
+  if (slot === "stage_background") {
+    return "VN 배경";
+  }
+  if (slot?.startsWith("turn_cg")) {
+    return "현재 턴 CG";
+  }
+  if (slot?.startsWith("character_sheet")) {
+    return "캐릭터 시트";
+  }
+  if (slot?.startsWith("location_sheet")) {
+    return "장소 시트";
+  }
+  return slot || "visual job";
+}
+
+function startVisualJobPolling() {
+  if (state.visualPollTimer) {
+    window.clearTimeout(state.visualPollTimer);
+  }
+  if (!state.apiAvailable || explicitPacketUrl || !hasPendingVisualJobs()) {
+    return;
+  }
+  pollVisualJobs(0);
+}
+
+function hasPendingVisualJobs() {
+  return pendingVisualJobs().length > 0;
+}
+
+function pollVisualJobs(attempt) {
+  if (state.visualPollTimer) {
+    window.clearTimeout(state.visualPollTimer);
+  }
+  if (!hasPendingVisualJobs() || attempt > 240) {
+    return;
+  }
+  state.visualPollTimer = window.setTimeout(async () => {
+    try {
+      const packet = await fetchJson(currentApiUrl);
+      refreshVisualStateFromPacket(packet);
+      await refreshRuntimeStatus();
+    } catch (error) {
+      setCgJobStatus(`CG 상태 갱신 실패: ${error.message}`);
+    }
+    if (hasPendingVisualJobs()) {
+      pollVisualJobs(attempt + 1);
+    } else {
+      setCgJobStatus("CG 반영 완료");
+    }
+  }, VISUAL_JOB_POLL_MS);
 }
 
 function turnCgJobsEnabled() {
@@ -1266,9 +1507,11 @@ function syncTurnCgButton() {
   if (state.busy) {
     setTurnCgStatus("loading", "요청 중");
   } else if (image?.exists) {
-    setTurnCgStatus("", "");
+    setTurnCgStatus("ready", "저장됨");
   } else if (image?.image_generation_job) {
     setTurnCgStatus("loading", "생성 대기");
+  } else if (missingWorldBackgroundJobs().length) {
+    setTurnCgStatus("loading", "배경 대기");
   } else {
     setTurnCgStatus("", "");
   }

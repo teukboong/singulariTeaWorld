@@ -1,6 +1,6 @@
 use crate::agent_bridge::{
     AgentCommitTurnOptions, AgentSubmitTurnOptions, AgentTurnResponse, PendingAgentTurn,
-    commit_agent_turn, enqueue_agent_turn, load_pending_agent_turn,
+    commit_agent_turn, enqueue_agent_turn, load_codex_thread_binding, load_pending_agent_turn,
 };
 use crate::start::{StartWorldOptions, start_world};
 use crate::store::{
@@ -9,7 +9,10 @@ use crate::store::{
 };
 use crate::transfer::{ExportWorldOptions, ImportWorldOptions, export_world, import_world};
 use crate::turn::{AdvanceTurnOptions, advance_turn};
-use crate::visual_assets::{BuildWorldVisualAssetsOptions, build_world_visual_assets};
+use crate::visual_assets::{
+    BuildWorldVisualAssetsOptions, ImageGenerationJob, build_world_visual_assets,
+    load_visual_job_claim,
+};
 use crate::vn::{BuildVnPacketOptions, build_vn_packet, turn_cg_retry_path};
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
@@ -31,6 +34,7 @@ const MAX_VN_INPUT_CHARS: usize = 2048;
 const AGENT_BRIDGE_ENV: &str = "SINGULARI_WORLD_AGENT_BRIDGE";
 const INITIAL_AGENT_TURN_INPUT: &str = "세계 개막";
 const VN_CHOOSE_RESPONSE_SCHEMA_VERSION: &str = "singulari.vn_choose_response.v1";
+const VN_RUNTIME_STATUS_SCHEMA_VERSION: &str = "singulari.vn_runtime_status.v1";
 
 #[derive(Debug, Clone)]
 pub struct VnServeOptions {
@@ -154,6 +158,43 @@ struct VnAgentStatusResponse {
     turn_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VnRuntimeStatusResponse {
+    schema_version: String,
+    world_id: String,
+    narrative: VnNarrativeRuntimeStatus,
+    visual: VnVisualRuntimeStatus,
+    details: VnRuntimeDetails,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VnNarrativeRuntimeStatus {
+    label: String,
+    status: String,
+    agent_bridge_enabled: bool,
+    pending_turn_id: Option<String>,
+    binding_present: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VnVisualRuntimeStatus {
+    label: String,
+    status: String,
+    pending_slots: Vec<String>,
+    claimed_slots: Vec<String>,
+    completed_slots: Vec<String>,
+    turn_cg_status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VnRuntimeDetails {
+    thread_id: Option<String>,
+    binding_source: Option<String>,
+    binding_updated_at: Option<String>,
+    app_server: Option<serde_json::Value>,
+    latest_dispatch: Option<serde_json::Value>,
+}
+
 #[derive(Debug)]
 struct VnServerState {
     store_root: Option<PathBuf>,
@@ -222,6 +263,7 @@ fn route_request(state: &VnServerState, request: &HttpRequest) -> HttpResponse {
         })),
         ("GET", "/api/vn/worlds") => world_list_response(state),
         ("GET", "/api/vn/visual-assets") => visual_assets_response(state),
+        ("GET", "/api/vn/runtime-status") => runtime_status_response(state),
         ("POST", "/api/vn/worlds/select") => select_world_response(state, &request.body),
         ("POST", "/api/vn/worlds/new") => new_world_response(state, &request.body),
         ("POST", "/api/vn/worlds/save") => save_world_response(state, &request.body),
@@ -261,6 +303,13 @@ fn visual_assets_response(state: &VnServerState) -> HttpResponse {
             Err(error) => return error_response("500 Internal Server Error", error.to_string()),
         },
     }) {
+        Ok(response) => json_response(&response),
+        Err(error) => error_response("500 Internal Server Error", error.to_string()),
+    }
+}
+
+fn runtime_status_response(state: &VnServerState) -> HttpResponse {
+    match runtime_status(state) {
         Ok(response) => json_response(&response),
         Err(error) => error_response("500 Internal Server Error", error.to_string()),
     }
@@ -469,6 +518,210 @@ fn request_turn_cg_retry(
     };
     write_json(&retry_path, &record)?;
     current_packet(state)
+}
+
+fn runtime_status(state: &VnServerState) -> Result<VnRuntimeStatusResponse> {
+    let world_id = state.world_id()?;
+    let binding = load_codex_thread_binding(state.store_root.as_deref(), world_id.as_str())?;
+    let pending = load_pending_agent_turn(state.store_root.as_deref(), world_id.as_str()).ok();
+    let latest_dispatch = latest_app_server_dispatch_record(state, world_id.as_str())?;
+    let app_server = app_server_runtime_record(state)?;
+    let packet = current_packet(state)?;
+    let visual = visual_runtime_status(state, &packet)?;
+    let agent_bridge_enabled = agent_bridge_enabled();
+    let label = narrative_runtime_label(
+        agent_bridge_enabled,
+        pending.as_ref().map(|value| value.turn_id.as_str()),
+        binding.as_ref().map(|value| value.source.as_str()),
+        latest_dispatch.as_ref(),
+    );
+    let narrative_status = match label {
+        "세계 흐름 복원 중" => "pending",
+        "새 서사 맥락 재구성됨" => "rebuilt",
+        "서사 연결됨" => "connected",
+        _ => "needs_connection",
+    };
+    Ok(VnRuntimeStatusResponse {
+        schema_version: VN_RUNTIME_STATUS_SCHEMA_VERSION.to_owned(),
+        world_id,
+        narrative: VnNarrativeRuntimeStatus {
+            label: label.to_owned(),
+            status: narrative_status.to_owned(),
+            agent_bridge_enabled,
+            pending_turn_id: pending.map(|value| value.turn_id),
+            binding_present: binding.is_some(),
+        },
+        visual,
+        details: VnRuntimeDetails {
+            thread_id: binding.as_ref().map(|value| value.thread_id.clone()),
+            binding_source: binding.as_ref().map(|value| value.source.clone()),
+            binding_updated_at: binding.map(|value| value.updated_at),
+            app_server,
+            latest_dispatch,
+        },
+    })
+}
+
+fn narrative_runtime_label(
+    agent_bridge_enabled: bool,
+    pending_turn_id: Option<&str>,
+    binding_source: Option<&str>,
+    latest_dispatch: Option<&serde_json::Value>,
+) -> &'static str {
+    if pending_turn_id.is_some() {
+        return "세계 흐름 복원 중";
+    }
+    if !agent_bridge_enabled {
+        return "서사 연결됨";
+    }
+    if matches!(binding_source, Some("codex_app_server_thread_start")) {
+        return "새 서사 맥락 재구성됨";
+    }
+    if latest_dispatch
+        .and_then(|value| value.get("binding_clear_reason"))
+        .is_some_and(|value| !value.is_null())
+    {
+        return "새 서사 맥락 재구성됨";
+    }
+    if binding_source.is_some() {
+        return "서사 연결됨";
+    }
+    "Codex 연결 필요"
+}
+
+fn visual_runtime_status(
+    state: &VnServerState,
+    packet: &crate::vn::VnPacket,
+) -> Result<VnVisualRuntimeStatus> {
+    let manifest = build_world_visual_assets(&BuildWorldVisualAssetsOptions {
+        store_root: state.store_root.clone(),
+        world_id: packet.world_id.clone(),
+    })?;
+    let mut pending_jobs = manifest.image_generation_jobs.clone();
+    if let Some(job) = packet.image.image_generation_job.clone() {
+        pending_jobs.push(job);
+    }
+    let pending_slots = pending_jobs
+        .iter()
+        .map(|job| job.slot.clone())
+        .collect::<Vec<_>>();
+    let mut claimed_slots = Vec::new();
+    for job in &pending_jobs {
+        if load_visual_job_claim(
+            state.store_root.as_deref(),
+            packet.world_id.as_str(),
+            job.slot.as_str(),
+        )?
+        .is_some()
+        {
+            claimed_slots.push(job.slot.clone());
+        }
+    }
+    let mut completed_slots = Vec::new();
+    if manifest.menu_background.exists {
+        completed_slots.push(manifest.menu_background.slot);
+    }
+    if manifest.stage_background.exists {
+        completed_slots.push(manifest.stage_background.slot);
+    }
+    completed_slots.extend(
+        manifest
+            .visual_entities
+            .into_iter()
+            .filter(|asset| asset.exists)
+            .map(|asset| asset.slot),
+    );
+    let turn_cg_status = if packet.image.exists {
+        "saved"
+    } else if packet.image.image_generation_job.is_some() {
+        "pending"
+    } else {
+        "idle"
+    }
+    .to_owned();
+    let label = visual_runtime_label(&pending_jobs, &claimed_slots, &completed_slots);
+    let status = if !claimed_slots.is_empty() {
+        "claimed"
+    } else if !pending_jobs.is_empty() {
+        "pending"
+    } else {
+        "ready"
+    };
+    Ok(VnVisualRuntimeStatus {
+        label: label.to_owned(),
+        status: status.to_owned(),
+        pending_slots,
+        claimed_slots,
+        completed_slots,
+        turn_cg_status,
+    })
+}
+
+fn visual_runtime_label(
+    pending_jobs: &[ImageGenerationJob],
+    claimed_slots: &[String],
+    completed_slots: &[String],
+) -> &'static str {
+    if !claimed_slots.is_empty() {
+        return "CG 생성 중";
+    }
+    if !pending_jobs.is_empty() {
+        return "CG 생성 대기";
+    }
+    if completed_slots.is_empty() {
+        return "Codex 이미지 연결 필요";
+    }
+    "CG 준비됨"
+}
+
+fn latest_app_server_dispatch_record(
+    state: &VnServerState,
+    world_id: &str,
+) -> Result<Option<serde_json::Value>> {
+    let paths = resolve_store_paths(state.store_root.as_deref())?;
+    let dispatch_dir = paths
+        .worlds_dir
+        .join(world_id)
+        .join("agent_bridge/dispatches");
+    let Ok(entries) = fs::read_dir(dispatch_dir) else {
+        return Ok(None);
+    };
+    let mut records = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(value) = read_json::<serde_json::Value>(&path) else {
+            continue;
+        };
+        if value
+            .get("schema_version")
+            .and_then(serde_json::Value::as_str)
+            != Some("singulari.codex_app_server_dispatch_record.v1")
+        {
+            continue;
+        }
+        let modified = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        records.push((modified, value));
+    }
+    records.sort_by_key(|(modified, _)| *modified);
+    Ok(records.pop().map(|(_, value)| value))
+}
+
+fn app_server_runtime_record(state: &VnServerState) -> Result<Option<serde_json::Value>> {
+    let paths = resolve_store_paths(state.store_root.as_deref())?;
+    let path = paths
+        .root
+        .join("agent_bridge/codex_app_server_runtime.json");
+    if !path.exists() {
+        return Ok(None);
+    }
+    read_json(&path).map(Some)
 }
 
 fn current_packet(state: &VnServerState) -> Result<crate::vn::VnPacket> {
@@ -954,8 +1207,8 @@ mod tests {
     use super::{
         VnCgRetryRequest, VnNewWorldRequest, VnSaveWorldResponse, VnServerState,
         VnWorldSwitchResponse, cg_retry_response, choose_request_body, choose_response,
-        load_request_body, load_world_response, new_world, read_world_asset, save_request_body,
-        save_world_response, validate_vn_input, world_list,
+        load_request_body, load_world_response, new_world, read_world_asset, runtime_status,
+        save_request_body, save_world_response, validate_vn_input, world_list,
     };
     use crate::store::{InitWorldOptions, init_world};
     use crate::transfer::{ExportWorldOptions, export_world};
@@ -1101,6 +1354,55 @@ premise:
         assert_eq!(response.packet.world_id, response.active_world_id);
         assert!(response.worlds.len() >= 2);
         assert_eq!(state.world_id()?, response.active_world_id);
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_status_surfaces_friendly_visual_job_state() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(
+            &seed_path,
+            r#"
+schema_version: singulari.world_seed.v1
+world_id: stw_vn_runtime_status
+title: "런타임 상태 세계"
+premise:
+  genre: "중세 판타지"
+  protagonist: "현대인의 전생, 남자 주인공"
+"#,
+        )?;
+        init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+        let state = VnServerState {
+            store_root: Some(store),
+            world_id: Mutex::new("stw_vn_runtime_status".to_owned()),
+        };
+
+        let status = runtime_status(&state)?;
+
+        assert_eq!(status.schema_version, "singulari.vn_runtime_status.v1");
+        assert_eq!(status.visual.label, "CG 생성 대기");
+        assert!(
+            status
+                .visual
+                .pending_slots
+                .contains(&"menu_background".to_owned())
+        );
+        assert!(
+            status
+                .visual
+                .pending_slots
+                .contains(&"stage_background".to_owned())
+        );
+        assert!(matches!(
+            status.narrative.label.as_str(),
+            "서사 연결됨" | "Codex 연결 필요"
+        ));
         Ok(())
     }
 
