@@ -69,13 +69,27 @@ loopback port, records the runtime URL under the store-root `agent_bridge`
 directory, and stops it when the worker exits. Keep Codex App open while the web
 app is in use. Idle ticks spend zero model tokens.
 
-Prep mode passes `--no-visual-jobs` on purpose. Opening the main menu, creating
-a fresh world, or loading a world with pending menu/stage/turn CG jobs must not
-start image generation by surprise. Image jobs are a separate explicit worker
-mode: `--visual-backend codex-app-server` claims redacted visual jobs, asks
-Codex App for a real `imageGeneration` item, reads its `savedPath`, then
-completes the job into the world store. There is no external provider or local
-placeholder path.
+Prep mode passes `--no-visual-jobs` on purpose. Opening the main menu or
+creating a fresh world must not start image generation through the active Codex
+chat session. Image jobs are a separate host capability contract: Codex App must
+claim a redacted visual job, run its host image generation capability, save the
+PNG to `destination_path`, then complete the job. There is no external provider
+or local placeholder path.
+
+For automatic image completion, run a separate visual worker with a host-owned
+PNG generator command. The command receives `SINGULARI_VISUAL_PROMPT_PATH`,
+`SINGULARI_VISUAL_DESTINATION_PATH`, `SINGULARI_VISUAL_SLOT`, and
+`SINGULARI_VISUAL_CLAIM_ID`; it must write a real PNG to the destination path.
+The worker then validates and completes the claim:
+
+```bash
+target/debug/singulari-world --store-root .world-store host-worker \
+  --text-backend codex-app-server \
+  --claim-visual-jobs \
+  --visual-backend command \
+  --visual-command /path/to/host-image-worker \
+  --interval-ms 750
+```
 
 Each world owns a durable Codex `thread_id` under
 `worlds/<world-id>/agent_bridge/codex_thread_binding.json`. That thread keeps
@@ -123,16 +137,6 @@ cargo run --bin singulari-world -- visual-job-complete \
   --slot "<slot>" \
   --claim-id "<claim-id>" \
   --json
-```
-
-For the packaged runtime, prefer the automatic app-server image path instead of
-manual claim/complete:
-
-```bash
-cargo run --bin singulari-world -- host-worker \
-  --text-backend codex-app-server \
-  --claim-visual-jobs \
-  --visual-backend codex-app-server
 ```
 
 ## Seed Anchor

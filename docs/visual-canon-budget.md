@@ -108,20 +108,14 @@ singulari-world --store-root .world-store host-worker \
   --interval-ms 750
 ```
 
-Image jobs are consumed only by an explicit visual worker:
+Image jobs are consumed only by Codex App's host image capability. The active
+Codex chat/session-level visual generation path is not a valid worker for this
+contract, and a manually generated chat image must not be recorded as a worker
+success.
 
-```bash
-singulari-world --store-root .world-store host-worker \
-  --text-backend codex-app-server \
-  --claim-visual-jobs \
-  --visual-backend codex-app-server \
-  --interval-ms 750
-```
-
-That worker uses Codex App `imageGeneration`, reads the generated item's
-`savedPath`, verifies PNG bytes through completion, and writes the asset into
-the world store. Do not start it automatically on main-menu prep. Manual
-claim/complete remains a fallback contract.
+The current reference CLI does not implement the packaged host-image worker;
+automatic command completion and manual claim/complete are the supported
+fallback contracts.
 
 Worker loop:
 
@@ -134,6 +128,10 @@ Worker loop:
 5. Complete with `visual-job-complete` / `worldsim_complete_visual_job`.
 6. On host failure or cancellation, release with `visual-job-release` /
    `worldsim_release_visual_job` instead of leaving the claim locked.
+
+For automatic CLI completion, `host-worker --visual-backend command
+--visual-command <executable>` performs steps 2, 5, and 6 itself. The executable
+owns step 3 and must write the PNG to `SINGULARI_VISUAL_DESTINATION_PATH`.
 
 Claims live under `visual_jobs/claims/` and are created atomically. Completion
 verifies PNG bytes, records metadata under `visual_jobs/completed/`, removes the

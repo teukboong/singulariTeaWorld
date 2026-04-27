@@ -466,7 +466,7 @@ fn choose_response(state: &VnServerState, body: &[u8]) -> HttpResponse {
     if let Err(error) = validate_vn_input(request.input.as_str()) {
         return error_response("400 Bad Request", error.to_string());
     }
-    if agent_bridge_enabled() {
+    if agent_bridge_enabled(state) {
         return choose_agent_pending_response(state, request.input);
     }
     let turn_options = AdvanceTurnOptions {
@@ -512,11 +512,21 @@ fn vn_agent_pending_response(pending: &PendingAgentTurn) -> VnAgentPendingRespon
     }
 }
 
-fn agent_bridge_enabled() -> bool {
-    std::env::var_os(AGENT_BRIDGE_ENV).is_some_and(|value| {
+fn agent_bridge_enabled(state: &VnServerState) -> bool {
+    if let Some(value) = std::env::var_os(AGENT_BRIDGE_ENV) {
         let value = value.to_string_lossy();
-        matches!(value.as_ref(), "1" | "true" | "TRUE" | "yes" | "on")
-    })
+        return matches!(value.as_ref(), "1" | "true" | "TRUE" | "yes" | "on");
+    }
+    app_server_runtime_record(state)
+        .ok()
+        .flatten()
+        .and_then(|value| {
+            value
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .is_some_and(|status| status == "running")
 }
 
 fn request_turn_cg_retry(
@@ -561,7 +571,7 @@ fn runtime_status(state: &VnServerState) -> Result<VnRuntimeStatusResponse> {
     let app_server = app_server_runtime_record(state)?;
     let packet = current_packet(state)?;
     let visual = visual_runtime_status(state, &packet)?;
-    let agent_bridge_enabled = agent_bridge_enabled();
+    let agent_bridge_enabled = agent_bridge_enabled(state);
     let label = narrative_runtime_label(
         agent_bridge_enabled,
         pending.as_ref().map(|value| value.turn_id.as_str()),
@@ -886,7 +896,7 @@ fn new_world(state: &VnServerState, request: VnNewWorldRequest) -> Result<VnWorl
     })?;
     let world_id = started.initialized.world.world_id;
     state.set_world_id(world_id.as_str())?;
-    let agent_pending = if agent_bridge_enabled() {
+    let agent_pending = if agent_bridge_enabled(state) {
         let pending = enqueue_agent_turn(&AgentSubmitTurnOptions {
             store_root: state.store_root.clone(),
             world_id: world_id.clone(),

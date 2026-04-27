@@ -87,10 +87,9 @@ target/debug/singulari-world --store-root .world-store host-worker \
 
 That worker starts a managed loopback `codex app-server` when no
 `--codex-app-server-url` is provided. In prep mode it consumes pending text
-turns only and deliberately disables visual job handling, so opening the main
-menu or creating a fresh world cannot start image generation by surprise. Keep
-Codex App open while playing; idle worker ticks spend zero model tokens and wait
-for browser-created text work.
+turns only. It must not claim visual jobs or call this Codex chat's visual
+generation session. Keep Codex App open while playing; idle worker ticks spend
+zero model tokens and wait for browser-created text work.
 
 After prep, the only user-facing runtime that still needs to run is the VN app:
 
@@ -191,8 +190,7 @@ run the host worker with the realtime app-server backend:
 ```bash
 singulari-world host-worker \
   --text-backend codex-app-server \
-  --claim-visual-jobs \
-  --visual-backend codex-app-server \
+  --no-visual-jobs \
   --interval-ms 750
 ```
 
@@ -221,28 +219,34 @@ binding and let the next dispatch rebuild from the world store.
 ## Visual Job Worker
 
 Image jobs are host-consumed jobs, not `codex exec` jobs.
-Do not include this mode in the `싱귤러리 월드 준비해줘` prep worker. Start it only
-when the operator explicitly wants Codex App to consume pending visual jobs.
-
-Preferred packaged-app path:
-
-```bash
-singulari-world host-worker \
-  --text-backend codex-app-server \
-  --claim-visual-jobs \
-  --visual-backend codex-app-server \
-  --interval-ms 750
-```
-
-That path uses Codex App app-server `imageGeneration`, reads the generated
-item's `savedPath`, and completes the job into the world store. It must not call
-external providers, local drawing fallbacks, or chat-session image generation.
+Do not include this mode in the `싱귤러리 월드 준비해줘` prep worker. Start visual
+work only when the operator explicitly wants Codex App's host image capability
+to consume pending visual jobs. The Codex chat/session-level `image_gen` path is
+not an acceptable substitute for the packaged host image worker.
 
 Claim one job:
 
 ```bash
 singulari-world visual-job-claim --world-id <world-id> --json
 ```
+
+Automatic completion uses a separate host-owned command backend, not the active
+Codex chat visual session:
+
+```bash
+singulari-world host-worker \
+  --text-backend codex-app-server \
+  --claim-visual-jobs \
+  --visual-backend command \
+  --visual-command /path/to/host-image-worker \
+  --interval-ms 750
+```
+
+The command receives `SINGULARI_VISUAL_PROMPT_PATH`,
+`SINGULARI_VISUAL_DESTINATION_PATH`, `SINGULARI_VISUAL_SLOT`,
+`SINGULARI_VISUAL_CLAIM_ID`, and `SINGULARI_WORLD_ID`. It must write a real PNG
+to `SINGULARI_VISUAL_DESTINATION_PATH`; `host-worker` then validates and
+completes the visual job automatically.
 
 The host should run its image generation capability with:
 

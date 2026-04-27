@@ -62,8 +62,9 @@ Codex App should remain open while the VN browser is used. The worker starts a
 managed loopback `codex app-server` when no `--codex-app-server-url` is passed,
 dispatches pending text turns through that websocket, and commits completed
 text results back into the world store. Prep mode passes `--no-visual-jobs`
-because menu/stage/turn CG jobs can exist before the player has asked for image
-work. When there is no active world or no pending text work, it idles.
+because image work must be consumed by Codex App's host image capability, not by
+the active Codex chat session. When there is no active world or no pending text
+work, it idles.
 
 For a packaged app, Codex App should own this cross-platform background process
 instead of relying on OS-specific schedulers such as launchd or Windows Task
@@ -95,27 +96,20 @@ singulari-world --store-root .world-store agent-watch --world-id <world-id> --on
 
 The command prints newline-delimited JSON events. Codex App can subscribe to
 stdout and route each event to the right internal worker. Visual jobs carry a
-`codex_app_call` object; Codex App should run that host capability, save the PNG
-exactly to `destination_path`, then refresh `worldsim_current` or
-`worldsim_visual_assets`.
+`codex_app_call` object; Codex App's host image worker should run that host
+capability, save the PNG exactly to `destination_path`, then refresh
+`worldsim_current` or `worldsim_visual_assets`.
 
 ```json
 {"event":"agent_turn_pending","world_id":"...","turn_id":"turn_0001","pending_ref":"..."}
 {"event":"visual_job_pending","world_id":"...","slot":"stage_background","tool":"codex_app.image.generate","codex_app_call":{"capability":"image_generation","destination_path":"..."}}
 ```
 
-Image generation is not dispatched through `codex exec`. It is also queue-based:
-the simulator exposes a redacted visual job, then Codex App's agent/host layer
-consumes the job with its image-generation capability and saves the PNG. The
-explicit visual worker does that directly. Do not use this worker for generic
-`싱귤러리 월드 준비해줘` prep:
-
-```bash
-singulari-world --store-root .world-store host-worker \
-  --text-backend codex-app-server \
-  --claim-visual-jobs \
-  --visual-backend codex-app-server
-```
+Image generation is not dispatched through `codex exec` or through the active
+Codex chat's visual session. It is queue-based: the simulator exposes a redacted
+visual job, then Codex App's host layer consumes the job with its image
+generation capability and saves the PNG. Until that packaged host worker exists,
+use the manual claim/complete contract below.
 
 The manual contract remains:
 

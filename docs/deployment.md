@@ -109,24 +109,11 @@ This is what the Codex App agent should start when the operator says
 managed loopback port, records the runtime URL in the store-root `agent_bridge`
 directory, and dispatches only when a pending world turn exists. It can be
 started before any world exists; it idles until the browser creates or loads the
-active world. Prep mode disables visual jobs so main-menu/background image jobs
-do not start unexpectedly. Keep Codex App open while playing. Hosts that already
-own the websocket may pass `--codex-app-server-url`. `codex-exec-resume` remains
-the on-demand CLI backend for hosts that do not run a websocket app-server.
-
-Automatic image jobs through Codex App app-server:
-
-```bash
-singulari-world host-worker \
-  --text-backend codex-app-server \
-  --claim-visual-jobs \
-  --visual-backend codex-app-server \
-  --interval-ms 750
-```
-
-This mode uses Codex App `imageGeneration`, captures the generated item's
-`savedPath`, and completes the job into the active world store. It does not use
-external providers or generated placeholders.
+active world. Prep mode disables visual jobs; image work belongs to Codex App's
+host image capability and must not be faked by the active Codex chat session.
+Keep Codex App open while playing. Hosts that already own the websocket may pass
+`--codex-app-server-url`. `codex-exec-resume` remains the on-demand CLI backend
+for hosts that do not run a websocket app-server.
 
 Manual image jobs:
 
@@ -146,6 +133,22 @@ On image-generation host failure:
 singulari-world visual-job-release --world-id <world-id> --slot <slot> --json
 ```
 
+Automatic image jobs require a host-owned generator executable:
+
+```bash
+singulari-world host-worker \
+  --text-backend codex-app-server \
+  --claim-visual-jobs \
+  --visual-backend command \
+  --visual-command /path/to/host-image-worker \
+  --interval-ms 750
+```
+
+The executable receives `SINGULARI_VISUAL_PROMPT_PATH` and
+`SINGULARI_VISUAL_DESTINATION_PATH`, writes a PNG to the destination, and exits
+successfully. The worker validates the PNG and completes the claim; failures
+release the claim instead of leaving it locked.
+
 ## Current Alpha Boundary
 
 The standalone simulator owns:
@@ -164,3 +167,5 @@ The embedding host still owns:
 - starting/stopping `host-worker`
 - optionally passing `--codex-app-server-url` when it owns app-server itself
 - starting/stopping the VN server
+- consuming visual jobs through a real host image capability, then completing or
+  releasing the claim
