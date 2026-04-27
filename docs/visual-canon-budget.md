@@ -102,7 +102,7 @@ For normal Codex App play, the `싱귤러리 월드 준비해줘` worker consume
 text turns and visual jobs through Codex App app-server:
 
 ```bash
-singulari-world --store-root .world-store host-worker \
+target/release/singulari-world --store-root .world-store host-worker \
   --interval-ms 750
 ```
 

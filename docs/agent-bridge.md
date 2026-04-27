@@ -45,7 +45,7 @@ jobs through Codex App app-server.
 For local Codex App play, the operator phrase `싱귤러리 월드 준비해줘` means:
 
 ```bash
-singulari-world --store-root .world-store host-worker \
+target/release/singulari-world --store-root .world-store host-worker \
   --interval-ms 750
 ```
 
@@ -112,13 +112,13 @@ After the background worker is ready, the browser-facing runtime is just the VN
 server:
 
 ```bash
-singulari-world --store-root .world-store vn-serve --port 4177
+target/release/singulari-world --store-root .world-store vn-serve --port 4177
 ```
 
 For Tailscale phone play, serve the same app on a Tailscale address or hostname:
 
 ```bash
-singulari-world --store-root .world-store vn-serve \
+target/release/singulari-world --store-root .world-store vn-serve \
   --host <tailscale-ip-or-hostname> \
   --port 4177
 ```

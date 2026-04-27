@@ -67,6 +67,35 @@ The simulator binary never calls external image providers, `~/.codex` skills,
 the active chat visual session, shell drawing scripts, SVG placeholders, or
 local provider keys.
 
+## Process Supervision
+
+Use the release binary for long-running play sessions:
+
+```bash
+cargo build --locked --release --bin singulari-world --bin singulari-world-mcp
+
+target/release/singulari-world --store-root .world-store host-worker \
+  --interval-ms 750
+
+target/release/singulari-world --store-root .world-store vn-serve --port 4177
+```
+
+If a macOS host supervises the worker with `launchctl`, do not rely on the
+interactive shell PATH. Pass `--codex-bin /absolute/path/to/codex` and set PATH
+so `/usr/bin/env node` can resolve `node`; the npm Codex launcher depends on
+that lookup. A suitable launchd environment includes the directories containing
+`node`, `codex`, and the system tools:
+
+```text
+PATH=/usr/local/bin:/Users/<user>/.npm/bin:/usr/bin:/bin:/usr/sbin:/sbin
+```
+
+When replacing an old runtime, stop the old `vn-serve`, `host-worker`, and any
+managed `codex app-server --listen ws://127.0.0.1:<port>` child before starting
+the new worker. Stale `dispatching` records are durable by design; if a worker
+dies before writing a terminal dispatch record, remove only that failed
+dispatch record before retrying the same pending turn.
+
 ## Reference CLI
 
 Start a one-shot worker for the active or explicit world:

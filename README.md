@@ -21,11 +21,11 @@ background worker contracts.
 ```bash
 scripts/smoke-local.sh
 
-cargo run --bin singulari-world -- start \
+cargo run --locked --bin singulari-world -- start \
   --seed-text "<world-seed>" \
   --json
 
-cargo run --bin singulari-world -- vn-serve --port 4177
+cargo run --locked --bin singulari-world -- vn-serve --port 4177
 ```
 
 ## Codex App Play Mode
@@ -40,16 +40,16 @@ The intended local play flow is:
 Prep command:
 
 ```bash
-cargo build --locked --bin singulari-world
+cargo build --locked --release --bin singulari-world --bin singulari-world-mcp
 
-target/debug/singulari-world --store-root .world-store host-worker \
+target/release/singulari-world --store-root .world-store host-worker \
   --interval-ms 750
 ```
 
 Then start the VN app:
 
 ```bash
-target/debug/singulari-world --store-root .world-store vn-serve --port 4177
+target/release/singulari-world --store-root .world-store vn-serve --port 4177
 ```
 
 Open:
@@ -89,7 +89,7 @@ For phone play over Tailscale, use the same VN web app, not a separate mobile
 URL:
 
 ```bash
-target/debug/singulari-world --store-root .world-store vn-serve \
+target/release/singulari-world --store-root .world-store vn-serve \
   --host <tailscale-ip-or-hostname> \
   --port 4177
 ```
@@ -100,7 +100,7 @@ use `0.0.0.0` as a shortcut.
 The MCP server runs over stdio:
 
 ```bash
-cargo run --bin singulari-world-mcp
+cargo run --locked --bin singulari-world-mcp
 ```
 
 Install it into Codex:

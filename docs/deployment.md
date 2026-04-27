@@ -97,7 +97,7 @@ The browser writes durable pending jobs. It does not call an LLM directly.
 Codex App prep flow:
 
 ```bash
-singulari-world host-worker \
+target/release/singulari-world --store-root .world-store host-worker \
   --interval-ms 750
 ```
 
@@ -110,6 +110,10 @@ loads the active world. Visual jobs close through the same app-server loop:
 claim -> Codex App `imageGeneration` -> saved PNG -> completion metadata.
 Keep Codex App open while playing. Hosts that already own the websocket may pass
 `--codex-app-server-url`.
+
+For macOS `launchctl` supervision, use absolute paths. If `codex` comes from npm,
+the launcher uses `/usr/bin/env node`; set PATH in the LaunchAgent so `node` is
+visible, or managed app-server startup will fail before listening.
 
 Automatic image jobs go through the installed `singulari-world-mcp` server.
 `worldsim_claim_visual_job` returns structured content containing

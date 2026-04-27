@@ -77,9 +77,9 @@ background runtime, not a one-off chat turn.
 From this repository, build the binary and start one long-running worker:
 
 ```bash
-cargo build --locked --bin singulari-world
+cargo build --locked --release --bin singulari-world --bin singulari-world-mcp
 
-target/debug/singulari-world --store-root .world-store host-worker \
+target/release/singulari-world --store-root .world-store host-worker \
   --interval-ms 750
 ```
 
@@ -93,7 +93,7 @@ worker ticks spend zero model tokens and wait for browser-created work.
 After prep, the only user-facing runtime that still needs to run is the VN app:
 
 ```bash
-target/debug/singulari-world --store-root .world-store vn-serve --port 4177
+target/release/singulari-world --store-root .world-store vn-serve --port 4177
 ```
 
 Open:
@@ -106,7 +106,7 @@ For phone play over Tailscale, use the same web app and pass only a Tailscale
 address or hostname:
 
 ```bash
-target/debug/singulari-world --store-root .world-store vn-serve \
+target/release/singulari-world --store-root .world-store vn-serve \
   --host <tailscale-ip-or-hostname> \
   --port 4177
 ```
@@ -201,6 +201,11 @@ rebinding does not require restarting the worker.
 When no active world exists, `host-worker` waits instead of failing, so the app
 can start it before the user creates or loads a world.
 
+If the host starts `host-worker` through `launchctl`, pass a full `--codex-bin`
+path and include a PATH that can resolve `node`. The npm Codex launcher uses
+`#!/usr/bin/env node`, so a minimal launchd PATH can fail even when the same
+command works in an interactive shell.
+
 `world_id -> thread_id` is the durable realtime context contract. The websocket
 URL is replaceable runtime plumbing; the saved thread is the world's narrative
 working context. Codex may compact that thread normally, so every dispatched
@@ -260,6 +265,11 @@ singulari-world import-world --bundle <bundle-dir> --activate --json
 singulari-world validate --world-id <world-id> --json
 singulari-world repair-db --world-id <world-id> --json
 ```
+
+Older local worlds created before initial VN render packets existed may validate
+but fail `vn-packet` with a missing `sessions/<session>/render_packets/turn_0000.json`.
+For those worlds, add the initial waiting render packet from the current seed
+contract or recreate the world from seed, then run `repair-db`.
 
 ## Public Alpha Status
 
