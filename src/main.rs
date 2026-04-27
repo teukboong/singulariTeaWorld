@@ -458,14 +458,6 @@ enum Commands {
         /// Node.js binary used only by the codex-app-server backend helper.
         #[arg(long, env = "SINGULARI_WORLD_NODE_BIN")]
         node_bin: Option<PathBuf>,
-
-        /// Host-owned image generator executable. Used only with `--visual-backend command`.
-        #[arg(long, env = "SINGULARI_WORLD_VISUAL_COMMAND")]
-        visual_command: Option<PathBuf>,
-
-        /// Extra argument passed to `--visual-command`; repeat for multiple args.
-        #[arg(long, env = "SINGULARI_WORLD_VISUAL_COMMAND_ARG")]
-        visual_command_arg: Vec<String>,
     },
 
     /// Bind a world to the Codex thread that should receive realtime turns.
@@ -556,8 +548,6 @@ enum HostVisualBackend {
     Manual,
     /// Reserved packaged-host path. The reference CLI fails closed.
     CodexAppServer,
-    /// Host-owned executable writes a PNG to the claimed destination path.
-    Command,
 }
 
 impl HostVisualBackend {
@@ -565,7 +555,6 @@ impl HostVisualBackend {
         match self {
             Self::Manual => "manual",
             Self::CodexAppServer => "codex-app-server",
-            Self::Command => "command",
         }
     }
 }
@@ -832,8 +821,6 @@ fn dispatch(cli: Cli) -> Result<()> {
             codex_bin,
             codex_app_server_url,
             node_bin,
-            visual_command,
-            visual_command_arg,
         } => handle_host_worker(
             store_root.as_deref(),
             world_id.as_deref(),
@@ -849,8 +836,6 @@ fn dispatch(cli: Cli) -> Result<()> {
                 codex_bin,
                 codex_app_server_url,
                 node_bin,
-                visual_command,
-                visual_command_args: visual_command_arg,
             },
         )?,
         Commands::CodexThreadBind {
@@ -1675,8 +1660,6 @@ struct HostWorkerOptions {
     codex_bin: Option<PathBuf>,
     codex_app_server_url: Option<String>,
     node_bin: Option<PathBuf>,
-    visual_command: Option<PathBuf>,
-    visual_command_args: Vec<String>,
 }
 
 #[allow(
@@ -1791,8 +1774,6 @@ fn handle_host_worker(
                 options.visual_backend,
                 options.visual_job_scope,
                 app_server_dispatch.as_ref(),
-                options.visual_command.as_deref(),
-                options.visual_command_args.as_slice(),
                 &mut emitted,
             )?
         {
@@ -2080,8 +2061,6 @@ fn emit_host_visual_job_events(
     visual_backend: HostVisualBackend,
     visual_job_scope: HostVisualJobScope,
     app_server_dispatch: Option<&CodexAppServerDispatch>,
-    visual_command: Option<&Path>,
-    visual_command_args: &[String],
     emitted: &mut HashSet<String>,
 ) -> Result<bool> {
     let _app_server_dispatch = app_server_dispatch;
@@ -2118,68 +2097,6 @@ fn emit_host_visual_job_events(
                         "reason": "codex app-server imageGeneration is not available through this worker path; use Codex App host capability or manual claim/complete",
                         "consumer": HOST_WORKER_CONSUMER,
                     }))?;
-                    return Ok(true);
-                }
-                if visual_backend == HostVisualBackend::Command {
-                    let Some(command) = visual_command else {
-                        let release = release_visual_job_claim(&ReleaseVisualJobClaimOptions {
-                            store_root: store_root.map(Path::to_path_buf),
-                            world_id: claim.world_id.clone(),
-                            slot: claim.slot.clone(),
-                        })?;
-                        emit_host_event(&serde_json::json!({
-                            "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
-                            "event": "visual_command_missing",
-                            "world_id": claim.world_id.as_str(),
-                            "slot": claim.slot.as_str(),
-                            "claim_id": claim.claim_id.as_str(),
-                            "status": "released",
-                            "released_at": release.released_at,
-                            "reason": "visual backend command requires --visual-command or SINGULARI_WORLD_VISUAL_COMMAND",
-                            "consumer": HOST_WORKER_CONSUMER,
-                        }))?;
-                        return Ok(true);
-                    };
-                    match dispatch_visual_job_via_command(
-                        store_root,
-                        claim.as_ref(),
-                        command,
-                        visual_command_args,
-                    ) {
-                        Ok(record) => {
-                            emit_host_event(&serde_json::json!({
-                                "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
-                                "event": "visual_command_completed",
-                                "world_id": record.world_id,
-                                "slot": record.slot,
-                                "claim_id": record.claim_id,
-                                "status": record.status,
-                                "destination_path": record.destination_path,
-                                "completion_path": record.completion_path,
-                                "record_path": record.record_path,
-                                "consumer": HOST_WORKER_CONSUMER,
-                            }))?;
-                        }
-                        Err(error) => {
-                            let release =
-                                release_visual_job_claim(&ReleaseVisualJobClaimOptions {
-                                    store_root: store_root.map(Path::to_path_buf),
-                                    world_id: claim.world_id.clone(),
-                                    slot: claim.slot.clone(),
-                                })?;
-                            emit_host_event(&serde_json::json!({
-                                "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
-                                "event": "visual_command_failed",
-                                "world_id": claim.world_id.as_str(),
-                                "slot": claim.slot.as_str(),
-                                "claim_id": claim.claim_id.as_str(),
-                                "status": "released",
-                                "released_at": release.released_at,
-                                "error": error.to_string(),
-                                "consumer": HOST_WORKER_CONSUMER,
-                            }))?;
-                        }
-                    }
                     return Ok(true);
                 }
                 let complete_command_hint = format!(
@@ -2296,150 +2213,6 @@ fn dedupe_visual_jobs_by_slot(jobs: Vec<ImageGenerationJob>) -> Vec<ImageGenerat
         }
     }
     deduped
-}
-
-fn dispatch_visual_job_via_command(
-    store_root: Option<&Path>,
-    claim: &singulari_world::VisualJobClaim,
-    command: &Path,
-    args: &[String],
-) -> Result<VisualCommandDispatchRecord> {
-    let dispatch_dir = visual_dispatch_dir_for_world(store_root, claim.world_id.as_str())?;
-    fs::create_dir_all(&dispatch_dir)
-        .with_context(|| format!("failed to create {}", dispatch_dir.display()))?;
-    let slot_component = safe_file_component(claim.slot.as_str());
-    let claim_component = safe_file_component(claim.claim_id.as_str());
-    let record_path = dispatch_dir.join(format!(
-        "{slot_component}-{claim_component}-visual-command.json"
-    ));
-    let prompt_path = dispatch_dir.join(format!(
-        "{slot_component}-{claim_component}-visual-prompt.md"
-    ));
-    let stdout_path = dispatch_dir.join(format!(
-        "{slot_component}-{claim_component}-visual-stdout.log"
-    ));
-    let stderr_path = dispatch_dir.join(format!(
-        "{slot_component}-{claim_component}-visual-stderr.log"
-    ));
-    fs::write(&prompt_path, claim.job.prompt.as_bytes())
-        .with_context(|| format!("failed to write {}", prompt_path.display()))?;
-    let dispatched_at = Utc::now().to_rfc3339();
-    let claim_record = serde_json::json!({
-        "schema_version": "singulari.visual_command_dispatch_record.v1",
-        "status": "dispatching",
-        "world_id": claim.world_id.as_str(),
-        "slot": claim.slot.as_str(),
-        "claim_id": claim.claim_id.as_str(),
-        "command": command.display().to_string(),
-        "args": args,
-        "prompt_path": prompt_path.display().to_string(),
-        "stdout_path": stdout_path.display().to_string(),
-        "stderr_path": stderr_path.display().to_string(),
-        "destination_path": claim.job.destination_path.as_str(),
-        "dispatched_at": dispatched_at.as_str(),
-    });
-    if !write_dispatch_claim(record_path.as_path(), &claim_record)? {
-        anyhow::bail!(
-            "visual command dispatch already exists: record_path={}",
-            record_path.display()
-        );
-    }
-
-    let stdout = File::create(&stdout_path)
-        .with_context(|| format!("failed to create {}", stdout_path.display()))?;
-    let stderr = File::create(&stderr_path)
-        .with_context(|| format!("failed to create {}", stderr_path.display()))?;
-    let destination = PathBuf::from(claim.job.destination_path.as_str());
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    let reference_paths = claim.job.reference_paths.join("\n");
-    let exit_status = Command::new(command)
-        .args(args)
-        .env("SINGULARI_WORLD_ID", claim.world_id.as_str())
-        .env("SINGULARI_VISUAL_SLOT", claim.slot.as_str())
-        .env("SINGULARI_VISUAL_CLAIM_ID", claim.claim_id.as_str())
-        .env("SINGULARI_VISUAL_PROMPT", claim.job.prompt.as_str())
-        .env("SINGULARI_VISUAL_PROMPT_PATH", prompt_path.as_os_str())
-        .env(
-            "SINGULARI_VISUAL_DESTINATION_PATH",
-            claim.job.destination_path.as_str(),
-        )
-        .env("SINGULARI_VISUAL_REFERENCE_PATHS", reference_paths)
-        .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr))
-        .status()
-        .with_context(|| {
-            format!(
-                "failed to spawn visual command: command={}",
-                command.display()
-            )
-        })?;
-    let mut completion_path = None;
-    let mut error = if exit_status.success() {
-        None
-    } else {
-        Some(format!("visual command exited with status {exit_status}"))
-    };
-
-    if error.is_none() {
-        match complete_visual_job(&CompleteVisualJobOptions {
-            store_root: store_root.map(Path::to_path_buf),
-            world_id: claim.world_id.clone(),
-            slot: claim.slot.clone(),
-            claim_id: Some(claim.claim_id.clone()),
-            generated_path: None,
-        }) {
-            Ok(completion) => {
-                completion_path = Some(completion.completion_path);
-            }
-            Err(complete_error) => {
-                error = Some(complete_error.to_string());
-            }
-        }
-    }
-
-    let status = if error.is_none() {
-        "completed"
-    } else {
-        "failed"
-    }
-    .to_owned();
-    let record = VisualCommandDispatchRecord {
-        schema_version: "singulari.visual_command_dispatch_record.v1",
-        status,
-        world_id: claim.world_id.clone(),
-        slot: claim.slot.clone(),
-        claim_id: claim.claim_id.clone(),
-        command: command.display().to_string(),
-        args: args.to_vec(),
-        record_path: record_path.display().to_string(),
-        prompt_path: prompt_path.display().to_string(),
-        stdout_path: stdout_path.display().to_string(),
-        stderr_path: stderr_path.display().to_string(),
-        destination_path: claim.job.destination_path.clone(),
-        completion_path,
-        dispatched_at,
-        exit_code: exit_status.code(),
-        error,
-        completed_at: Utc::now().to_rfc3339(),
-    };
-    fs::write(&record_path, serde_json::to_vec_pretty(&record)?)
-        .with_context(|| format!("failed to update {}", record_path.display()))?;
-    if let Some(error) = &record.error {
-        anyhow::bail!("{error}");
-    }
-    Ok(record)
-}
-
-fn visual_dispatch_dir_for_world(store_root: Option<&Path>, world_id: &str) -> Result<PathBuf> {
-    let paths = resolve_store_paths(store_root)?;
-    Ok(paths
-        .worlds_dir
-        .join(world_id)
-        .join("visual_jobs")
-        .join("dispatches"))
 }
 
 fn emit_host_event(event: &serde_json::Value) -> Result<()> {
@@ -2977,27 +2750,6 @@ struct CodexAppServerDispatchRecord {
     exit_code: Option<i32>,
     binding_clear_reason: Option<&'static str>,
     binding_cleared_at: Option<String>,
-    completed_at: String,
-}
-
-#[derive(Debug, Serialize)]
-struct VisualCommandDispatchRecord {
-    schema_version: &'static str,
-    status: String,
-    world_id: String,
-    slot: String,
-    claim_id: String,
-    command: String,
-    args: Vec<String>,
-    record_path: String,
-    prompt_path: String,
-    stdout_path: String,
-    stderr_path: String,
-    destination_path: String,
-    completion_path: Option<String>,
-    dispatched_at: String,
-    exit_code: Option<i32>,
-    error: Option<String>,
     completed_at: String,
 }
 
@@ -3661,9 +3413,6 @@ fn handle_resume_pack(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
-
-    const MINIMAL_PNG: &[u8] = b"\x89PNG\r\n\x1a\nminimal-test-png";
 
     fn app_server_dispatch(thread_id: Option<&str>) -> CodexAppServerDispatch {
         CodexAppServerDispatch {
@@ -3720,64 +3469,5 @@ mod tests {
             app_server_stale_thread_binding_reason(Some(&result), &app_server_dispatch(None)),
             None
         );
-    }
-
-    #[test]
-    fn visual_command_backend_completes_claimed_png() -> anyhow::Result<()> {
-        let temp = tempdir()?;
-        let store = temp.path().join("store");
-        let seed_path = temp.path().join("seed.yaml");
-        std::fs::write(
-            &seed_path,
-            r#"
-schema_version: singulari.world_seed.v1
-world_id: stw_visual_command
-title: "커맨드 이미지"
-premise:
-  genre: "검은 탑 판타지"
-  protagonist: "현대인의 전생, 남자 주인공"
-"#,
-        )?;
-        init_world(&InitWorldOptions {
-            seed_path,
-            store_root: Some(store.clone()),
-            session_id: None,
-        })?;
-        let claimed = claim_visual_job(&ClaimVisualJobOptions {
-            store_root: Some(store.clone()),
-            world_id: "stw_visual_command".to_owned(),
-            slot: Some("menu_background".to_owned()),
-            claimed_by: "test-command-worker".to_owned(),
-            force: false,
-            extra_jobs: Vec::new(),
-        })?;
-        let singulari_world::VisualJobClaimOutcome::Claimed { claim } = claimed else {
-            anyhow::bail!("menu background should be claimable");
-        };
-        let source = temp.path().join("source.png");
-        std::fs::write(&source, MINIMAL_PNG)?;
-        let script = temp.path().join("copy-png.sh");
-        std::fs::write(
-            &script,
-            "#!/bin/sh\nset -eu\ncp \"$1\" \"$SINGULARI_VISUAL_DESTINATION_PATH\"\n",
-        )?;
-        let record = dispatch_visual_job_via_command(
-            Some(store.as_path()),
-            claim.as_ref(),
-            Path::new("/bin/sh"),
-            &[script.display().to_string(), source.display().to_string()],
-        )?;
-        assert_eq!(record.status, "completed");
-        assert!(record.completion_path.is_some());
-        assert!(PathBuf::from(record.destination_path).is_file());
-        assert!(
-            load_visual_job_claim(
-                Some(store.as_path()),
-                "stw_visual_command",
-                "menu_background"
-            )?
-            .is_none()
-        );
-        Ok(())
     }
 }

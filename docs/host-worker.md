@@ -222,12 +222,6 @@ Claimed image job requiring host generation:
 {"event":"codex_app_image_generate_required","world_id":"stw_example","slot":"stage_background","claim_id":"..."}
 ```
 
-Command backend completed image job:
-
-```json
-{"event":"visual_command_completed","world_id":"stw_example","slot":"stage_background","status":"completed"}
-```
-
 Unsupported reference CLI app-server image backend:
 
 ```json
