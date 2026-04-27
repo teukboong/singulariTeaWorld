@@ -1,8 +1,7 @@
 use crate::models::{
     CodexView, DashboardSummary, EntityRecords, FREEFORM_CHOICE_SLOT, INITIAL_TURN_ID,
-    PROTAGONIST_CHARACTER_ID, RENDER_PACKET_SCHEMA_VERSION, RenderPacket, ScanTarget, TurnChoice,
-    TurnLogEntry, TurnSnapshot, VisibleState, WorldRecord, default_turn_choices,
-    normalize_turn_choices,
+    PROTAGONIST_CHARACTER_ID, RenderPacket, ScanTarget, TurnChoice, TurnLogEntry, TurnSnapshot,
+    WorldRecord, normalize_turn_choices,
 };
 use crate::render::{RenderPacketLoadOptions, load_render_packet, render_packet_markdown};
 use crate::store::{TURN_LOG_FILENAME, load_world_record, resolve_store_paths, world_file_paths};
@@ -194,9 +193,6 @@ pub fn build_vn_packet(options: &BuildVnPacketOptions) -> Result<VnPacket> {
         store_root: options.store_root.clone(),
         world_id: options.world_id.clone(),
         turn_id: options.turn_id.clone(),
-    })
-    .or_else(|error| {
-        initial_render_packet_if_missing(&world, &files, options.turn_id.as_deref(), error)
     })?;
     let entities: EntityRecords = crate::store::read_json(&files.entities)?;
     let place_record = entities
@@ -409,9 +405,7 @@ fn budgeted_turn_cg_decision(
             "visual budget mode가 eager라 서사 턴마다 CG 후보를 만든다.",
         );
     }
-    // Keep MSRV at Rust 1.88 while newer Clippy prefers `is_multiple_of`.
-    #[allow(unknown_lints, clippy::manual_is_multiple_of)]
-    if turn_index > 0 && turn_index % cadence == 0 {
+    if turn_index > 0 && is_turn_on_cadence(turn_index, cadence) {
         return turn_cg_decision(
             "visual_budget_policy",
             "generate_scene",
@@ -538,64 +532,6 @@ fn latest_existing_turn_cg_url(
         world_id,
         &format!("turn_{latest_turn_index:04}"),
     ))
-}
-
-fn initial_render_packet_if_missing(
-    world: &WorldRecord,
-    files: &crate::store::WorldFilePaths,
-    requested_turn_id: Option<&str>,
-    error: anyhow::Error,
-) -> Result<RenderPacket> {
-    let snapshot: TurnSnapshot = crate::store::read_json(&files.latest_snapshot)?;
-    if requested_turn_id.is_some() || snapshot.turn_id != crate::models::INITIAL_TURN_ID {
-        return Err(error);
-    }
-    Ok(initial_render_packet(world, &snapshot))
-}
-
-fn initial_render_packet(world: &WorldRecord, snapshot: &TurnSnapshot) -> RenderPacket {
-    let opening_place = inferred_opening_place(world);
-    RenderPacket {
-        schema_version: RENDER_PACKET_SCHEMA_VERSION.to_owned(),
-        world_id: world.world_id.clone(),
-        turn_id: snapshot.turn_id.clone(),
-        mode: "normal".to_owned(),
-        narrative_contract: "initial VN projection synthesized before the first persisted turn"
-            .to_owned(),
-        narrative_scene: Some(crate::models::NarrativeScene {
-            schema_version: crate::models::NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
-            speaker: None,
-            text_blocks: vec![
-                format!(
-                    "{}에서 세계가 조용히 열린다. 아직 사건은 이름을 얻지 못했지만, 첫 장면의 공기는 이미 방향을 잡고 있다.",
-                    opening_place
-                ),
-                "주인공은 아직 이름을 밝히지 않았다. 다만 몸과 정신이 낯설 만큼 또렷하다는 사실만은 분명하게 감각한다."
-                    .to_owned(),
-                "다음 선택이 이 세계의 첫 사건을 화면 앞으로 끌어낸다.".to_owned(),
-            ],
-            tone_notes: vec!["initial visible opening".to_owned()],
-        }),
-        visible_state: VisibleState {
-            dashboard: DashboardSummary {
-                phase: snapshot.phase.clone(),
-                location: snapshot.protagonist_state.location.clone(),
-                anchor_invariant: world.anchor_character.invariant.clone(),
-                current_event: snapshot
-                    .current_event
-                    .as_ref()
-                    .map_or_else(|| "interlude".to_owned(), |event| event.event_id.clone()),
-                status: "새 세계가 열렸다. 첫 사건은 아직 장면 뒤에서 숨을 고른다.".to_owned(),
-            },
-            scan_targets: Vec::new(),
-            choices: default_turn_choices(),
-        },
-        adjudication: None,
-        codex_view: None,
-        canon_delta_refs: Vec::new(),
-        forbidden_reveals: Vec::new(),
-        style_notes: vec!["initial_vn_projection".to_owned()],
-    }
 }
 
 fn vn_codex_surface(
@@ -1191,12 +1127,16 @@ fn concise_player_visible_value(value: &str) -> bool {
     chars <= 24 && !value.contains('(') && !value.contains("주인공 (")
 }
 
-fn list_or(values: &[String], fallback: &str) -> String {
+fn list_or(values: &[String], empty_text: &str) -> String {
     if values.is_empty() {
-        fallback.to_owned()
+        empty_text.to_owned()
     } else {
         values.join(" / ")
     }
+}
+
+fn is_turn_on_cadence(turn_index: u32, cadence: u32) -> bool {
+    turn_index == (turn_index / cadence) * cadence
 }
 
 fn recent_turn_log(
@@ -1235,17 +1175,16 @@ fn prepend_initial_turn_log_if_missing(
     if entries.iter().any(|entry| entry.turn_id == INITIAL_TURN_ID) {
         return Ok(());
     }
-    let snapshot_path = files
+    let render_packet_path = files
         .dir
         .join("sessions")
         .join(session_id)
-        .join("snapshots")
+        .join("render_packets")
         .join(format!("{INITIAL_TURN_ID}.json"));
-    if !snapshot_path.exists() {
+    if !render_packet_path.exists() {
         return Ok(());
     }
-    let snapshot: TurnSnapshot = crate::store::read_json(&snapshot_path)?;
-    let packet = initial_render_packet(world, &snapshot);
+    let packet: RenderPacket = crate::store::read_json(&render_packet_path)?;
     entries.insert(
         0,
         VnTurnLogSummary {
@@ -1254,7 +1193,7 @@ fn prepend_initial_turn_log_if_missing(
             input_kind: "world_start".to_owned(),
             selected_choice: None,
             canon_event_id: "world_init".to_owned(),
-            render_packet_ref: snapshot_path.display().to_string(),
+            render_packet_ref: render_packet_path.display().to_string(),
             render_markdown: Some(render_packet_markdown(&packet)),
             created_at: world.created_at.clone(),
         },

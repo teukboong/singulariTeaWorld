@@ -703,7 +703,9 @@ fn world_style_profile(world: &WorldRecord) -> WorldVisualStyleProfile {
             "consistent visual novel key art for {}, grounded in {}",
             world.title, world.premise.genre
         ),
-        palette_prompt: "world-specific palette extracted from accepted backgrounds when available; neutral monochrome fallback before assets exist".to_owned(),
+        palette_prompt:
+            "world-specific palette extracted from accepted backgrounds when available; restrained neutral palette before assets exist"
+                .to_owned(),
         camera_language:
             "cinematic 3/4 compositions, readable silhouettes, stable character proportions"
                 .to_owned(),
@@ -1013,9 +1015,9 @@ fn leaks_internal_anchor_or_hidden_text<'a>(parts: impl IntoIterator<Item = &'a 
     })
 }
 
-fn list_or(values: &[String], fallback: &str) -> String {
+fn list_or(values: &[String], empty_text: &str) -> String {
     if values.is_empty() {
-        fallback.to_owned()
+        empty_text.to_owned()
     } else {
         values.join(" / ")
     }

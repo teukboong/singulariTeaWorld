@@ -43,7 +43,6 @@ pub struct SaveCodexThreadBindingOptions {
     pub store_root: Option<PathBuf>,
     pub world_id: String,
     pub thread_id: String,
-    pub codex_bin: Option<String>,
     pub source: String,
 }
 
@@ -52,8 +51,6 @@ pub struct CodexThreadBinding {
     pub schema_version: String,
     pub world_id: String,
     pub thread_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub codex_bin: Option<String>,
     pub source: String,
     pub updated_at: String,
 }
@@ -270,9 +267,6 @@ pub fn save_codex_thread_binding(
 ) -> Result<CodexThreadBinding> {
     ensure_human_safe_field("thread_id", options.thread_id.as_str())?;
     ensure_human_safe_field("source", options.source.as_str())?;
-    if let Some(codex_bin) = &options.codex_bin {
-        ensure_human_safe_field("codex_bin", codex_bin.as_str())?;
-    }
     let store_paths = resolve_store_paths(options.store_root.as_deref())?;
     let files = world_file_paths(&store_paths, options.world_id.as_str());
     if !files.world.exists() {
@@ -286,11 +280,6 @@ pub fn save_codex_thread_binding(
         schema_version: CODEX_THREAD_BINDING_SCHEMA_VERSION.to_owned(),
         world_id: options.world_id.clone(),
         thread_id: options.thread_id.trim().to_owned(),
-        codex_bin: options
-            .codex_bin
-            .as_ref()
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty()),
         source: options.source.trim().to_owned(),
         updated_at: Utc::now().to_rfc3339(),
     };
@@ -712,9 +701,6 @@ fn validate_codex_thread_binding(
     }
     ensure_human_safe_field("thread_id", binding.thread_id.as_str())?;
     ensure_human_safe_field("source", binding.source.as_str())?;
-    if let Some(codex_bin) = &binding.codex_bin {
-        ensure_human_safe_field("codex_bin", codex_bin.as_str())?;
-    }
     Ok(())
 }
 
@@ -824,7 +810,6 @@ premise:
             store_root: Some(store.clone()),
             world_id: "stw_codex_bind".to_owned(),
             thread_id: "codex-thread-test-001".to_owned(),
-            codex_bin: Some("/usr/local/bin/codex".to_owned()),
             source: "test".to_owned(),
         })?;
         assert_eq!(binding.world_id, "stw_codex_bind");
@@ -835,7 +820,6 @@ premise:
             anyhow::bail!("binding should be present after save");
         };
         assert_eq!(loaded.thread_id, binding.thread_id);
-        assert_eq!(loaded.codex_bin.as_deref(), Some("/usr/local/bin/codex"));
 
         let Some(cleared) = clear_codex_thread_binding(Some(store.as_path()), "stw_codex_bind")?
         else {

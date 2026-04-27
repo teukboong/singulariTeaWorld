@@ -3,7 +3,7 @@ use crate::models::{
     DEFAULT_CHOICE_COUNT, ENTITY_RECORDS_SCHEMA_VERSION, EntityRecords, FREEFORM_CHOICE_SLOT,
     FREEFORM_CHOICE_TAG, HIDDEN_STATE_SCHEMA_VERSION, HiddenState, PLAYER_KNOWLEDGE_SCHEMA_VERSION,
     PlayerKnowledge, SINGULARI_WORLD_SCHEMA_VERSION, TURN_SNAPSHOT_SCHEMA_VERSION, TurnSnapshot,
-    WorldRecord, normalize_turn_choices,
+    WorldRecord,
 };
 use crate::store::{read_json, resolve_store_paths, world_file_paths};
 use crate::world_db::validate_world_db;
@@ -144,7 +144,7 @@ pub fn validate_world(store_root: Option<&Path>, world_id: &str) -> Result<Valid
             &mut errors,
         );
         check_world_id("latest_snapshot", &snapshot.world_id, world_id, &mut errors);
-        validate_snapshot_choices(snapshot, &mut errors, &mut warnings);
+        validate_snapshot_choices(snapshot, &mut errors);
     }
     if let Some(entities) = &entities {
         validate_canon_events(world_id, &canon_events, entities, &mut errors);
@@ -362,31 +362,22 @@ fn validate_canon_events(
     }
 }
 
-fn validate_snapshot_choices(
-    snapshot: &TurnSnapshot,
-    errors: &mut Vec<String>,
-    warnings: &mut Vec<String>,
-) {
-    let normalized_choices = normalize_turn_choices(&snapshot.last_choices);
-    if normalized_choices.len() != DEFAULT_CHOICE_COUNT {
-        errors.push(format!(
-            "latest_snapshot must expose exactly {DEFAULT_CHOICE_COUNT} choices after normalization, got {}",
-            normalized_choices.len()
-        ));
-    }
+fn validate_snapshot_choices(snapshot: &TurnSnapshot, errors: &mut Vec<String>) {
     if snapshot.last_choices.len() != DEFAULT_CHOICE_COUNT {
-        warnings.push(format!(
-            "latest_snapshot has legacy choice count {}; runtime normalizes to {DEFAULT_CHOICE_COUNT}",
+        errors.push(format!(
+            "latest_snapshot must expose exactly {DEFAULT_CHOICE_COUNT} choices, got {}",
             snapshot.last_choices.len()
         ));
     }
-    if !normalized_choices
+    if !snapshot
+        .last_choices
         .iter()
         .any(|choice| choice.slot == 4 && choice.tag == "안내자의 선택")
     {
         errors.push("latest_snapshot missing slot 4 안내자의 선택".to_owned());
     }
-    if !normalized_choices
+    if !snapshot
+        .last_choices
         .iter()
         .any(|choice| choice.slot == FREEFORM_CHOICE_SLOT && choice.tag == FREEFORM_CHOICE_TAG)
     {

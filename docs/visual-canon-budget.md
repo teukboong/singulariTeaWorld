@@ -103,7 +103,6 @@ text turns and visual jobs through Codex App app-server:
 
 ```bash
 singulari-world --store-root .world-store host-worker \
-  --text-backend codex-app-server \
   --interval-ms 750
 ```
 

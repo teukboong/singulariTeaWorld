@@ -43,8 +43,7 @@ Prep command:
 cargo build --locked --bin singulari-world
 
 target/debug/singulari-world --store-root .world-store host-worker \
-  --interval-ms 750 \
-  --text-backend codex-app-server
+  --interval-ms 750
 ```
 
 Then start the VN app:
@@ -60,8 +59,7 @@ http://127.0.0.1:4177/
 ```
 
 `host-worker` is the cross-platform process an embedding app should start
-before the VN app needs agent-authored turns. Its primary realtime text backend
-is `codex-app-server`, which talks to the official Codex app-server websocket
+before the VN app needs agent-authored turns. It talks to the official Codex app-server websocket
 and starts a model turn only when a pending world turn exists. If no
 `--codex-app-server-url` is provided, the worker starts `codex app-server` on a
 loopback port, records the runtime URL under the store-root `agent_bridge`

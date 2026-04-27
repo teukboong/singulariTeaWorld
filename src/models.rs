@@ -130,13 +130,13 @@ impl Default for AnchorCharacter {
 impl AnchorCharacter {
     #[must_use]
     pub fn normalized(mut self) -> Self {
-        fill_if_empty(&mut self.invariant, ANCHOR_CHARACTER_INVARIANT);
-        fill_if_empty(&mut self.display_role, "핵심 인물");
-        fill_if_empty(
+        apply_default_when_empty(&mut self.invariant, ANCHOR_CHARACTER_INVARIANT);
+        apply_default_when_empty(&mut self.display_role, "핵심 인물");
+        apply_default_when_empty(
             &mut self.relationship_to_world,
             "시드가 정한 핵심 서사 인물",
         );
-        fill_if_empty(
+        apply_default_when_empty(
             &mut self.relationship_to_guide,
             "seed-defined fiction-local anchor",
         );
@@ -998,9 +998,9 @@ fn initial_anchor_character(world: &WorldRecord) -> CharacterRecord {
     }
 }
 
-fn fill_if_empty(value: &mut String, fallback: &str) {
+fn apply_default_when_empty(value: &mut String, default_value: &str) {
     if value.trim().is_empty() {
-        fallback.clone_into(value);
+        default_value.clone_into(value);
     }
 }
 

@@ -1,6 +1,8 @@
 use crate::models::{
-    ANCHOR_CHARACTER_INVARIANT, CanonEvent, EntityRecords, HiddenState, PlayerKnowledge,
-    TurnSnapshot, WorldRecord, WorldSeed, initial_canon_event,
+    ANCHOR_CHARACTER_INVARIANT, CanonEvent, DashboardSummary, EntityRecords, HiddenState,
+    NARRATIVE_SCENE_SCHEMA_VERSION, NarrativeScene, PlayerKnowledge, RENDER_PACKET_SCHEMA_VERSION,
+    RenderPacket, TurnSnapshot, VisibleState, WorldRecord, WorldSeed, default_turn_choices,
+    initial_canon_event,
 };
 use crate::world_db::initialize_world_db;
 use crate::world_docs::refresh_world_docs;
@@ -96,11 +98,14 @@ pub(crate) fn init_world_from_seed(
     validate_safe_id("session_id", session_id.as_str())?;
     let active_session_dir = all_sessions_dir.join(&session_id);
     let snapshot_dir = active_session_dir.join("snapshots");
+    let render_packet_dir = active_session_dir.join("render_packets");
 
     fs::create_dir_all(world_dir.join("timelines"))
         .with_context(|| format!("failed to create {}", world_dir.join("timelines").display()))?;
     fs::create_dir_all(&snapshot_dir)
         .with_context(|| format!("failed to create {}", snapshot_dir.display()))?;
+    fs::create_dir_all(&render_packet_dir)
+        .with_context(|| format!("failed to create {}", render_packet_dir.display()))?;
     write_json(&world_dir.join(WORLD_FILENAME), &world)?;
     fs::write(world_dir.join(LAWS_FILENAME), render_laws(&world)).with_context(|| {
         format!(
@@ -128,8 +133,13 @@ pub(crate) fn init_world_from_seed(
 
     let snapshot = TurnSnapshot::initial(&world, session_id.clone());
     let snapshot_path = snapshot_dir.join("turn_0000.json");
+    let render_packet_path = render_packet_dir.join("turn_0000.json");
     write_json(&snapshot_path, &snapshot)?;
     write_json(&world_dir.join(LATEST_SNAPSHOT_FILENAME), &snapshot)?;
+    write_json(
+        &render_packet_path,
+        &initial_render_packet_for_waiting_turn(&world, &snapshot),
+    )?;
     initialize_world_db(
         &world_dir,
         &world,
@@ -152,6 +162,41 @@ pub(crate) fn init_world_from_seed(
         session_id,
         snapshot_path,
     })
+}
+
+fn initial_render_packet_for_waiting_turn(
+    world: &WorldRecord,
+    snapshot: &TurnSnapshot,
+) -> RenderPacket {
+    RenderPacket {
+        schema_version: RENDER_PACKET_SCHEMA_VERSION.to_owned(),
+        world_id: world.world_id.clone(),
+        turn_id: snapshot.turn_id.clone(),
+        mode: "normal".to_owned(),
+        narrative_contract: "initial VN packet waits for the first agent-authored turn".to_owned(),
+        narrative_scene: Some(NarrativeScene {
+            schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
+            speaker: None,
+            text_blocks: vec!["첫 서사 턴을 생성하는 중이다. Codex App host-worker가 세계 시작 입력을 받아 장면을 확정한다.".to_owned()],
+            tone_notes: vec!["initial_turn_generation_pending".to_owned()],
+        }),
+        visible_state: VisibleState {
+            dashboard: DashboardSummary {
+                phase: snapshot.phase.clone(),
+                location: snapshot.protagonist_state.location.clone(),
+                anchor_invariant: world.anchor_character.invariant.clone(),
+                current_event: "interlude".to_owned(),
+                status: "첫 서사 턴 생성 대기".to_owned(),
+            },
+            scan_targets: Vec::new(),
+            choices: default_turn_choices(),
+        },
+        adjudication: None,
+        codex_view: None,
+        canon_delta_refs: Vec::new(),
+        forbidden_reveals: Vec::new(),
+        style_notes: vec!["initial_turn_generation_pending".to_owned()],
+    }
 }
 
 /// Resolve the simulator store paths.

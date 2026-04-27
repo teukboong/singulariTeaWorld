@@ -1,5 +1,4 @@
 const explicitPacketUrl = new URLSearchParams(window.location.search).get("packet");
-const fallbackPacketUrl = explicitPacketUrl || "current-vn.json";
 const currentApiUrl = "/api/vn/current";
 const chooseApiUrl = "/api/vn/choose";
 const agentPendingApiUrl = "/api/vn/agent/pending";
@@ -194,16 +193,12 @@ async function init() {
 }
 
 async function loadInitialPacket() {
-  if (!explicitPacketUrl) {
-    try {
-      const packet = await fetchJson(currentApiUrl);
-      state.apiAvailable = true;
-      return packet;
-    } catch (_) {
-      state.apiAvailable = false;
-    }
+  if (explicitPacketUrl) {
+    return fetchJson(explicitPacketUrl);
   }
-  return fetchJson(fallbackPacketUrl);
+  const packet = await fetchJson(currentApiUrl);
+  state.apiAvailable = true;
+  return packet;
 }
 
 function renderPacket(packet) {
@@ -263,8 +258,8 @@ async function hydrateAgentPendingState() {
     if (status.status === "waiting_agent") {
       handleWaitingAgentTurn(status, { initial: state.packet?.turn_id === "turn_0000" });
     }
-  } catch (_) {
-    // Pending state is advisory for hydration; the current packet remains usable.
+  } catch (error) {
+    console.warn(`agent pending hydration failed: ${error.message}`);
   }
 }
 
@@ -783,7 +778,8 @@ function rgbaString(color, alpha) {
 function hasLaunchSeen() {
   try {
     return sessionStorage.getItem(launchSeenKey) === "1";
-  } catch (_) {
+  } catch (error) {
+    console.warn(`launch session read failed: ${error.message}`);
     return false;
   }
 }
@@ -791,8 +787,8 @@ function hasLaunchSeen() {
 function markLaunchSeen() {
   try {
     sessionStorage.setItem(launchSeenKey, "1");
-  } catch (_) {
-    // sessionStorage can be unavailable in locked-down preview contexts.
+  } catch (error) {
+    console.warn(`launch session write failed: ${error.message}`);
   }
 }
 
@@ -1651,7 +1647,8 @@ function loadSettings() {
     const loaded = JSON.parse(localStorage.getItem("singulari.vn.settings") || "{}");
     delete loaded.defaultView;
     return { ...DEFAULT_SETTINGS, ...loaded };
-  } catch (_) {
+  } catch (error) {
+    console.warn(`VN settings load failed: ${error.message}`);
     return { ...DEFAULT_SETTINGS };
   }
 }
@@ -1659,8 +1656,8 @@ function loadSettings() {
 function saveSettings() {
   try {
     localStorage.setItem("singulari.vn.settings", JSON.stringify(state.settings));
-  } catch (_) {
-    // Ignore settings persistence failures in locked-down preview contexts.
+  } catch (error) {
+    console.warn(`VN settings save failed: ${error.message}`);
   }
 }
 
@@ -1842,8 +1839,10 @@ function pollCommittedAgentTurn(turnId, attempt) {
           els.outcomeBadge.textContent = packet.scene.adjudication?.outcome || packet.mode;
           return;
         }
-      } catch (_) {
-        showTransientLine(`세계의 흐름을 다시 읽지 못했어: ${error.message}`);
+      } catch (refreshError) {
+        showTransientLine(
+          `세계의 흐름을 다시 읽지 못했어: pending=${error.message}; current=${refreshError.message}`,
+        );
       }
     }
     if (attempt < 120) {
@@ -1860,7 +1859,7 @@ function selectCommand(command) {
 function renderLoadError(error) {
   els.worldTitle.textContent = "Singulari World VN";
   els.turnId.textContent = "no packet";
-  els.locationId.textContent = fallbackPacketUrl;
+  els.locationId.textContent = explicitPacketUrl || currentApiUrl;
   els.eventId.textContent = "load_error";
   els.outcomeBadge.textContent = "missing";
   state.storyLines = [`VN packet을 읽지 못했어: ${error.message}`];
@@ -1868,7 +1867,7 @@ function renderLoadError(error) {
   state.choicesRevealed = false;
   renderStoryProgress();
   els.commandOutput.value =
-    "singulari-world vn-packet --world-id <world_id> --output worldsim/crates/singulari-world/vn-web/current-vn.json";
+    "singulari-world vn-serve --world-id <world_id> --port 4177";
 }
 
 async function fetchJson(url, options = {}) {
@@ -1958,7 +1957,9 @@ function copyText(value) {
     return;
   }
   if (navigator.clipboard?.writeText) {
-    navigator.clipboard.writeText(value).catch(() => {});
+    navigator.clipboard
+      .writeText(value)
+      .catch((error) => console.warn(`clipboard write failed: ${error.message}`));
   }
 }
 

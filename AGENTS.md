@@ -80,7 +80,6 @@ From this repository, build the binary and start one long-running worker:
 cargo build --locked --bin singulari-world
 
 target/debug/singulari-world --store-root .world-store host-worker \
-  --text-backend codex-app-server \
   --interval-ms 750
 ```
 
@@ -188,19 +187,15 @@ run the host worker with the realtime app-server backend:
 
 ```bash
 singulari-world host-worker \
-  --text-backend codex-app-server \
   --interval-ms 750
 ```
 
-`host-worker` is the app-facing supervisor. Its primary realtime backend is
-`codex-app-server`; it uses the official Codex app-server websocket and spends
-zero model tokens while idle. If no explicit websocket URL is provided, it
+`host-worker` is the app-facing supervisor. It uses the official Codex
+app-server websocket and spends zero model tokens while idle. If no explicit
+websocket URL is provided, it
 starts a managed loopback `codex app-server`, records the runtime URL in the
 store-root `agent_bridge` directory, and stops the child when the worker exits.
-`codex-app-poller` is a legacy event-only contract that emits a poller action
-event, and `codex-exec-resume` is the on-demand CLI backend for hosts without an
-app-server websocket. `host-session-api` is only a deprecated compatibility
-alias. `host-worker` reads
+`host-worker` reads
 `worlds/<world-id>/agent_bridge/codex_thread_binding.json` on every tick, so
 rebinding does not require restarting the worker.
 When no active world exists, `host-worker` waits instead of failing, so the app

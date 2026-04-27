@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use serde::Serialize;
 use singulari_world::{
     ACTIVE_WORLD_FILENAME, AdvanceTurnOptions, AgentCommitTurnOptions, AgentSubmitTurnOptions,
@@ -405,14 +405,11 @@ enum Commands {
         #[arg(long)]
         once: bool,
 
-        #[arg(long, value_enum, default_value = "codex-app-server")]
-        text_backend: HostTextBackend,
-
-        /// Thread used by Codex text backends that resume a durable thread.
+        /// Existing Codex App thread used for realtime world turns.
         #[arg(long, env = "SINGULARI_WORLD_CODEX_THREAD_ID")]
         codex_thread_id: Option<String>,
 
-        /// Codex CLI path used by codex-exec-resume and managed app-server spawn.
+        /// Codex CLI path used by managed app-server spawn.
         #[arg(long, env = "SINGULARI_WORLD_CODEX_BIN")]
         codex_bin: Option<PathBuf>,
 
@@ -432,9 +429,6 @@ enum Commands {
 
         #[arg(long, env = "CODEX_THREAD_ID")]
         thread_id: Option<String>,
-
-        #[arg(long, env = "SINGULARI_WORLD_CODEX_BIN")]
-        codex_bin: Option<PathBuf>,
 
         #[arg(long)]
         json: bool,
@@ -481,30 +475,6 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum HostTextBackend {
-    /// Main Codex App path. The reference CLI emits a poller action event.
-    #[value(name = "codex-app-poller", alias = "host-session-api")]
-    CodexAppPoller,
-    /// Official websocket app-server path. Idle costs zero model tokens.
-    CodexAppServer,
-    /// Reference on-demand path using `codex exec resume <thread-id> -`.
-    CodexExecResume,
-    /// Development path. Emit pending turn hints without dispatching.
-    Manual,
-}
-
-impl HostTextBackend {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::CodexAppPoller => "codex-app-poller",
-            Self::CodexAppServer => "codex-app-server",
-            Self::CodexExecResume => "codex-exec-resume",
-            Self::Manual => "manual",
-        }
-    }
 }
 
 fn main() -> Result<()> {
@@ -727,7 +697,6 @@ fn dispatch(cli: Cli) -> Result<()> {
             world_id,
             interval_ms,
             once,
-            text_backend,
             codex_thread_id,
             codex_bin,
             codex_app_server_url,
@@ -738,7 +707,6 @@ fn dispatch(cli: Cli) -> Result<()> {
             &HostWorkerOptions {
                 interval_ms,
                 once,
-                text_backend,
                 codex_thread_id,
                 codex_bin,
                 codex_app_server_url,
@@ -748,15 +716,8 @@ fn dispatch(cli: Cli) -> Result<()> {
         Commands::CodexThreadBind {
             world_id,
             thread_id,
-            codex_bin,
             json,
-        } => handle_codex_thread_bind(
-            store_root.as_deref(),
-            world_id.as_deref(),
-            thread_id,
-            codex_bin,
-            json,
-        )?,
+        } => handle_codex_thread_bind(store_root.as_deref(), world_id.as_deref(), thread_id, json)?,
         Commands::CodexThreadShow { world_id, json } => {
             handle_codex_thread_show(store_root.as_deref(), world_id.as_deref(), json)?;
         }
@@ -1420,7 +1381,6 @@ fn handle_codex_thread_bind(
     store_root: Option<&Path>,
     world_id: Option<&str>,
     thread_id: Option<String>,
-    codex_bin: Option<PathBuf>,
     json: bool,
 ) -> Result<()> {
     let world_id = resolve_world_id(store_root, world_id)?;
@@ -1433,7 +1393,6 @@ fn handle_codex_thread_bind(
         store_root: store_root.map(Path::to_path_buf),
         world_id,
         thread_id,
-        codex_bin: codex_bin.map(|path| path.display().to_string()),
         source: "codex_thread_bind_cli".to_owned(),
     })?;
     if json {
@@ -1441,9 +1400,6 @@ fn handle_codex_thread_bind(
     } else {
         println!("world: {}", binding.world_id);
         println!("thread: {}", binding.thread_id);
-        if let Some(codex_bin) = &binding.codex_bin {
-            println!("codex_bin: {codex_bin}");
-        }
         println!("updated_at: {}", binding.updated_at);
     }
     Ok(())
@@ -1468,9 +1424,6 @@ fn handle_codex_thread_show(
     } else if let Some(binding) = binding {
         println!("world: {}", binding.world_id);
         println!("thread: {}", binding.thread_id);
-        if let Some(codex_bin) = &binding.codex_bin {
-            println!("codex_bin: {codex_bin}");
-        }
         println!("source: {}", binding.source);
         println!("updated_at: {}", binding.updated_at);
     } else {
@@ -1513,7 +1466,6 @@ const CODEX_APP_SERVER_IMAGE_HELPER: &str = include_str!("codex_app_server_image
 struct HostWorkerOptions {
     interval_ms: u64,
     once: bool,
-    text_backend: HostTextBackend,
     codex_thread_id: Option<String>,
     codex_bin: Option<PathBuf>,
     codex_app_server_url: Option<String>,
@@ -1531,10 +1483,6 @@ fn handle_host_worker(
 ) -> Result<()> {
     let interval = Duration::from_millis(options.interval_ms.max(250));
     let mut emitted = HashSet::new();
-    let mut exec_dispatch_config = CodexExecDispatchConfig::from_cli(
-        options.codex_thread_id.clone(),
-        options.codex_bin.clone(),
-    );
     let mut app_server_dispatch_config = CodexAppServerDispatchConfig::from_cli(
         options.codex_app_server_url.clone(),
         options.codex_thread_id.clone(),
@@ -1546,7 +1494,7 @@ fn handle_host_worker(
         "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
         "event": "worker_started",
         "world_id": initial_world_id.as_deref(),
-        "text_backend": options.text_backend.as_str(),
+        "text_backend": "codex-app-server",
         "visual_backend": "codex-app-server",
         "visual_jobs": "claim_and_generate",
         "consumer": HOST_WORKER_CONSUMER,
@@ -1559,7 +1507,7 @@ fn handle_host_worker(
                     "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
                     "event": "worker_waiting_for_active_world",
                     "world_id": null,
-                    "text_backend": options.text_backend.as_str(),
+                    "text_backend": "codex-app-server",
                     "visual_backend": "codex-app-server",
                     "consumer": HOST_WORKER_CONSUMER,
                 }))?;
@@ -1569,7 +1517,7 @@ fn handle_host_worker(
                     "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
                     "event": "worker_idle",
                     "world_id": null,
-                    "text_backend": options.text_backend.as_str(),
+                    "text_backend": "codex-app-server",
                     "visual_backend": "codex-app-server",
                     "consumer": HOST_WORKER_CONSUMER,
                 }))?;
@@ -1578,11 +1526,6 @@ fn handle_host_worker(
             thread::sleep(interval);
             continue;
         };
-        let exec_dispatch = if options.text_backend == HostTextBackend::CodexExecResume {
-            exec_dispatch_config.resolve(store_root, world_id.as_str())?
-        } else {
-            None
-        };
         let app_server_dispatch = app_server_dispatch_config
             .resolve(store_root, world_id.as_str())?
             .context("host-worker requires Codex App app-server dispatch")?;
@@ -1590,10 +1533,8 @@ fn handle_host_worker(
         if emit_host_pending_agent_turn_event(
             store_root,
             world_id.as_str(),
-            options.text_backend,
             &mut emitted,
-            exec_dispatch.as_ref(),
-            Some(&app_server_dispatch),
+            &app_server_dispatch,
         )? {
             emitted_this_tick = true;
         }
@@ -1610,7 +1551,7 @@ fn handle_host_worker(
                     "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
                     "event": "worker_idle",
                     "world_id": world_id,
-                    "text_backend": options.text_backend.as_str(),
+                    "text_backend": "codex-app-server",
                     "visual_backend": "codex-app-server",
                     "consumer": HOST_WORKER_CONSUMER,
                 }))?;
@@ -1637,216 +1578,75 @@ fn resolve_host_worker_world_id(
     Ok(Some(load_active_world(store_root)?.world_id))
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "Host worker backend fan-out stays colocated so each JSONL event contract is visible at the CLI boundary"
-)]
 fn emit_host_pending_agent_turn_event(
     store_root: Option<&Path>,
     world_id: &str,
-    text_backend: HostTextBackend,
     emitted: &mut HashSet<String>,
-    exec_dispatch: Option<&CodexExecDispatch>,
-    app_server_dispatch: Option<&CodexAppServerDispatch>,
+    dispatch: &CodexAppServerDispatch,
 ) -> Result<bool> {
     let Ok(pending) = load_pending_agent_turn(store_root, world_id) else {
         return Ok(false);
     };
-    match text_backend {
-        HostTextBackend::CodexAppPoller => {
-            let event_key = format!("codex-app-poller:{}:{}", pending.world_id, pending.turn_id);
+    match dispatch_pending_agent_turn_via_app_server(store_root, &pending, dispatch)? {
+        AppServerDispatchOutcome::Started(record) => {
+            let event_key = format!(
+                "codex-app-server-started:{}:{}:{}",
+                pending.world_id,
+                pending.turn_id,
+                record.thread_id.as_deref().unwrap_or("new-thread")
+            );
             if !emitted.insert(event_key) {
                 return Ok(false);
             }
             emit_host_event(&serde_json::json!({
                 "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
-                "event": "codex_app_poller_turn_required",
+                "event": "codex_app_server_dispatch_started",
                 "world_id": pending.world_id,
                 "turn_id": pending.turn_id,
-                "player_input": pending.player_input,
-                "pending_ref": pending.pending_ref,
-                "consumer_contract": "codex_app_thread_poller",
-                "official_host_api": false,
-                "status": "poller_action_required",
-                "action": "read pending_ref, author AgentTurnResponse in the active Codex App chat session, then commit the turn",
-                "command_hint": format!("singulari-world agent-next --world-id {} --json", world_id),
+                "thread_id": record.thread_id,
+                "turn_status": record.status,
+                "app_server_url": dispatch.app_server_url.as_str(),
+                "app_server_managed": dispatch.app_server_managed,
+                "app_server_runtime_path": dispatch
+                    .app_server_runtime_path
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
+                "pid": record.pid,
+                "record_path": record.record_path,
+                "prompt_path": record.prompt_path,
+                "result_path": record.result_path,
+                "stdout_path": record.stdout_path,
+                "stderr_path": record.stderr_path,
                 "consumer": HOST_WORKER_CONSUMER,
             }))?;
             Ok(true)
         }
-        HostTextBackend::Manual => {
-            let event_key = format!("manual:{}:{}", pending.world_id, pending.turn_id);
+        AppServerDispatchOutcome::AlreadyDispatched(record_path) => {
+            let event_key = format!(
+                "codex-app-server-skipped:{}:{}:{}",
+                pending.world_id,
+                pending.turn_id,
+                dispatch.thread_id.as_deref().unwrap_or("new-thread")
+            );
             if !emitted.insert(event_key) {
                 return Ok(false);
             }
             emit_host_event(&serde_json::json!({
                 "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
-                "event": "manual_agent_turn_required",
+                "event": "codex_app_server_dispatch_skipped",
+                "reason": "already_dispatched",
                 "world_id": pending.world_id,
                 "turn_id": pending.turn_id,
-                "player_input": pending.player_input,
-                "pending_ref": pending.pending_ref,
-                "command_hint": format!("singulari-world agent-next --world-id {} --json", world_id),
+                "thread_id": dispatch.thread_id.as_deref(),
+                "app_server_managed": dispatch.app_server_managed,
+                "app_server_runtime_path": dispatch
+                    .app_server_runtime_path
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
+                "record_path": record_path,
                 "consumer": HOST_WORKER_CONSUMER,
             }))?;
             Ok(true)
-        }
-        HostTextBackend::CodexExecResume => {
-            let Some(dispatch) = exec_dispatch else {
-                let event_key = format!(
-                    "codex-exec-blocked:{}:{}",
-                    pending.world_id, pending.turn_id
-                );
-                if !emitted.insert(event_key) {
-                    return Ok(false);
-                }
-                emit_host_event(&serde_json::json!({
-                    "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
-                    "event": "codex_exec_dispatch_blocked",
-                    "reason": "missing_codex_thread_binding",
-                    "world_id": pending.world_id,
-                    "turn_id": pending.turn_id,
-                    "pending_ref": pending.pending_ref,
-                    "bind_command_hint": format!(
-                        "singulari-world codex-thread-bind --world-id {} --thread-id <codex-thread-id> --codex-bin <codex>",
-                        world_id
-                    ),
-                    "consumer": HOST_WORKER_CONSUMER,
-                }))?;
-                return Ok(true);
-            };
-            match dispatch_pending_agent_turn(store_root, &pending, dispatch)? {
-                DispatchOutcome::Started(record) => {
-                    let event_key = format!(
-                        "codex-exec-started:{}:{}:{}",
-                        pending.world_id, pending.turn_id, dispatch.thread_id
-                    );
-                    if !emitted.insert(event_key) {
-                        return Ok(false);
-                    }
-                    emit_host_event(&serde_json::json!({
-                        "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
-                        "event": "codex_exec_dispatch_started",
-                        "world_id": pending.world_id,
-                        "turn_id": pending.turn_id,
-                        "thread_id": dispatch.thread_id.as_str(),
-                        "binding_source": dispatch.binding_source.as_str(),
-                        "binding_updated_at": dispatch.binding_updated_at.as_str(),
-                        "pid": record.pid,
-                        "record_path": record.record_path,
-                        "prompt_path": record.prompt_path,
-                        "stdout_path": record.stdout_path,
-                        "stderr_path": record.stderr_path,
-                        "consumer": HOST_WORKER_CONSUMER,
-                    }))?;
-                    Ok(true)
-                }
-                DispatchOutcome::AlreadyDispatched(record_path) => {
-                    let event_key = format!(
-                        "codex-exec-skipped:{}:{}:{}",
-                        pending.world_id, pending.turn_id, dispatch.thread_id
-                    );
-                    if !emitted.insert(event_key) {
-                        return Ok(false);
-                    }
-                    emit_host_event(&serde_json::json!({
-                        "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
-                        "event": "codex_exec_dispatch_skipped",
-                        "reason": "already_dispatched",
-                        "world_id": pending.world_id,
-                        "turn_id": pending.turn_id,
-                        "thread_id": dispatch.thread_id.as_str(),
-                        "record_path": record_path,
-                        "consumer": HOST_WORKER_CONSUMER,
-                    }))?;
-                    Ok(true)
-                }
-            }
-        }
-        HostTextBackend::CodexAppServer => {
-            let Some(dispatch) = app_server_dispatch else {
-                let event_key = format!(
-                    "codex-app-server-blocked:{}:{}",
-                    pending.world_id, pending.turn_id
-                );
-                if !emitted.insert(event_key) {
-                    return Ok(false);
-                }
-                emit_host_event(&serde_json::json!({
-                    "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
-                    "event": "codex_app_server_dispatch_blocked",
-                    "reason": "missing_codex_app_server_url",
-                    "world_id": pending.world_id,
-                    "turn_id": pending.turn_id,
-                    "pending_ref": pending.pending_ref,
-                    "start_command_hint": "codex app-server --listen ws://127.0.0.1:<port>",
-                    "env_hint": "SINGULARI_WORLD_CODEX_APP_SERVER_URL=ws://127.0.0.1:<port>",
-                    "consumer": HOST_WORKER_CONSUMER,
-                }))?;
-                return Ok(true);
-            };
-            match dispatch_pending_agent_turn_via_app_server(store_root, &pending, dispatch)? {
-                AppServerDispatchOutcome::Started(record) => {
-                    let event_key = format!(
-                        "codex-app-server-started:{}:{}:{}",
-                        pending.world_id,
-                        pending.turn_id,
-                        record.thread_id.as_deref().unwrap_or("new-thread")
-                    );
-                    if !emitted.insert(event_key) {
-                        return Ok(false);
-                    }
-                    emit_host_event(&serde_json::json!({
-                        "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
-                        "event": "codex_app_server_dispatch_started",
-                        "world_id": pending.world_id,
-                        "turn_id": pending.turn_id,
-                        "thread_id": record.thread_id,
-                        "turn_status": record.status,
-                        "app_server_url": dispatch.app_server_url.as_str(),
-                        "app_server_managed": dispatch.app_server_managed,
-                        "app_server_runtime_path": dispatch
-                            .app_server_runtime_path
-                            .as_ref()
-                            .map(|path| path.display().to_string()),
-                        "pid": record.pid,
-                        "record_path": record.record_path,
-                        "prompt_path": record.prompt_path,
-                        "result_path": record.result_path,
-                        "stdout_path": record.stdout_path,
-                        "stderr_path": record.stderr_path,
-                        "consumer": HOST_WORKER_CONSUMER,
-                    }))?;
-                    Ok(true)
-                }
-                AppServerDispatchOutcome::AlreadyDispatched(record_path) => {
-                    let event_key = format!(
-                        "codex-app-server-skipped:{}:{}:{}",
-                        pending.world_id,
-                        pending.turn_id,
-                        dispatch.thread_id.as_deref().unwrap_or("new-thread")
-                    );
-                    if !emitted.insert(event_key) {
-                        return Ok(false);
-                    }
-                    emit_host_event(&serde_json::json!({
-                        "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
-                        "event": "codex_app_server_dispatch_skipped",
-                        "reason": "already_dispatched",
-                        "world_id": pending.world_id,
-                        "turn_id": pending.turn_id,
-                        "thread_id": dispatch.thread_id.as_deref(),
-                        "app_server_managed": dispatch.app_server_managed,
-                        "app_server_runtime_path": dispatch
-                            .app_server_runtime_path
-                            .as_ref()
-                            .map(|path| path.display().to_string()),
-                        "record_path": record_path,
-                        "consumer": HOST_WORKER_CONSUMER,
-                    }))?;
-                    Ok(true)
-                }
-            }
         }
     }
 }
@@ -1942,72 +1742,6 @@ fn emit_host_event(event: &serde_json::Value) -> Result<()> {
 }
 
 #[derive(Debug, Clone)]
-struct CodexExecDispatch {
-    thread_id: String,
-    codex_bin: PathBuf,
-    binding_source: String,
-    binding_updated_at: String,
-}
-
-#[derive(Debug, Clone)]
-struct CodexExecDispatchConfig {
-    cli_thread_id: Option<String>,
-    codex_bin: Option<PathBuf>,
-    bound_worlds: HashSet<String>,
-}
-
-impl CodexExecDispatchConfig {
-    fn from_cli(thread_id: Option<String>, codex_bin: Option<PathBuf>) -> Self {
-        Self {
-            cli_thread_id: thread_id.filter(|value| !value.trim().is_empty()),
-            codex_bin,
-            bound_worlds: HashSet::new(),
-        }
-    }
-
-    fn resolve(
-        &mut self,
-        store_root: Option<&Path>,
-        world_id: &str,
-    ) -> Result<Option<CodexExecDispatch>> {
-        if let Some(thread_id) = &self.cli_thread_id
-            && self.bound_worlds.insert(world_id.to_owned())
-        {
-            save_codex_thread_binding(&SaveCodexThreadBindingOptions {
-                store_root: store_root.map(Path::to_path_buf),
-                world_id: world_id.to_owned(),
-                thread_id: thread_id.clone(),
-                codex_bin: self
-                    .resolved_codex_bin()
-                    .map(|path| path.display().to_string()),
-                source: "agent_watch_cli".to_owned(),
-            })?;
-        }
-        let Some(binding) = load_codex_thread_binding(store_root, world_id)? else {
-            return Ok(None);
-        };
-        let codex_bin = binding
-            .codex_bin
-            .as_ref()
-            .map(PathBuf::from)
-            .or_else(|| self.resolved_codex_bin())
-            .unwrap_or_else(|| PathBuf::from("codex"));
-        Ok(Some(CodexExecDispatch {
-            thread_id: binding.thread_id,
-            codex_bin,
-            binding_source: binding.source,
-            binding_updated_at: binding.updated_at,
-        }))
-    }
-
-    fn resolved_codex_bin(&self) -> Option<PathBuf> {
-        self.codex_bin
-            .clone()
-            .or_else(|| std::env::var_os("HESPERIDES_CODEX_BIN").map(PathBuf::from))
-    }
-}
-
-#[derive(Debug, Clone)]
 struct CodexAppServerDispatch {
     app_server_url: String,
     thread_id: Option<String>,
@@ -2068,7 +1802,6 @@ impl CodexAppServerDispatchConfig {
                 store_root: store_root.map(Path::to_path_buf),
                 world_id: world_id.to_owned(),
                 thread_id: thread_id.clone(),
-                codex_bin: None,
                 source: "codex_app_server_cli".to_owned(),
             })?;
         }
@@ -2298,36 +2031,9 @@ fn ensure_control_safe_runtime_value(field: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-enum DispatchOutcome {
-    Started(Box<CodexDispatchRecord>),
-    AlreadyDispatched(String),
-}
-
 enum AppServerDispatchOutcome {
     Started(Box<CodexAppServerDispatchRecord>),
     AlreadyDispatched(String),
-}
-
-#[derive(Debug, Serialize)]
-struct CodexDispatchRecord {
-    schema_version: &'static str,
-    status: &'static str,
-    world_id: String,
-    turn_id: String,
-    thread_id: String,
-    binding_source: String,
-    binding_updated_at: String,
-    codex_bin: String,
-    pid: u32,
-    record_path: String,
-    prompt_path: String,
-    response_path: String,
-    final_message_path: String,
-    stdout_path: String,
-    stderr_path: String,
-    dispatched_at: String,
-    exit_code: Option<i32>,
-    completed_at: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -2383,116 +2089,6 @@ struct CodexAppServerImageDispatchRecord {
     exit_code: Option<i32>,
     error: Option<String>,
     completed_at: String,
-}
-
-fn dispatch_pending_agent_turn(
-    store_root: Option<&Path>,
-    pending: &singulari_world::PendingAgentTurn,
-    dispatch: &CodexExecDispatch,
-) -> Result<DispatchOutcome> {
-    let dispatch_dir = dispatch_dir_for_pending(pending)?;
-    fs::create_dir_all(&dispatch_dir)
-        .with_context(|| format!("failed to create {}", dispatch_dir.display()))?;
-    let thread_component = safe_file_component(dispatch.thread_id.as_str());
-    let record_path = dispatch_dir.join(format!("{}-{}.json", pending.turn_id, thread_component));
-    if record_path.exists() {
-        return Ok(DispatchOutcome::AlreadyDispatched(
-            record_path.display().to_string(),
-        ));
-    }
-
-    let prompt_path = dispatch_dir.join(format!("{}-prompt.md", pending.turn_id));
-    let response_path = dispatch_dir.join(format!("{}-agent-response.json", pending.turn_id));
-    let final_message_path = dispatch_dir.join(format!("{}-final-message.txt", pending.turn_id));
-    let stdout_path = dispatch_dir.join(format!("{}-stdout.log", pending.turn_id));
-    let stderr_path = dispatch_dir.join(format!("{}-stderr.log", pending.turn_id));
-    let prompt = build_codex_realtime_prompt(store_root, pending, response_path.as_path())?;
-    fs::write(&prompt_path, prompt.as_bytes())
-        .with_context(|| format!("failed to write {}", prompt_path.display()))?;
-
-    let claim = serde_json::json!({
-        "schema_version": "singulari.codex_dispatch_record.v1",
-        "status": "dispatching",
-        "world_id": pending.world_id,
-        "turn_id": pending.turn_id,
-        "thread_id": dispatch.thread_id.as_str(),
-        "binding_source": dispatch.binding_source.as_str(),
-        "binding_updated_at": dispatch.binding_updated_at.as_str(),
-        "codex_bin": dispatch.codex_bin.display().to_string(),
-        "prompt_path": prompt_path.display().to_string(),
-        "response_path": response_path.display().to_string(),
-        "final_message_path": final_message_path.display().to_string(),
-        "stdout_path": stdout_path.display().to_string(),
-        "stderr_path": stderr_path.display().to_string(),
-        "dispatched_at": Utc::now().to_rfc3339(),
-    });
-    if !write_dispatch_claim(record_path.as_path(), &claim)? {
-        return Ok(DispatchOutcome::AlreadyDispatched(
-            record_path.display().to_string(),
-        ));
-    }
-
-    let stdout = File::create(&stdout_path)
-        .with_context(|| format!("failed to create {}", stdout_path.display()))?;
-    let stderr = File::create(&stderr_path)
-        .with_context(|| format!("failed to create {}", stderr_path.display()))?;
-    let mut child = Command::new(&dispatch.codex_bin)
-        .arg("exec")
-        .arg("resume")
-        .arg("--output-last-message")
-        .arg(&final_message_path)
-        .arg(dispatch.thread_id.as_str())
-        .arg("-")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr))
-        .spawn()
-        .with_context(|| {
-            format!(
-                "failed to spawn codex realtime dispatch: bin={}",
-                dispatch.codex_bin.display()
-            )
-        })?;
-    let pid = child.id();
-    let Some(mut stdin) = child.stdin.take() else {
-        anyhow::bail!("failed to open codex realtime dispatch stdin");
-    };
-    stdin
-        .write_all(prompt.as_bytes())
-        .context("failed to write codex realtime dispatch prompt")?;
-    drop(stdin);
-    let exit_status = child
-        .wait()
-        .context("failed to wait for codex realtime dispatch")?;
-    let status = if exit_status.success() {
-        "completed"
-    } else {
-        "failed"
-    };
-
-    let record = CodexDispatchRecord {
-        schema_version: "singulari.codex_dispatch_record.v1",
-        status,
-        world_id: pending.world_id.clone(),
-        turn_id: pending.turn_id.clone(),
-        thread_id: dispatch.thread_id.clone(),
-        binding_source: dispatch.binding_source.clone(),
-        binding_updated_at: dispatch.binding_updated_at.clone(),
-        codex_bin: dispatch.codex_bin.display().to_string(),
-        pid,
-        record_path: record_path.display().to_string(),
-        prompt_path: prompt_path.display().to_string(),
-        response_path: response_path.display().to_string(),
-        final_message_path: final_message_path.display().to_string(),
-        stdout_path: stdout_path.display().to_string(),
-        stderr_path: stderr_path.display().to_string(),
-        dispatched_at: Utc::now().to_rfc3339(),
-        exit_code: exit_status.code(),
-        completed_at: Utc::now().to_rfc3339(),
-    };
-    fs::write(&record_path, serde_json::to_vec_pretty(&record)?)
-        .with_context(|| format!("failed to update {}", record_path.display()))?;
-    Ok(DispatchOutcome::Started(Box::new(record)))
 }
 
 #[allow(
@@ -2620,7 +2216,6 @@ fn dispatch_pending_agent_turn_via_app_server(
             store_root: store_root.map(Path::to_path_buf),
             world_id: pending.world_id.clone(),
             thread_id: thread_id.clone(),
-            codex_bin: None,
             source: if dispatch.thread_id.is_some() {
                 "codex_app_server_thread_resume".to_owned()
             } else {
@@ -2881,11 +2476,14 @@ fn app_server_image_saved_path(result: Option<&serde_json::Value>) -> Option<Pat
         .map(PathBuf::from)
 }
 
-fn app_server_image_error_message(result: Option<&serde_json::Value>, fallback: String) -> String {
+fn app_server_image_error_message(
+    result: Option<&serde_json::Value>,
+    default_message: String,
+) -> String {
     result
         .and_then(|value| value.get("error"))
         .and_then(serde_json::Value::as_str)
-        .map_or(fallback, str::to_owned)
+        .map_or(default_message, str::to_owned)
 }
 
 fn clear_stale_app_server_binding_from_existing_record(
