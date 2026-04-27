@@ -230,23 +230,13 @@ Claim one job:
 singulari-world visual-job-claim --world-id <world-id> --json
 ```
 
-Automatic completion uses a separate host-owned command backend, not the active
-Codex chat visual session:
-
-```bash
-singulari-world host-worker \
-  --text-backend codex-app-server \
-  --claim-visual-jobs \
-  --visual-backend command \
-  --visual-command /path/to/host-image-worker \
-  --interval-ms 750
-```
-
-The command receives `SINGULARI_VISUAL_PROMPT_PATH`,
-`SINGULARI_VISUAL_DESTINATION_PATH`, `SINGULARI_VISUAL_SLOT`,
-`SINGULARI_VISUAL_CLAIM_ID`, and `SINGULARI_WORLD_ID`. It must write a real PNG
-to `SINGULARI_VISUAL_DESTINATION_PATH`; `host-worker` then validates and
-completes the visual job automatically.
+Automatic completion uses the standalone `singulari-world-mcp` tool surface.
+`worldsim_claim_visual_job` returns structured MCP content containing
+`job.codex_app_call`. Codex App consumes that structured call with its built-in
+image generation capability, writes the PNG to `destination_path`, then calls
+`worldsim_complete_visual_job`. This is the repo-owned MCP contract; it does not
+depend on `~/.codex` skills, external provider keys, or the active chat's
+manual image generation path.
 
 The host should run its image generation capability with:
 

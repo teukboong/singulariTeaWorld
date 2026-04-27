@@ -76,20 +76,11 @@ claim a redacted visual job, run its host image generation capability, save the
 PNG to `destination_path`, then complete the job. There is no external provider
 or local placeholder path.
 
-For automatic image completion, run a separate visual worker with a host-owned
-PNG generator command. The command receives `SINGULARI_VISUAL_PROMPT_PATH`,
-`SINGULARI_VISUAL_DESTINATION_PATH`, `SINGULARI_VISUAL_SLOT`, and
-`SINGULARI_VISUAL_CLAIM_ID`; it must write a real PNG to the destination path.
-The worker then validates and completes the claim:
-
-```bash
-target/debug/singulari-world --store-root .world-store host-worker \
-  --text-backend codex-app-server \
-  --claim-visual-jobs \
-  --visual-backend command \
-  --visual-command /path/to/host-image-worker \
-  --interval-ms 750
-```
+For automatic image completion, the installed `singulari-world-mcp` server is
+the standalone bridge. `worldsim_claim_visual_job` returns structured MCP
+content with `job.codex_app_call`; Codex App consumes that structured call with
+its built-in image generation capability, writes the PNG to `destination_path`,
+then calls `worldsim_complete_visual_job`.
 
 Each world owns a durable Codex `thread_id` under
 `worlds/<world-id>/agent_bridge/codex_thread_binding.json`. That thread keeps
@@ -124,10 +115,11 @@ scripts/install-codex-mcp.sh
 
 The MCP surface includes `worldsim_visual_assets`, which returns the same
 player-visible manifest and Codex App image generation jobs without requiring a
-separate image provider. Codex App should claim and complete those jobs through
-`worldsim_claim_visual_job` and
-`worldsim_complete_visual_job` or their CLI equivalents. If generation fails,
-release the claim with `worldsim_release_visual_job` / `visual-job-release`:
+separate image provider. `worldsim_claim_visual_job` also includes the current
+turn CG job from the VN packet when it is pending. Codex App should claim and
+complete those jobs through `worldsim_claim_visual_job` and
+`worldsim_complete_visual_job`. If generation fails, release the claim with
+`worldsim_release_visual_job` / `visual-job-release`:
 
 ```bash
 cargo run --bin singulari-world -- visual-job-claim --world-id "<world-id>" --json

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, Content, ListToolsResult, PaginatedRequestParams,
+    CallToolRequestParams, CallToolResult, ListToolsResult, PaginatedRequestParams,
     ServerCapabilities, ServerInfo, Tool,
 };
 use rmcp::{
@@ -248,9 +248,9 @@ fn json_tool_result<T>(value: &T) -> Result<CallToolResult, McpError>
 where
     T: Serialize,
 {
-    let text = serde_json::to_string_pretty(value)
+    let value = serde_json::to_value(value)
         .map_err(|error| McpError::internal_error(error.to_string(), None))?;
-    Ok(CallToolResult::success(vec![Content::text(text)]))
+    Ok(CallToolResult::structured(value))
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -499,14 +499,25 @@ fn worldsim_claim_visual_job(
 ) -> Result<singulari_world::VisualJobClaimOutcome> {
     let store_root = store_root(params.store_root);
     let world_id = resolve_world_id(store_root.as_deref(), params.world_id.as_deref())?;
+    let extra_jobs = current_turn_visual_jobs(store_root.as_ref(), world_id.as_str())?;
     claim_visual_job(&ClaimVisualJobOptions {
         store_root,
         world_id,
         slot: params.slot,
         claimed_by: params.claimed_by,
         force: params.force,
-        extra_jobs: Vec::new(),
+        extra_jobs,
     })
+}
+
+fn current_turn_visual_jobs(
+    store_root: Option<&PathBuf>,
+    world_id: &str,
+) -> Result<Vec<singulari_world::ImageGenerationJob>> {
+    let mut packet_options = BuildVnPacketOptions::new(world_id.to_owned());
+    packet_options.store_root = store_root.cloned();
+    let packet = build_vn_packet(&packet_options)?;
+    Ok(packet.image.image_generation_job.into_iter().collect())
 }
 
 fn worldsim_complete_visual_job(
@@ -596,4 +607,72 @@ fn store_root(raw: Option<String>) -> Option<PathBuf> {
 
 fn default_visual_job_claimed_by() -> String {
     "codex_app_image_worker".to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn json_tool_result_exposes_structured_content() -> anyhow::Result<()> {
+        let result = json_tool_result(&serde_json::json!({
+            "job": {
+                "codex_app_call": {
+                    "capability": "image_generation",
+                    "destination_path": "/tmp/example.png"
+                }
+            }
+        }))?;
+        let structured = result
+            .structured_content
+            .as_ref()
+            .context("structured content missing")?;
+        assert_eq!(
+            structured["job"]["codex_app_call"]["capability"],
+            "image_generation"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mcp_visual_claim_includes_current_turn_cg_job() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store_root = temp.path().join("store");
+        let claimed = worldsim_claim_visual_job(WorldsimClaimVisualJobParams {
+            store_root: Some(store_root.display().to_string()),
+            world_id: Some("stw_mcp_turn_cg".to_owned()),
+            slot: Some("turn_cg:turn_0005".to_owned()),
+            claimed_by: "mcp-test".to_owned(),
+            force: false,
+        });
+        assert!(claimed.is_err(), "world should not exist before creation");
+        worldsim_start_world(WorldsimStartWorldParams {
+            seed_text: "mcp turn cg fantasy smoke".to_owned(),
+            store_root: Some(store_root.display().to_string()),
+            world_id: Some("stw_mcp_turn_cg".to_owned()),
+            title: None,
+            session_id: None,
+        })?;
+        for _ in 0..5 {
+            advance_turn(&singulari_world::AdvanceTurnOptions {
+                store_root: Some(store_root.clone()),
+                world_id: "stw_mcp_turn_cg".to_owned(),
+                input: "1".to_owned(),
+            })?;
+        }
+        let claimed = worldsim_claim_visual_job(WorldsimClaimVisualJobParams {
+            store_root: Some(store_root.display().to_string()),
+            world_id: Some("stw_mcp_turn_cg".to_owned()),
+            slot: Some("turn_cg:turn_0005".to_owned()),
+            claimed_by: "mcp-test".to_owned(),
+            force: false,
+        })?;
+        let singulari_world::VisualJobClaimOutcome::Claimed { claim } = claimed else {
+            anyhow::bail!("turn CG job should be claimable through MCP");
+        };
+        assert_eq!(claim.slot, "turn_cg:turn_0005");
+        assert_eq!(claim.job.codex_app_call.capability, "image_generation");
+        Ok(())
+    }
 }

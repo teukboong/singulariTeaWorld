@@ -80,7 +80,17 @@ Text turn dispatch has these backend modes:
   - Development path.
   - Emits the exact pending turn and command hints without dispatching.
 
-Image generation has two worker modes:
+Image generation has three integration modes:
+
+- `singulari-world-mcp`
+  - Primary Codex App path.
+  - `worldsim_claim_visual_job` returns structured MCP content with
+    `job.codex_app_call`.
+  - Codex App consumes that structured call with its built-in image generation
+    capability, saves the PNG to `destination_path`, then calls
+    `worldsim_complete_visual_job`.
+  - This is the standalone repo contract; it does not depend on `~/.codex`
+    skills or external provider keys.
 
 - `manual`
   - The worker emits `codex_app_image_generate_required` after claiming a visual
@@ -90,14 +100,8 @@ Image generation has two worker modes:
   - The host completes or releases the job through the CLI or MCP.
 
 - `command`
-  - The worker claims a job, writes the redacted prompt to a dispatch file, runs
-    a host-owned executable, then calls `visual-job-complete` internally.
-  - The command receives `SINGULARI_VISUAL_PROMPT_PATH`,
-    `SINGULARI_VISUAL_DESTINATION_PATH`, `SINGULARI_VISUAL_SLOT`,
-    `SINGULARI_VISUAL_CLAIM_ID`, and `SINGULARI_WORLD_ID`.
-  - The command must write a real PNG exactly to
-    `SINGULARI_VISUAL_DESTINATION_PATH`. The worker validates PNG bytes before
-    completion and releases the claim on failure.
+  - Optional non-Codex host fallback.
+  - Not the normal Codex App path.
 
 - `codex-app-server`
   - Reserved for a packaged host image worker.
@@ -153,23 +157,22 @@ then it follows the active world binding.
 Pass `--codex-app-server-url ws://127.0.0.1:<port>` only when the embedding host
 already owns the app-server process.
 
-Run with host-owned image jobs in automatic command mode:
+Run with host-owned image jobs in manual event mode:
 
 ```bash
 singulari-world host-worker \
   --world-id <world-id> \
   --text-backend codex-app-server \
   --claim-visual-jobs \
-  --visual-backend command \
-  --visual-command /path/to/host-image-worker \
+  --visual-backend manual \
   --interval-ms 750
 ```
 
 `--claim-visual-jobs` claims at most one unclaimed visual job per tick.
-With `--visual-backend command`, the worker completes the job automatically if
-the command writes a valid PNG. With `--visual-backend manual`, the worker emits
-the claim payload and waits for the embedding host to complete or release it.
-The `codex-app-server` visual backend is reserved and currently fails closed with
+With `--visual-backend manual`, the worker emits the claim payload and waits for
+the embedding host to complete or release it. The normal Codex App automatic
+path should use `singulari-world-mcp` structured results instead. The
+`codex-app-server` visual backend is reserved and currently fails closed with
 `codex_app_image_generate_unsupported`.
 
 ## JSONL Events

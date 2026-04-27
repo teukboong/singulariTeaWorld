@@ -133,21 +133,10 @@ On image-generation host failure:
 singulari-world visual-job-release --world-id <world-id> --slot <slot> --json
 ```
 
-Automatic image jobs require a host-owned generator executable:
-
-```bash
-singulari-world host-worker \
-  --text-backend codex-app-server \
-  --claim-visual-jobs \
-  --visual-backend command \
-  --visual-command /path/to/host-image-worker \
-  --interval-ms 750
-```
-
-The executable receives `SINGULARI_VISUAL_PROMPT_PATH` and
-`SINGULARI_VISUAL_DESTINATION_PATH`, writes a PNG to the destination, and exits
-successfully. The worker validates the PNG and completes the claim; failures
-release the claim instead of leaving it locked.
+Automatic image jobs go through the installed `singulari-world-mcp` server.
+`worldsim_claim_visual_job` returns structured content containing
+`job.codex_app_call`; Codex App consumes that call with its built-in image
+generation capability and then calls `worldsim_complete_visual_job`.
 
 ## Current Alpha Boundary
 
@@ -167,5 +156,5 @@ The embedding host still owns:
 - starting/stopping `host-worker`
 - optionally passing `--codex-app-server-url` when it owns app-server itself
 - starting/stopping the VN server
-- consuming visual jobs through a real host image capability, then completing or
-  releasing the claim
+- consuming visual jobs through the standalone MCP `codex_app_call` contract,
+  then completing or releasing the claim

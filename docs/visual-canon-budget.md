@@ -113,9 +113,10 @@ Codex chat/session-level visual generation path is not a valid worker for this
 contract, and a manually generated chat image must not be recorded as a worker
 success.
 
-The current reference CLI does not implement the packaged host-image worker;
-automatic command completion and manual claim/complete are the supported
-fallback contracts.
+The primary Codex App path is MCP-driven: `worldsim_claim_visual_job` returns
+structured content with `job.codex_app_call`, Codex App runs its built-in image
+generation capability, and `worldsim_complete_visual_job` registers the PNG.
+Manual claim/complete remains the fallback contract.
 
 Worker loop:
 
@@ -128,10 +129,6 @@ Worker loop:
 5. Complete with `visual-job-complete` / `worldsim_complete_visual_job`.
 6. On host failure or cancellation, release with `visual-job-release` /
    `worldsim_release_visual_job` instead of leaving the claim locked.
-
-For automatic CLI completion, `host-worker --visual-backend command
---visual-command <executable>` performs steps 2, 5, and 6 itself. The executable
-owns step 3 and must write the PNG to `SINGULARI_VISUAL_DESTINATION_PATH`.
 
 Claims live under `visual_jobs/claims/` and are created atomically. Completion
 verifies PNG bytes, records metadata under `visual_jobs/completed/`, removes the
