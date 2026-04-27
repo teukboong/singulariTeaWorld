@@ -42,16 +42,18 @@ codex app-server --listen ws://127.0.0.1:<port>
 cargo run --bin singulari-world -- host-worker \
   --interval-ms 750 \
   --world-id "<world-id>" \
-  --text-backend codex-app-server \
-  --codex-app-server-url "ws://127.0.0.1:<port>"
+  --text-backend codex-app-server
 ```
 
 `host-worker` is the cross-platform process an embedding app should start and
 stop with the VN app. Its primary realtime text backend is `codex-app-server`,
 which talks to the official Codex app-server websocket and starts a model turn
-only when a pending world turn exists. `codex-exec-resume` remains the
-on-demand CLI backend for hosts that do not run an app-server websocket. Image
-jobs are queue-based too: Codex App consumes the redacted
+only when a pending world turn exists. If no `--codex-app-server-url` is
+provided, the worker starts `codex app-server` on a loopback port, records the
+runtime URL under the world `agent_bridge` directory, and stops it when the
+worker exits. `codex-exec-resume` remains the on-demand CLI backend for hosts
+that do not run an app-server websocket. Image jobs are queue-based too: Codex
+App consumes the redacted
 `codex_app.image.generate` job and saves the PNG to the returned
 `destination_path`.
 

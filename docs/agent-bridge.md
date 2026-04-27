@@ -140,10 +140,10 @@ singulari-world --store-root .world-store codex-thread-show --world-id <world-id
 ```
 
 When `host-worker --text-backend codex-app-server` sees a pending turn, it
-connects to the configured Codex app-server websocket, resumes or starts the
-world's dedicated Codex thread, sends the bounded realtime prompt through
-`turn/start`, and waits for completion. A first successful unbound dispatch
-persists the returned thread id to `codex_thread_binding.json`.
+connects to the configured or managed Codex app-server websocket, resumes or
+starts the world's dedicated Codex thread, sends the bounded realtime prompt
+through `turn/start`, and waits for completion. A first successful unbound
+dispatch persists the returned thread id to `codex_thread_binding.json`.
 
 The world-specific Codex thread is the narrative working context, not the
 source of truth. The worker expects Codex to compact long threads according to
@@ -151,6 +151,11 @@ normal Codex runtime behavior, and it compensates by reinjecting the bounded
 world-store packet on every turn. If a bound thread cannot be resumed because it
 is stale or missing, the worker clears that world's binding so the next dispatch
 can start a fresh thread from the same world DB.
+
+If no `--codex-app-server-url` is provided, `host-worker` starts
+`codex app-server` on a loopback port and writes
+`codex_app_server_runtime.json` under the world `agent_bridge` directory. Pass
+an explicit URL only when the embedding host owns the app-server process.
 
 When `host-worker --text-backend codex-exec-resume` sees a pending turn, it
 starts `codex exec resume <codex-thread-id> -` with a bounded prompt and waits

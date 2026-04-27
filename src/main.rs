@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
+use singulari_world::resolve_store_paths;
 use singulari_world::{
     AdvanceTurnOptions, AgentCommitTurnOptions, AgentSubmitTurnOptions, AgentTurnResponse,
     ApplyCharacterAnchorOptions, InitWorldOptions, RenderPacketLoadOptions, ValidationStatus,
@@ -25,10 +26,11 @@ use singulari_world::{
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Parser)]
 #[command(
@@ -439,7 +441,7 @@ enum Commands {
         #[arg(long, env = "SINGULARI_WORLD_CODEX_THREAD_ID")]
         codex_thread_id: Option<String>,
 
-        /// Codex CLI path used only by the codex-exec-resume backend.
+        /// Codex CLI path used by codex-exec-resume and managed app-server spawn.
         #[arg(long, env = "SINGULARI_WORLD_CODEX_BIN")]
         codex_bin: Option<PathBuf>,
 
@@ -1626,6 +1628,7 @@ fn handle_host_worker(
         options.codex_app_server_url.clone(),
         options.codex_thread_id.clone(),
         options.node_bin.clone(),
+        options.codex_bin.clone(),
     );
     let initial_world_id = resolve_world_id(store_root, world_id)?;
     emit_host_event(&serde_json::json!({
@@ -1860,6 +1863,11 @@ fn emit_host_pending_agent_turn_event(
                         "thread_id": record.thread_id,
                         "turn_status": record.status,
                         "app_server_url": dispatch.app_server_url.as_str(),
+                        "app_server_managed": dispatch.app_server_managed,
+                        "app_server_runtime_path": dispatch
+                            .app_server_runtime_path
+                            .as_ref()
+                            .map(|path| path.display().to_string()),
                         "pid": record.pid,
                         "record_path": record.record_path,
                         "prompt_path": record.prompt_path,
@@ -1887,6 +1895,11 @@ fn emit_host_pending_agent_turn_event(
                         "world_id": pending.world_id,
                         "turn_id": pending.turn_id,
                         "thread_id": dispatch.thread_id.as_deref(),
+                        "app_server_managed": dispatch.app_server_managed,
+                        "app_server_runtime_path": dispatch
+                            .app_server_runtime_path
+                            .as_ref()
+                            .map(|path| path.display().to_string()),
                         "record_path": record_path,
                         "consumer": HOST_WORKER_CONSUMER,
                     }))?;
@@ -2173,14 +2186,18 @@ struct CodexAppServerDispatch {
     node_bin: PathBuf,
     binding_source: Option<String>,
     binding_updated_at: Option<String>,
+    app_server_managed: bool,
+    app_server_runtime_path: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct CodexAppServerDispatchConfig {
     app_server_url: Option<String>,
     cli_thread_id: Option<String>,
     node_bin: Option<PathBuf>,
+    codex_bin: Option<PathBuf>,
     bound_worlds: HashSet<String>,
+    managed_app_server: Option<ManagedCodexAppServer>,
 }
 
 impl CodexAppServerDispatchConfig {
@@ -2188,6 +2205,7 @@ impl CodexAppServerDispatchConfig {
         app_server_url: Option<String>,
         thread_id: Option<String>,
         node_bin: Option<PathBuf>,
+        codex_bin: Option<PathBuf>,
     ) -> Self {
         Self {
             app_server_url: app_server_url
@@ -2195,7 +2213,9 @@ impl CodexAppServerDispatchConfig {
                 .filter(|value| !value.is_empty()),
             cli_thread_id: thread_id.filter(|value| !value.trim().is_empty()),
             node_bin,
+            codex_bin,
             bound_worlds: HashSet::new(),
+            managed_app_server: None,
         }
     }
 
@@ -2204,9 +2224,14 @@ impl CodexAppServerDispatchConfig {
         store_root: Option<&Path>,
         world_id: &str,
     ) -> Result<Option<CodexAppServerDispatch>> {
-        let Some(app_server_url) = self.resolved_app_server_url() else {
+        let Some(app_server_url) = self.resolved_app_server_url(store_root, world_id)? else {
             return Ok(None);
         };
+        let app_server_runtime_path = self
+            .managed_app_server
+            .as_ref()
+            .map(|runtime| runtime.record_path.clone());
+        let app_server_managed = app_server_runtime_path.is_some();
         ensure_control_safe_runtime_value("codex_app_server_url", app_server_url.as_str())?;
         if let Some(thread_id) = &self.cli_thread_id
             && self.bound_worlds.insert(world_id.to_owned())
@@ -2226,10 +2251,36 @@ impl CodexAppServerDispatchConfig {
             node_bin: self.resolved_node_bin(),
             binding_source: binding.as_ref().map(|value| value.source.clone()),
             binding_updated_at: binding.map(|value| value.updated_at),
+            app_server_managed,
+            app_server_runtime_path,
         }))
     }
 
-    fn resolved_app_server_url(&self) -> Option<String> {
+    fn resolved_app_server_url(
+        &mut self,
+        store_root: Option<&Path>,
+        world_id: &str,
+    ) -> Result<Option<String>> {
+        if let Some(url) = self.explicit_app_server_url() {
+            return Ok(Some(url));
+        }
+        if let Some(runtime) = self.managed_app_server.as_mut()
+            && runtime.is_running()?
+        {
+            return Ok(Some(runtime.url.clone()));
+        }
+        self.managed_app_server = None;
+        let runtime = spawn_managed_codex_app_server(
+            store_root,
+            world_id,
+            self.resolved_codex_bin().as_path(),
+        )?;
+        let url = runtime.url.clone();
+        self.managed_app_server = Some(runtime);
+        Ok(Some(url))
+    }
+
+    fn explicit_app_server_url(&self) -> Option<String> {
         self.app_server_url.clone().or_else(|| {
             std::env::var("SINGULARI_WORLD_CODEX_APP_SERVER_URL")
                 .ok()
@@ -2244,6 +2295,171 @@ impl CodexAppServerDispatchConfig {
             .or_else(|| std::env::var_os("SINGULARI_WORLD_NODE_BIN").map(PathBuf::from))
             .or_else(|| std::env::var_os("HESPERIDES_NODE_BIN").map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from("node"))
+    }
+
+    fn resolved_codex_bin(&self) -> PathBuf {
+        self.codex_bin
+            .clone()
+            .or_else(|| std::env::var_os("SINGULARI_WORLD_CODEX_BIN").map(PathBuf::from))
+            .unwrap_or_else(|| PathBuf::from("codex"))
+    }
+}
+
+#[derive(Debug)]
+struct ManagedCodexAppServer {
+    url: String,
+    record_path: PathBuf,
+    child: Child,
+}
+
+impl ManagedCodexAppServer {
+    fn is_running(&mut self) -> Result<bool> {
+        Ok(self
+            .child
+            .try_wait()
+            .context("failed to inspect managed codex app-server process")?
+            .is_none())
+    }
+}
+
+impl Drop for ManagedCodexAppServer {
+    fn drop(&mut self) {
+        if matches!(self.child.try_wait(), Ok(None)) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+        mark_managed_codex_app_server_stopped(self.record_path.as_path());
+    }
+}
+
+fn spawn_managed_codex_app_server(
+    store_root: Option<&Path>,
+    world_id: &str,
+    codex_bin: &Path,
+) -> Result<ManagedCodexAppServer> {
+    let bridge_dir = codex_app_server_runtime_dir(store_root, world_id)?;
+    fs::create_dir_all(&bridge_dir)
+        .with_context(|| format!("failed to create {}", bridge_dir.display()))?;
+    let port = reserve_loopback_port()?;
+    let url = format!("ws://127.0.0.1:{port}");
+    let record_path = bridge_dir.join("codex_app_server_runtime.json");
+    let stdout_path = bridge_dir.join("codex_app_server_stdout.log");
+    let stderr_path = bridge_dir.join("codex_app_server_stderr.log");
+    let stdout = File::create(&stdout_path)
+        .with_context(|| format!("failed to create {}", stdout_path.display()))?;
+    let stderr = File::create(&stderr_path)
+        .with_context(|| format!("failed to create {}", stderr_path.display()))?;
+    let mut child = Command::new(codex_bin)
+        .arg("app-server")
+        .arg("--listen")
+        .arg(url.as_str())
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .with_context(|| {
+            format!(
+                "failed to spawn managed codex app-server: codex_bin={}",
+                codex_bin.display()
+            )
+        })?;
+    wait_for_managed_codex_app_server(port, &mut child, stderr_path.as_path())?;
+    let pid = child.id();
+    fs::write(
+        &record_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": "singulari.codex_app_server_runtime.v1",
+            "status": "running",
+            "world_id": world_id,
+            "url": url.as_str(),
+            "host": "127.0.0.1",
+            "port": port,
+            "pid": pid,
+            "codex_bin": codex_bin.display().to_string(),
+            "stdout_path": stdout_path.display().to_string(),
+            "stderr_path": stderr_path.display().to_string(),
+            "started_at": Utc::now().to_rfc3339(),
+            "owner": HOST_WORKER_CONSUMER,
+        }))?,
+    )
+    .with_context(|| format!("failed to write {}", record_path.display()))?;
+    Ok(ManagedCodexAppServer {
+        url,
+        record_path,
+        child,
+    })
+}
+
+fn codex_app_server_runtime_dir(store_root: Option<&Path>, world_id: &str) -> Result<PathBuf> {
+    let paths = resolve_store_paths(store_root)?;
+    Ok(paths.worlds_dir.join(world_id).join("agent_bridge"))
+}
+
+fn reserve_loopback_port() -> Result<u16> {
+    let listener =
+        TcpListener::bind(("127.0.0.1", 0)).context("failed to reserve loopback port")?;
+    Ok(listener
+        .local_addr()
+        .context("failed to read reserved loopback port")?
+        .port())
+}
+
+fn wait_for_managed_codex_app_server(
+    port: u16,
+    child: &mut Child,
+    stderr_path: &Path,
+) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let addr = format!("127.0.0.1:{port}");
+    while Instant::now() < deadline {
+        if let Some(status) = child
+            .try_wait()
+            .context("failed to inspect managed codex app-server process")?
+        {
+            anyhow::bail!(
+                "managed codex app-server exited before listening: status={}, stderr_path={}",
+                status,
+                stderr_path.display()
+            );
+        }
+        if TcpStream::connect_timeout(
+            &addr
+                .parse()
+                .context("failed to parse managed app-server socket address")?,
+            Duration::from_millis(200),
+        )
+        .is_ok()
+        {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    anyhow::bail!(
+        "managed codex app-server did not start listening: port={}, stderr_path={}",
+        port,
+        stderr_path.display()
+    );
+}
+
+fn mark_managed_codex_app_server_stopped(record_path: &Path) {
+    let Ok(raw) = fs::read_to_string(record_path) else {
+        return;
+    };
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return;
+    };
+    if let Some(object) = value.as_object_mut() {
+        object.insert("status".to_owned(), serde_json::json!("stopped"));
+        object.insert(
+            "stopped_at".to_owned(),
+            serde_json::json!(Utc::now().to_rfc3339()),
+        );
+        let _ = fs::write(
+            record_path,
+            serde_json::to_vec_pretty(&value).unwrap_or_else(|_| raw.into_bytes()),
+        );
     }
 }
 
@@ -2294,6 +2510,8 @@ struct CodexAppServerDispatchRecord {
     turn_id: String,
     thread_id: Option<String>,
     app_server_url: String,
+    app_server_managed: bool,
+    app_server_runtime_path: Option<String>,
     binding_source: Option<String>,
     binding_updated_at: Option<String>,
     node_bin: String,
@@ -2474,6 +2692,11 @@ fn dispatch_pending_agent_turn_via_app_server(
         "turn_id": pending.turn_id,
         "thread_id": dispatch.thread_id.as_deref(),
         "app_server_url": dispatch.app_server_url.as_str(),
+        "app_server_managed": dispatch.app_server_managed,
+        "app_server_runtime_path": dispatch
+            .app_server_runtime_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
         "binding_source": dispatch.binding_source.as_deref(),
         "binding_updated_at": dispatch.binding_updated_at.as_deref(),
         "node_bin": dispatch.node_bin.display().to_string(),
@@ -2572,6 +2795,11 @@ fn dispatch_pending_agent_turn_via_app_server(
         turn_id: pending.turn_id.clone(),
         thread_id: result_thread_id.or_else(|| dispatch.thread_id.clone()),
         app_server_url: dispatch.app_server_url.clone(),
+        app_server_managed: dispatch.app_server_managed,
+        app_server_runtime_path: dispatch
+            .app_server_runtime_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
         binding_source: dispatch.binding_source.clone(),
         binding_updated_at: dispatch.binding_updated_at.clone(),
         node_bin: dispatch.node_bin.display().to_string(),
@@ -2946,6 +3174,8 @@ mod tests {
             node_bin: PathBuf::from("node"),
             binding_source: Some("test".to_owned()),
             binding_updated_at: Some("2026-04-28T00:00:00Z".to_owned()),
+            app_server_managed: false,
+            app_server_runtime_path: None,
         }
     }
 
