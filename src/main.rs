@@ -394,29 +394,6 @@ enum Commands {
         json: bool,
     },
 
-    /// Watch pending worldsim jobs for Codex App background execution.
-    AgentWatch {
-        #[arg(long)]
-        world_id: Option<String>,
-
-        #[arg(long, default_value_t = 1500)]
-        interval_ms: u64,
-
-        #[arg(long)]
-        once: bool,
-
-        #[arg(long)]
-        no_visual_jobs: bool,
-
-        /// Immediately dispatch pending narrative turns to this Codex thread.
-        #[arg(long, env = "SINGULARI_WORLD_CODEX_THREAD_ID")]
-        codex_thread_id: Option<String>,
-
-        /// Codex CLI path used for realtime thread dispatch.
-        #[arg(long, env = "SINGULARI_WORLD_CODEX_BIN")]
-        codex_bin: Option<PathBuf>,
-    },
-
     /// Run the embedding-host supervisor loop for text and visual jobs.
     HostWorker {
         #[arg(long)]
@@ -430,18 +407,6 @@ enum Commands {
 
         #[arg(long, value_enum, default_value = "codex-app-server")]
         text_backend: HostTextBackend,
-
-        #[arg(long)]
-        no_visual_jobs: bool,
-
-        #[arg(long)]
-        claim_visual_jobs: bool,
-
-        #[arg(long, value_enum, default_value = "manual")]
-        visual_backend: HostVisualBackend,
-
-        #[arg(long, value_enum, default_value = "all")]
-        visual_job_scope: HostVisualJobScope,
 
         /// Thread used by Codex text backends that resume a durable thread.
         #[arg(long, env = "SINGULARI_WORLD_CODEX_THREAD_ID")]
@@ -538,40 +503,6 @@ impl HostTextBackend {
             Self::CodexAppServer => "codex-app-server",
             Self::CodexExecResume => "codex-exec-resume",
             Self::Manual => "manual",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum HostVisualBackend {
-    /// Development/default path. Claim a job and emit the Codex App image call contract.
-    Manual,
-    /// Reserved packaged-host path. The reference CLI fails closed.
-    CodexAppServer,
-}
-
-impl HostVisualBackend {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Manual => "manual",
-            Self::CodexAppServer => "codex-app-server",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum HostVisualJobScope {
-    /// Consume all pending visual jobs.
-    All,
-    /// Consume only menu/stage background jobs during startup prep.
-    Backgrounds,
-}
-
-impl HostVisualJobScope {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::All => "all",
-            Self::Backgrounds => "backgrounds",
         }
     }
 }
@@ -792,31 +723,11 @@ fn dispatch(cli: Cli) -> Result<()> {
             response.as_path(),
             json,
         )?,
-        Commands::AgentWatch {
-            world_id,
-            interval_ms,
-            once,
-            no_visual_jobs,
-            codex_thread_id,
-            codex_bin,
-        } => handle_agent_watch(
-            store_root.as_deref(),
-            world_id.as_deref(),
-            interval_ms,
-            once,
-            no_visual_jobs,
-            codex_thread_id,
-            codex_bin,
-        )?,
         Commands::HostWorker {
             world_id,
             interval_ms,
             once,
             text_backend,
-            no_visual_jobs,
-            claim_visual_jobs,
-            visual_backend,
-            visual_job_scope,
             codex_thread_id,
             codex_bin,
             codex_app_server_url,
@@ -828,10 +739,6 @@ fn dispatch(cli: Cli) -> Result<()> {
                 interval_ms,
                 once,
                 text_backend,
-                visual_backend,
-                visual_job_scope,
-                no_visual_jobs,
-                claim_visual_jobs,
                 codex_thread_id,
                 codex_bin,
                 codex_app_server_url,
@@ -1093,8 +1000,7 @@ fn handle_visual_job_claim(
     json: bool,
 ) -> Result<()> {
     let world_id = resolve_world_id(store_root, world_id)?;
-    let extra_jobs =
-        current_turn_visual_jobs(store_root, world_id.as_str(), HostVisualJobScope::All)?;
+    let extra_jobs = current_turn_visual_jobs(store_root, world_id.as_str())?;
     let outcome = claim_visual_job(&ClaimVisualJobOptions {
         store_root: store_root.map(Path::to_path_buf),
         world_id,
@@ -1598,51 +1504,6 @@ fn handle_codex_thread_clear(
     Ok(())
 }
 
-fn handle_agent_watch(
-    store_root: Option<&Path>,
-    world_id: Option<&str>,
-    interval_ms: u64,
-    once: bool,
-    no_visual_jobs: bool,
-    codex_thread_id: Option<String>,
-    codex_bin: Option<PathBuf>,
-) -> Result<()> {
-    let interval = Duration::from_millis(interval_ms.max(250));
-    let mut emitted = HashSet::new();
-    let mut dispatch_config = AgentWatchDispatchConfig::from_cli(codex_thread_id, codex_bin);
-    loop {
-        let world_id = resolve_world_id(store_root, world_id)?;
-        let dispatch = dispatch_config.resolve(store_root, world_id.as_str())?;
-        let mut emitted_this_tick = false;
-        if emit_pending_agent_turn_event(
-            store_root,
-            world_id.as_str(),
-            &mut emitted,
-            dispatch.as_ref(),
-        )? {
-            emitted_this_tick = true;
-        }
-        if !no_visual_jobs
-            && emit_pending_visual_job_events(store_root, world_id.as_str(), &mut emitted)?
-        {
-            emitted_this_tick = true;
-        }
-        if once {
-            if !emitted_this_tick {
-                emit_watch_event(&serde_json::json!({
-                    "schema_version": "singulari.agent_watch_event.v1",
-                    "event": "idle",
-                    "world_id": world_id,
-                    "consumer": "codex_app_background_job",
-                }))?;
-            }
-            break;
-        }
-        thread::sleep(interval);
-    }
-    Ok(())
-}
-
 const HOST_WORKER_EVENT_SCHEMA_VERSION: &str = "singulari.host_worker_event.v1";
 const HOST_WORKER_CONSUMER: &str = "codex_app_host_worker";
 const CODEX_APP_SERVER_TURN_HELPER: &str = include_str!("codex_app_server_turn.mjs");
@@ -1653,10 +1514,6 @@ struct HostWorkerOptions {
     interval_ms: u64,
     once: bool,
     text_backend: HostTextBackend,
-    visual_backend: HostVisualBackend,
-    visual_job_scope: HostVisualJobScope,
-    no_visual_jobs: bool,
-    claim_visual_jobs: bool,
     codex_thread_id: Option<String>,
     codex_bin: Option<PathBuf>,
     codex_app_server_url: Option<String>,
@@ -1674,7 +1531,7 @@ fn handle_host_worker(
 ) -> Result<()> {
     let interval = Duration::from_millis(options.interval_ms.max(250));
     let mut emitted = HashSet::new();
-    let mut exec_dispatch_config = AgentWatchDispatchConfig::from_cli(
+    let mut exec_dispatch_config = CodexExecDispatchConfig::from_cli(
         options.codex_thread_id.clone(),
         options.codex_bin.clone(),
     );
@@ -1685,23 +1542,13 @@ fn handle_host_worker(
         options.codex_bin.clone(),
     );
     let initial_world_id = resolve_host_worker_world_id(store_root, world_id)?;
-    let initial_world_had_pending_turn = initial_world_id
-        .as_deref()
-        .is_some_and(|world_id| load_pending_agent_turn(store_root, world_id).is_ok());
     emit_host_event(&serde_json::json!({
         "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
         "event": "worker_started",
         "world_id": initial_world_id.as_deref(),
         "text_backend": options.text_backend.as_str(),
-        "visual_backend": options.visual_backend.as_str(),
-        "visual_job_scope": options.visual_job_scope.as_str(),
-        "visual_jobs": if options.no_visual_jobs {
-            "disabled"
-        } else if options.claim_visual_jobs {
-            "claim_and_emit"
-        } else {
-            "observe_only"
-        },
+        "visual_backend": "codex-app-server",
+        "visual_jobs": "claim_and_generate",
         "consumer": HOST_WORKER_CONSUMER,
     }))?;
 
@@ -1713,8 +1560,7 @@ fn handle_host_worker(
                     "event": "worker_waiting_for_active_world",
                     "world_id": null,
                     "text_backend": options.text_backend.as_str(),
-                    "visual_backend": options.visual_backend.as_str(),
-                    "visual_job_scope": options.visual_job_scope.as_str(),
+                    "visual_backend": "codex-app-server",
                     "consumer": HOST_WORKER_CONSUMER,
                 }))?;
             }
@@ -1724,8 +1570,7 @@ fn handle_host_worker(
                     "event": "worker_idle",
                     "world_id": null,
                     "text_backend": options.text_backend.as_str(),
-                    "visual_backend": options.visual_backend.as_str(),
-                    "visual_job_scope": options.visual_job_scope.as_str(),
+                    "visual_backend": "codex-app-server",
                     "consumer": HOST_WORKER_CONSUMER,
                 }))?;
                 break;
@@ -1738,13 +1583,9 @@ fn handle_host_worker(
         } else {
             None
         };
-        let app_server_dispatch = if options.text_backend == HostTextBackend::CodexAppServer
-            || options.visual_backend == HostVisualBackend::CodexAppServer
-        {
-            app_server_dispatch_config.resolve(store_root, world_id.as_str())?
-        } else {
-            None
-        };
+        let app_server_dispatch = app_server_dispatch_config
+            .resolve(store_root, world_id.as_str())?
+            .context("host-worker requires Codex App app-server dispatch")?;
         let mut emitted_this_tick = false;
         if emit_host_pending_agent_turn_event(
             store_root,
@@ -1752,31 +1593,14 @@ fn handle_host_worker(
             options.text_backend,
             &mut emitted,
             exec_dispatch.as_ref(),
-            app_server_dispatch.as_ref(),
+            Some(&app_server_dispatch),
         )? {
             emitted_this_tick = true;
         }
         let pending_turn_still_open =
             load_pending_agent_turn(store_root, world_id.as_str()).is_ok();
-        let should_check_visual_jobs = !options.no_visual_jobs
-            && should_check_host_visual_jobs(
-                store_root,
-                world_id.as_str(),
-                initial_world_id.as_deref(),
-                initial_world_had_pending_turn,
-                options.visual_job_scope,
-                pending_turn_still_open,
-            );
-        if should_check_visual_jobs
-            && emit_host_visual_job_events(
-                store_root,
-                world_id.as_str(),
-                options.claim_visual_jobs,
-                options.visual_backend,
-                options.visual_job_scope,
-                app_server_dispatch.as_ref(),
-                &mut emitted,
-            )?
+        if !pending_turn_still_open
+            && emit_host_visual_job_events(store_root, world_id.as_str(), &app_server_dispatch)?
         {
             emitted_this_tick = true;
         }
@@ -1787,8 +1611,7 @@ fn handle_host_worker(
                     "event": "worker_idle",
                     "world_id": world_id,
                     "text_backend": options.text_backend.as_str(),
-                    "visual_backend": options.visual_backend.as_str(),
-                    "visual_job_scope": options.visual_job_scope.as_str(),
+                    "visual_backend": "codex-app-server",
                     "consumer": HOST_WORKER_CONSUMER,
                 }))?;
             }
@@ -1797,29 +1620,6 @@ fn handle_host_worker(
         thread::sleep(interval);
     }
     Ok(())
-}
-
-fn should_check_host_visual_jobs(
-    store_root: Option<&Path>,
-    world_id: &str,
-    initial_world_id: Option<&str>,
-    initial_world_had_pending_turn: bool,
-    visual_job_scope: HostVisualJobScope,
-    pending_turn_still_open: bool,
-) -> bool {
-    if pending_turn_still_open {
-        return false;
-    }
-    if visual_job_scope != HostVisualJobScope::Backgrounds {
-        return true;
-    }
-    if initial_world_id != Some(world_id) {
-        return true;
-    }
-    if initial_world_had_pending_turn {
-        return true;
-    }
-    load_pending_agent_turn(store_root, world_id).is_ok()
 }
 
 fn resolve_host_worker_world_id(
@@ -1846,7 +1646,7 @@ fn emit_host_pending_agent_turn_event(
     world_id: &str,
     text_backend: HostTextBackend,
     emitted: &mut HashSet<String>,
-    exec_dispatch: Option<&AgentWatchDispatch>,
+    exec_dispatch: Option<&CodexExecDispatch>,
     app_server_dispatch: Option<&CodexAppServerDispatch>,
 ) -> Result<bool> {
     let Ok(pending) = load_pending_agent_turn(store_root, world_id) else {
@@ -2053,152 +1853,53 @@ fn emit_host_pending_agent_turn_event(
 
 #[allow(
     clippy::too_many_lines,
-    reason = "Visual job event emission keeps claim, app-server dispatch, manual fallback, and failure release contracts together"
+    reason = "Visual job emission owns the full Codex App imageGeneration loop from claim to completion"
 )]
 fn emit_host_visual_job_events(
     store_root: Option<&Path>,
     world_id: &str,
-    claim_visual_jobs: bool,
-    visual_backend: HostVisualBackend,
-    visual_job_scope: HostVisualJobScope,
-    app_server_dispatch: Option<&CodexAppServerDispatch>,
-    emitted: &mut HashSet<String>,
+    app_server_dispatch: &CodexAppServerDispatch,
 ) -> Result<bool> {
-    let _app_server_dispatch = app_server_dispatch;
-    let jobs = current_host_visual_jobs(store_root, world_id, visual_job_scope)?;
-    let mut any_emitted = false;
+    let jobs = current_host_visual_jobs(store_root, world_id)?;
     for job in jobs {
         if load_visual_job_claim(store_root, world_id, job.slot.as_str())?.is_some() {
             continue;
         }
-        if claim_visual_jobs {
-            let outcome = claim_visual_job(&ClaimVisualJobOptions {
-                store_root: store_root.map(Path::to_path_buf),
-                world_id: world_id.to_owned(),
-                slot: Some(job.slot.clone()),
-                claimed_by: "singulari_host_worker".to_owned(),
-                force: false,
-                extra_jobs: current_turn_visual_jobs(store_root, world_id, visual_job_scope)?,
-            })?;
-            if let singulari_world::VisualJobClaimOutcome::Claimed { claim } = outcome {
-                if visual_backend == HostVisualBackend::CodexAppServer {
-                    let Some(app_server_dispatch) = app_server_dispatch else {
-                        release_visual_job_claim(&ReleaseVisualJobClaimOptions {
-                            store_root: store_root.map(Path::to_path_buf),
-                            world_id: claim.world_id.clone(),
-                            slot: claim.slot.clone(),
-                        })?;
-                        emit_host_event(&serde_json::json!({
-                            "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
-                            "event": "codex_app_image_generate_failed",
-                            "world_id": claim.world_id.as_str(),
-                            "slot": claim.slot.as_str(),
-                            "claim_id": claim.claim_id.as_str(),
-                            "status": "missing_app_server_dispatch",
-                            "consumer": HOST_WORKER_CONSUMER,
-                        }))?;
-                        return Ok(true);
-                    };
-                    match dispatch_visual_job_via_app_server(
-                        store_root,
-                        &claim,
-                        app_server_dispatch,
-                    ) {
-                        Ok(record) => {
-                            emit_host_event(&serde_json::json!({
-                                "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
-                                "event": "codex_app_image_generate_completed",
-                                "world_id": record.world_id.as_str(),
-                                "slot": record.slot.as_str(),
-                                "claim_id": record.claim_id.as_deref(),
-                                "saved_path": record.saved_path.as_deref(),
-                                "destination_path": record.destination_path.as_str(),
-                                "record_path": record.record_path.as_str(),
-                                "status": record.status.as_str(),
-                                "consumer": HOST_WORKER_CONSUMER,
-                            }))?;
-                        }
-                        Err(error) => {
-                            let release =
-                                release_visual_job_claim(&ReleaseVisualJobClaimOptions {
-                                    store_root: store_root.map(Path::to_path_buf),
-                                    world_id: claim.world_id.clone(),
-                                    slot: claim.slot.clone(),
-                                })?;
-                            emit_host_event(&serde_json::json!({
-                                "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
-                                "event": "codex_app_image_generate_failed",
-                                "world_id": claim.world_id.as_str(),
-                                "slot": claim.slot.as_str(),
-                                "claim_id": claim.claim_id.as_str(),
-                                "error": error.to_string(),
-                                "released_at": release.released_at,
-                                "consumer": HOST_WORKER_CONSUMER,
-                            }))?;
-                        }
-                    }
-                    return Ok(true);
-                }
-                let complete_command_hint = format!(
-                    "singulari-world visual-job-complete --world-id {} --slot {} --claim-id {} --json",
-                    claim.world_id, claim.slot, claim.claim_id
-                );
-                let release_command_hint = format!(
-                    "singulari-world visual-job-release --world-id {} --slot {} --json",
-                    claim.world_id, claim.slot
-                );
-                emit_host_event(&serde_json::json!({
-                    "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
-                    "event": "codex_app_image_generate_required",
-                    "world_id": claim.world_id.as_str(),
-                    "slot": claim.slot.as_str(),
-                    "claim_id": claim.claim_id.as_str(),
-                    "claimed_by": claim.claimed_by.as_str(),
-                    "claimed_at": claim.claimed_at.as_str(),
-                    "tool": claim.job.tool.as_str(),
-                    "codex_app_call": &claim.job.codex_app_call,
-                    "prompt": claim.job.prompt.as_str(),
-                    "reference_paths": &claim.job.reference_paths,
-                    "destination_path": claim.job.destination_path.as_str(),
-                    "complete_command_hint": complete_command_hint,
-                    "release_command_hint": release_command_hint,
-                    "consumer": HOST_WORKER_CONSUMER,
-                }))?;
-                return Ok(true);
-            }
-            continue;
-        }
-
-        let event_key = format!("visual-available:{world_id}:{}", job.slot);
-        if !emitted.insert(event_key) {
-            continue;
-        }
-        let claim_command_hint = format!(
-            "singulari-world visual-job-claim --world-id {} --slot {} --json",
-            world_id, job.slot
-        );
+        let outcome = claim_visual_job(&ClaimVisualJobOptions {
+            store_root: store_root.map(Path::to_path_buf),
+            world_id: world_id.to_owned(),
+            slot: Some(job.slot.clone()),
+            claimed_by: "singulari_host_worker".to_owned(),
+            force: false,
+            extra_jobs: current_turn_visual_jobs(store_root, world_id)?,
+        })?;
+        let singulari_world::VisualJobClaimOutcome::Claimed { claim } = outcome else {
+            anyhow::bail!(
+                "visual job vanished before claim: world_id={world_id}, slot={}",
+                job.slot
+            );
+        };
+        let record = dispatch_visual_job_via_app_server(store_root, &claim, app_server_dispatch)?;
         emit_host_event(&serde_json::json!({
             "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
-            "event": "visual_job_available",
-            "world_id": world_id,
-            "slot": job.slot.as_str(),
-            "tool": job.tool.as_str(),
-            "codex_app_call": &job.codex_app_call,
-            "prompt": job.prompt.as_str(),
-            "reference_paths": &job.reference_paths,
-            "destination_path": job.destination_path.as_str(),
-            "claim_command_hint": claim_command_hint,
+            "event": "codex_app_image_generate_completed",
+            "world_id": record.world_id.as_str(),
+            "slot": record.slot.as_str(),
+            "claim_id": record.claim_id.as_deref(),
+            "saved_path": record.saved_path.as_deref(),
+            "destination_path": record.destination_path.as_str(),
+            "record_path": record.record_path.as_str(),
+            "status": record.status.as_str(),
             "consumer": HOST_WORKER_CONSUMER,
         }))?;
-        any_emitted = true;
+        return Ok(true);
     }
-    Ok(any_emitted)
+    Ok(false)
 }
 
 fn current_host_visual_jobs(
     store_root: Option<&Path>,
     world_id: &str,
-    visual_job_scope: HostVisualJobScope,
 ) -> Result<Vec<ImageGenerationJob>> {
     let mut packet_options = BuildVnPacketOptions::new(world_id.to_owned());
     packet_options.store_root = store_root.map(Path::to_path_buf);
@@ -2206,42 +1907,20 @@ fn current_host_visual_jobs(
     if let Some(job) = packet.image.image_generation_job {
         let mut jobs = vec![job];
         jobs.extend(packet.visual_assets.image_generation_jobs);
-        return Ok(filter_visual_jobs_by_scope(
-            dedupe_visual_jobs_by_slot(jobs),
-            visual_job_scope,
-        ));
+        return Ok(dedupe_visual_jobs_by_slot(jobs));
     }
     let jobs = packet.visual_assets.image_generation_jobs;
-    Ok(filter_visual_jobs_by_scope(
-        dedupe_visual_jobs_by_slot(jobs),
-        visual_job_scope,
-    ))
+    Ok(dedupe_visual_jobs_by_slot(jobs))
 }
 
 fn current_turn_visual_jobs(
     store_root: Option<&Path>,
     world_id: &str,
-    visual_job_scope: HostVisualJobScope,
 ) -> Result<Vec<ImageGenerationJob>> {
-    Ok(
-        current_host_visual_jobs(store_root, world_id, visual_job_scope)?
-            .into_iter()
-            .filter(|job| job.slot.starts_with("turn_cg:"))
-            .collect(),
-    )
-}
-
-fn filter_visual_jobs_by_scope(
-    jobs: Vec<ImageGenerationJob>,
-    visual_job_scope: HostVisualJobScope,
-) -> Vec<ImageGenerationJob> {
-    match visual_job_scope {
-        HostVisualJobScope::All => jobs,
-        HostVisualJobScope::Backgrounds => jobs
-            .into_iter()
-            .filter(|job| matches!(job.slot.as_str(), "menu_background" | "stage_background"))
-            .collect(),
-    }
+    Ok(current_host_visual_jobs(store_root, world_id)?
+        .into_iter()
+        .filter(|job| job.slot.starts_with("turn_cg:"))
+        .collect())
 }
 
 fn dedupe_visual_jobs_by_slot(jobs: Vec<ImageGenerationJob>) -> Vec<ImageGenerationJob> {
@@ -2262,122 +1941,8 @@ fn emit_host_event(event: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
-fn emit_pending_agent_turn_event(
-    store_root: Option<&Path>,
-    world_id: &str,
-    emitted: &mut HashSet<String>,
-    dispatch: Option<&AgentWatchDispatch>,
-) -> Result<bool> {
-    let Ok(pending) = load_pending_agent_turn(store_root, world_id) else {
-        return Ok(false);
-    };
-    let event_key = format!("agent:{}:{}", pending.world_id, pending.turn_id);
-    if !emitted.insert(event_key) {
-        return Ok(false);
-    }
-    emit_watch_event(&serde_json::json!({
-        "schema_version": "singulari.agent_watch_event.v1",
-        "event": "agent_turn_pending",
-        "world_id": pending.world_id,
-        "turn_id": pending.turn_id,
-        "player_input": pending.player_input,
-        "pending_ref": pending.pending_ref,
-        "command_hint": format!("singulari-world agent-next --world-id {} --json", world_id),
-        "consumer": "codex_app_background_job",
-    }))?;
-    if let Some(dispatch) = dispatch {
-        match dispatch_pending_agent_turn(store_root, &pending, dispatch)? {
-            DispatchOutcome::Started(record) => emit_watch_event(&serde_json::json!({
-                "schema_version": "singulari.agent_watch_event.v1",
-                "event": "agent_turn_dispatched",
-                "world_id": pending.world_id,
-                "turn_id": pending.turn_id,
-                "thread_id": dispatch.thread_id.as_str(),
-                "binding_source": dispatch.binding_source.as_str(),
-                "binding_updated_at": dispatch.binding_updated_at.as_str(),
-                "pid": record.pid,
-                "record_path": record.record_path,
-                "prompt_path": record.prompt_path,
-                "stdout_path": record.stdout_path,
-                "stderr_path": record.stderr_path,
-                "consumer": "codex_app_background_job",
-            }))?,
-            DispatchOutcome::AlreadyDispatched(record_path) => {
-                emit_watch_event(&serde_json::json!({
-                    "schema_version": "singulari.agent_watch_event.v1",
-                    "event": "agent_turn_dispatch_skipped",
-                    "reason": "already_dispatched",
-                    "world_id": pending.world_id,
-                    "turn_id": pending.turn_id,
-                    "thread_id": dispatch.thread_id.as_str(),
-                    "binding_source": dispatch.binding_source.as_str(),
-                    "binding_updated_at": dispatch.binding_updated_at.as_str(),
-                    "record_path": record_path,
-                    "consumer": "codex_app_background_job",
-                }))?;
-            }
-        }
-    }
-    Ok(true)
-}
-
-fn emit_pending_visual_job_events(
-    store_root: Option<&Path>,
-    world_id: &str,
-    emitted: &mut HashSet<String>,
-) -> Result<bool> {
-    let manifest = build_world_visual_assets(&BuildWorldVisualAssetsOptions {
-        store_root: store_root.map(Path::to_path_buf),
-        world_id: world_id.to_owned(),
-    })?;
-    let mut any_emitted = false;
-    for job in manifest.image_generation_jobs {
-        if load_visual_job_claim(store_root, manifest.world_id.as_str(), job.slot.as_str())?
-            .is_some()
-        {
-            continue;
-        }
-        let event_key = format!("visual:{}:{}", manifest.world_id, job.slot);
-        if !emitted.insert(event_key) {
-            continue;
-        }
-        let claim_command_hint = format!(
-            "singulari-world visual-job-claim --world-id {} --slot {} --json",
-            manifest.world_id, job.slot
-        );
-        let complete_command_hint = format!(
-            "singulari-world visual-job-complete --world-id {} --slot {} --json",
-            manifest.world_id, job.slot
-        );
-        emit_watch_event(&serde_json::json!({
-            "schema_version": "singulari.agent_watch_event.v1",
-            "event": "visual_job_pending",
-            "world_id": manifest.world_id,
-            "slot": job.slot,
-            "tool": job.tool,
-            "codex_app_call": job.codex_app_call,
-            "prompt": job.prompt,
-            "destination_path": job.destination_path,
-            "reference_paths": job.reference_paths,
-            "overwrite": job.overwrite,
-            "claim_command_hint": claim_command_hint,
-            "complete_command_hint": complete_command_hint,
-            "consumer": "codex_app_background_job",
-        }))?;
-        any_emitted = true;
-    }
-    Ok(any_emitted)
-}
-
-fn emit_watch_event(event: &serde_json::Value) -> Result<()> {
-    let mut stdout = io::stdout().lock();
-    writeln!(stdout, "{}", serde_json::to_string(event)?)?;
-    stdout.flush()?;
-    Ok(())
-}
-
 #[derive(Debug, Clone)]
-struct AgentWatchDispatch {
+struct CodexExecDispatch {
     thread_id: String,
     codex_bin: PathBuf,
     binding_source: String,
@@ -2385,13 +1950,13 @@ struct AgentWatchDispatch {
 }
 
 #[derive(Debug, Clone)]
-struct AgentWatchDispatchConfig {
+struct CodexExecDispatchConfig {
     cli_thread_id: Option<String>,
     codex_bin: Option<PathBuf>,
     bound_worlds: HashSet<String>,
 }
 
-impl AgentWatchDispatchConfig {
+impl CodexExecDispatchConfig {
     fn from_cli(thread_id: Option<String>, codex_bin: Option<PathBuf>) -> Self {
         Self {
             cli_thread_id: thread_id.filter(|value| !value.trim().is_empty()),
@@ -2404,7 +1969,7 @@ impl AgentWatchDispatchConfig {
         &mut self,
         store_root: Option<&Path>,
         world_id: &str,
-    ) -> Result<Option<AgentWatchDispatch>> {
+    ) -> Result<Option<CodexExecDispatch>> {
         if let Some(thread_id) = &self.cli_thread_id
             && self.bound_worlds.insert(world_id.to_owned())
         {
@@ -2427,7 +1992,7 @@ impl AgentWatchDispatchConfig {
             .map(PathBuf::from)
             .or_else(|| self.resolved_codex_bin())
             .unwrap_or_else(|| PathBuf::from("codex"));
-        Ok(Some(AgentWatchDispatch {
+        Ok(Some(CodexExecDispatch {
             thread_id: binding.thread_id,
             codex_bin,
             binding_source: binding.source,
@@ -2823,7 +2388,7 @@ struct CodexAppServerImageDispatchRecord {
 fn dispatch_pending_agent_turn(
     store_root: Option<&Path>,
     pending: &singulari_world::PendingAgentTurn,
-    dispatch: &AgentWatchDispatch,
+    dispatch: &CodexExecDispatch,
 ) -> Result<DispatchOutcome> {
     let dispatch_dir = dispatch_dir_for_pending(pending)?;
     fs::create_dir_all(&dispatch_dir)

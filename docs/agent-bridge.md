@@ -41,10 +41,10 @@ truth strings or forbidden leak strings from the pending packet.
 The VN browser does not call an LLM by itself. It only writes durable pending
 jobs into the world store:
 
-- `agent_turn_pending`: a player choice/freeform action is waiting for narrative
-  authorship.
-- `visual_job_pending`: a menu/stage/turn/character/location image job is waiting
-  for Codex App's built-in image generation capability.
+- `codex_app_server_dispatch_started`: a queued player action was dispatched to
+  Codex App app-server for narrative authorship.
+- `codex_app_image_generate_completed`: a visual job closed through Codex App
+  `imageGeneration` and was written back into the world store.
 
 For local Codex App play, the operator phrase `싱귤러리 월드 준비해줘` means:
 start the background worker and leave it running so the browser can advance
@@ -54,17 +54,15 @@ world turns without a manual chat turn. The app-facing entrypoint is
 ```bash
 singulari-world --store-root .world-store host-worker \
   --text-backend codex-app-server \
-  --no-visual-jobs \
   --interval-ms 750
 ```
 
 Codex App should remain open while the VN browser is used. The worker starts a
 managed loopback `codex app-server` when no `--codex-app-server-url` is passed,
 dispatches pending text turns through that websocket, and commits completed
-text results back into the world store. Prep mode passes `--no-visual-jobs`
-because image work must be consumed by Codex App's host image capability, not by
-the active Codex chat session. When there is no active world or no pending text
-work, it idles.
+text results back into the world store. The same worker consumes visual jobs
+through Codex App `imageGeneration` and writes completion metadata. When there
+is no active world or no pending work, it idles.
 
 For a packaged app, Codex App should own this cross-platform background process
 instead of relying on OS-specific schedulers such as launchd or Windows Task
@@ -82,69 +80,26 @@ singulari-world --store-root .world-store host-worker \
   --text-backend codex-exec-resume
 ```
 
-The lower-level watcher remains available for hosts that only need raw events:
-
-```bash
-singulari-world --store-root .world-store agent-watch --world-id <world-id>
-```
-
-For a one-shot poll that the app can schedule itself:
-
-```bash
-singulari-world --store-root .world-store agent-watch --world-id <world-id> --once
-```
-
-The command prints newline-delimited JSON events. Codex App can subscribe to
-stdout and route each event to the right internal worker. Visual jobs carry a
-`codex_app_call` object; Codex App's host image worker should run that host
-capability, save the PNG exactly to `destination_path`, then refresh
-`worldsim_current` or `worldsim_visual_assets`.
+The normal app loop uses `host-worker`. It prints newline-delimited JSON events
+for dispatch and completion state while also closing the work itself.
 
 ```json
-{"event":"agent_turn_pending","world_id":"...","turn_id":"turn_0001","pending_ref":"..."}
-{"event":"visual_job_pending","world_id":"...","slot":"stage_background","tool":"codex_app.image.generate","codex_app_call":{"capability":"image_generation","destination_path":"..."}}
+{"event":"codex_app_server_dispatch_started","world_id":"...","turn_id":"turn_0001","turn_status":"completed"}
+{"event":"codex_app_image_generate_completed","world_id":"...","slot":"turn_cg:turn_0001","status":"completed"}
 ```
 
 Image generation is not dispatched through `codex exec` or through the active
 Codex chat's visual session. It is queue-based: the simulator exposes a redacted
-visual job, then Codex App's host layer consumes the job with its image
-generation capability and saves the PNG. Until that packaged host worker exists,
-use the manual claim/complete contract below.
+visual job, then `host-worker` claims it, asks Codex App app-server for exactly
+one `imageGeneration`, copies the returned saved PNG, writes completion
+metadata, and clears the active claim.
 
-The manual contract remains:
-
-```bash
-singulari-world --store-root .world-store visual-job-claim \
-  --world-id <world-id> \
-  --slot <slot> \
-  --json
-
-# Codex App consumes the job with codex_app.image.generate and saves a PNG to
-# claim.job.destination_path.
-
-singulari-world --store-root .world-store visual-job-complete \
-  --world-id <world-id> \
-  --slot <slot> \
-  --claim-id <claim-id> \
-  --json
-```
-
-`visual-job-claim` writes an atomic claim under
-`worlds/<world-id>/visual_jobs/claims/`, so multiple workers do not generate the
-same asset. `visual-job-complete` verifies that the result is a real PNG, writes
-completion metadata under `visual_jobs/completed/`, removes the active claim,
-and refreshes the manifest so the VN server can pick up the asset on the next
-packet refresh. If Codex App receives a generated PNG at a temporary path, pass
-`--generated-path <png>` to copy it into the job destination during completion.
-If the host generation fails or is cancelled, use `visual-job-release --slot
-<slot>` / `worldsim_release_visual_job` so the job can be claimed again.
-
-For realtime local play inside an existing Codex thread, pass that thread id to
-the watcher once, or bind it explicitly:
+For realtime local play inside an existing Codex thread, bind it explicitly or
+pass it to `host-worker`:
 
 ```bash
 SINGULARI_WORLD_CODEX_BIN=/path/to/codex \
-singulari-world --store-root .world-store agent-watch \
+singulari-world --store-root .world-store host-worker \
   --world-id <world-id> \
   --interval-ms 750 \
   --codex-thread-id <codex-thread-id>
@@ -204,10 +159,10 @@ duplicate Codex turns.
 
 The durable binding lives at
 `worlds/<world-id>/agent_bridge/codex_thread_binding.json`. `host-worker` and
-`agent-watch` read that file on every tick, so moving play to a new Codex chat
-only requires re-running `codex-thread-bind`; the long-running watcher does not
-need to be restarted. Passing `--codex-thread-id` to `host-worker` or
-`agent-watch` seeds or refreshes that binding for the watched world.
+`codex-thread-bind` are the only public binding surfaces. Moving play to a new
+Codex chat only requires re-running `codex-thread-bind`; the long-running worker
+does not need to be restarted. Passing `--codex-thread-id` to `host-worker`
+seeds or refreshes that binding for the watched world.
 
 `codex-exec-resume` is a realtime CLI backend for hosts that do not run a
 Codex app-server websocket. `codex_app_poller_turn_required` remains only a

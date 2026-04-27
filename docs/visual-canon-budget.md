@@ -98,37 +98,31 @@ The simulator does not call external image APIs and does not route image
 generation through `codex exec`. It exposes player-visible jobs for Codex App to
 consume through its host image-generation capability.
 
-For normal Codex App play, the `싱귤러리 월드 준비해줘` prep worker must not
-consume image jobs:
+For normal Codex App play, the `싱귤러리 월드 준비해줘` worker consumes both
+text turns and visual jobs through Codex App app-server:
 
 ```bash
 singulari-world --store-root .world-store host-worker \
   --text-backend codex-app-server \
-  --no-visual-jobs \
   --interval-ms 750
 ```
 
-Image jobs are consumed only by Codex App's host image capability. The active
-Codex chat/session-level visual generation path is not a valid worker for this
-contract, and a manually generated chat image must not be recorded as a worker
-success.
+Image jobs are consumed only by Codex App's host image capability. The worker
+claims one job, requests exactly one `imageGeneration`, copies the returned
+saved file, and completes the job. The active Codex chat/session-level visual
+generation path is not a valid worker for this contract.
 
 The primary Codex App path is MCP-driven: `worldsim_claim_visual_job` returns
 structured content with `job.codex_app_call`, Codex App runs its built-in image
 generation capability, and `worldsim_complete_visual_job` registers the PNG.
-Manual claim/complete remains the fallback contract.
 
 Worker loop:
 
-1. Run `host-worker --claim-visual-jobs`, poll `agent-watch` stdout, or call
-   `worldsim_visual_assets`.
-2. Claim one job with `visual-job-claim` / `worldsim_claim_visual_job`.
-3. Run Codex App image generation with `claim.job.prompt`,
-   `claim.job.reference_paths`, and `claim.job.destination_path`.
-4. Save a PNG exactly to `destination_path`.
-5. Complete with `visual-job-complete` / `worldsim_complete_visual_job`.
-6. On host failure or cancellation, release with `visual-job-release` /
-   `worldsim_release_visual_job` instead of leaving the claim locked.
+1. `host-worker` or `worldsim_claim_visual_job` claims one job.
+2. Codex App runs image generation from `claim.job.codex_app_call`.
+3. The returned saved PNG is copied to `destination_path`.
+4. Completion metadata is written through `complete_visual_job` /
+   `worldsim_complete_visual_job`.
 
 Claims live under `visual_jobs/claims/` and are created atomically. Completion
 verifies PNG bytes, records metadata under `visual_jobs/completed/`, removes the

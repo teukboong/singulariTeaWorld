@@ -81,15 +81,15 @@ cargo build --locked --bin singulari-world
 
 target/debug/singulari-world --store-root .world-store host-worker \
   --text-backend codex-app-server \
-  --no-visual-jobs \
   --interval-ms 750
 ```
 
 That worker starts a managed loopback `codex app-server` when no
-`--codex-app-server-url` is provided. In prep mode it consumes pending text
-turns only. It must not claim visual jobs or call this Codex chat's visual
-generation session. Keep Codex App open while playing; idle worker ticks spend
-zero model tokens and wait for browser-created text work.
+`--codex-app-server-url` is provided. It consumes pending text turns and visual
+jobs through Codex App app-server only. Visual jobs must close through
+`imageGeneration -> savedPath -> complete`; do not route them through this
+Codex chat's visual generation session. Keep Codex App open while playing; idle
+worker ticks spend zero model tokens and wait for browser-created work.
 
 After prep, the only user-facing runtime that still needs to run is the VN app:
 
@@ -160,8 +160,7 @@ Core MCP tools:
 The browser queues player input; a trusted local agent commits the visible turn.
 
 For normal Codex App play, prefer the prep command above. Manual
-`agent-submit` / `agent-next` / `agent-commit` commands are debugging and
-fallback tools.
+`agent-submit` / `agent-next` / `agent-commit` commands are debugging tools.
 
 Queue input:
 
@@ -190,7 +189,6 @@ run the host worker with the realtime app-server backend:
 ```bash
 singulari-world host-worker \
   --text-backend codex-app-server \
-  --no-visual-jobs \
   --interval-ms 750
 ```
 
@@ -202,8 +200,7 @@ store-root `agent_bridge` directory, and stops the child when the worker exits.
 `codex-app-poller` is a legacy event-only contract that emits a poller action
 event, and `codex-exec-resume` is the on-demand CLI backend for hosts without an
 app-server websocket. `host-session-api` is only a deprecated compatibility
-alias. The lower-level `agent-watch` command remains available for raw event
-watching. Both commands read
+alias. `host-worker` reads
 `worlds/<world-id>/agent_bridge/codex_thread_binding.json` on every tick, so
 rebinding does not require restarting the worker.
 When no active world exists, `host-worker` waits instead of failing, so the app
@@ -218,31 +215,19 @@ binding and let the next dispatch rebuild from the world store.
 
 ## Visual Job Worker
 
-Image jobs are host-consumed jobs, not `codex exec` jobs.
-Do not include this mode in the `싱귤러리 월드 준비해줘` prep worker. Start visual
-work only when the operator explicitly wants Codex App's host image capability
-to consume pending visual jobs. The Codex chat/session-level `image_gen` path is
-not an acceptable substitute for the packaged host image worker.
+Image jobs are host-consumed jobs, not `codex exec` jobs. The same
+`host-worker` started by `싱귤러리 월드 준비해줘` owns the app-server image loop:
+claim one job, request Codex App `imageGeneration`, copy the returned
+`savedPath`, then complete the job. The Codex chat/session-level `image_gen`
+path is not an acceptable substitute.
 
-Claim one job:
-
-```bash
-singulari-world visual-job-claim --world-id <world-id> --json
-```
-
-Automatic completion uses the standalone `singulari-world-mcp` tool surface.
+The MCP path uses the standalone `singulari-world-mcp` tool surface.
 `worldsim_claim_visual_job` returns structured MCP content containing
 `job.codex_app_call`. Codex App consumes that structured call with its built-in
 image generation capability, writes the PNG to `destination_path`, then calls
 `worldsim_complete_visual_job`. This is the repo-owned MCP contract; it does not
-depend on `~/.codex` skills, external provider keys, or the active chat's
-manual image generation path.
-
-The host should run its image generation capability with:
-
-- `claim.job.prompt`
-- `claim.job.reference_paths`
-- `claim.job.destination_path`
+depend on `~/.codex` skills, external provider keys, or the active chat visual
+session.
 
 Then complete:
 
@@ -292,7 +277,7 @@ Implemented:
 - agent pending/commit loop
 - realtime Codex app-server and CLI thread dispatch
 - host worker supervisor contract
-- visual job claim/complete/release contract
+- visual job app-server and MCP completion contracts
 - privacy audit gate for tracked files and git history
 - release and smoke scripts
 

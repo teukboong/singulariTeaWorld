@@ -14,15 +14,13 @@ and keep Codex App open while the VN browser is used:
 ```bash
 singulari-world --store-root .world-store host-worker \
   --text-backend codex-app-server \
-  --no-visual-jobs \
   --interval-ms 750
 ```
 
 This prepares the managed loopback `codex app-server`, realtime text dispatch,
-and no image queue consumption. It is safe to start before a world exists; the
-worker emits `worker_waiting_for_active_world` until the browser creates or
-loads one. Idle ticks do not start model turns. Visual jobs remain queued for
-Codex App's host image capability.
+and image queue consumption through Codex App `imageGeneration`. It is safe to
+start before a world exists; the worker emits `worker_waiting_for_active_world`
+until the browser creates or loads one. Idle ticks do not start model turns.
 
 After that, the web-facing process can be started independently:
 
@@ -80,7 +78,7 @@ Text turn dispatch has these backend modes:
   - Development path.
   - Emits the exact pending turn and command hints without dispatching.
 
-Image generation has three integration modes:
+Image generation has two production entrypoints:
 
 - `singulari-world-mcp`
   - Primary Codex App path.
@@ -91,13 +89,6 @@ Image generation has three integration modes:
     `worldsim_complete_visual_job`.
   - This is the standalone repo contract; it does not depend on `~/.codex`
     skills or external provider keys.
-
-- `manual`
-  - The worker emits `codex_app_image_generate_required` after claiming a visual
-    job.
-  - The embedding host calls its image-generation capability and saves a PNG to
-    the returned `destination_path`.
-  - The host completes or releases the job through the CLI or MCP.
 
 - `codex-app-server`
   - Standalone Codex App app-server path.
@@ -116,11 +107,10 @@ Start a one-shot host worker:
 singulari-world host-worker \
   --world-id <world-id> \
   --once \
-  --text-backend manual \
-  --no-visual-jobs
+  --text-backend codex-app-server
 ```
 
-Run the current text fallback:
+Run the explicit `codex exec resume` text backend:
 
 ```bash
 singulari-world codex-thread-bind \
@@ -155,23 +145,18 @@ then it follows the active world binding.
 Pass `--codex-app-server-url ws://127.0.0.1:<port>` only when the embedding host
 already owns the app-server process.
 
-Run with host-owned image jobs in manual event mode:
+Run with host-owned image jobs:
 
 ```bash
 singulari-world host-worker \
   --world-id <world-id> \
   --text-backend codex-app-server \
-  --claim-visual-jobs \
-  --visual-backend manual \
   --interval-ms 750
 ```
 
-`--claim-visual-jobs` claims at most one unclaimed visual job per tick.
-With `--visual-backend manual`, the worker emits the claim payload and waits for
-the embedding host to complete or release it. The normal Codex App automatic
-path can use `singulari-world-mcp` structured results or `--visual-backend
-codex-app-server`, depending on whether Codex App is consuming MCP calls or the
-standalone worker owns the app-server loop.
+The worker claims at most one unclaimed visual job per tick, asks Codex App
+`app-server` for one `imageGeneration`, copies the returned saved file into the
+world store, and writes completion metadata.
 
 ## JSONL Events
 
@@ -206,18 +191,6 @@ Manual text path:
 
 ```json
 {"event":"manual_agent_turn_required","world_id":"stw_example","turn_id":"turn_0001"}
-```
-
-Image job waiting for a host claim:
-
-```json
-{"event":"visual_job_available","world_id":"stw_example","slot":"stage_background"}
-```
-
-Claimed image job requiring host generation:
-
-```json
-{"event":"codex_app_image_generate_required","world_id":"stw_example","slot":"stage_background","claim_id":"..."}
 ```
 
 App-server image job completed:

@@ -44,8 +44,7 @@ cargo build --locked --bin singulari-world
 
 target/debug/singulari-world --store-root .world-store host-worker \
   --interval-ms 750 \
-  --text-backend codex-app-server \
-  --no-visual-jobs
+  --text-backend codex-app-server
 ```
 
 Then start the VN app:
@@ -69,12 +68,11 @@ loopback port, records the runtime URL under the store-root `agent_bridge`
 directory, and stops it when the worker exits. Keep Codex App open while the web
 app is in use. Idle ticks spend zero model tokens.
 
-Prep mode passes `--no-visual-jobs` on purpose. Opening the main menu or
-creating a fresh world must not start image generation through the active Codex
-chat session. Image jobs are a separate host capability contract: Codex App must
-claim a redacted visual job, run its host image generation capability, save the
-PNG to `destination_path`, then complete the job. There is no external provider
-or local placeholder path.
+The worker owns the Codex App app-server loop for both text turns and visual
+jobs. It claims one pending visual job per tick, asks Codex App for one
+`imageGeneration`, copies the returned PNG to `destination_path`, and completes
+the job. It never uses external providers, local placeholders, `~/.codex`
+skills, or the active chat visual session.
 
 For automatic image completion, the installed `singulari-world-mcp` server is
 the standalone bridge. `worldsim_claim_visual_job` returns structured MCP
@@ -118,18 +116,8 @@ player-visible manifest and Codex App image generation jobs without requiring a
 separate image provider. `worldsim_claim_visual_job` also includes the current
 turn CG job from the VN packet when it is pending. Codex App should claim and
 complete those jobs through `worldsim_claim_visual_job` and
-`worldsim_complete_visual_job`. If generation fails, release the claim with
-`worldsim_release_visual_job` / `visual-job-release`:
-
-```bash
-cargo run --bin singulari-world -- visual-job-claim --world-id "<world-id>" --json
-# run Codex App image generation with the returned prompt and save the PNG
-cargo run --bin singulari-world -- visual-job-complete \
-  --world-id "<world-id>" \
-  --slot "<slot>" \
-  --claim-id "<claim-id>" \
-  --json
-```
+`worldsim_complete_visual_job`. The CLI claim/complete commands remain operator
+inspection tools, not the normal play loop.
 
 ## Seed Anchor
 

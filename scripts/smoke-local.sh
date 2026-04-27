@@ -28,42 +28,9 @@ cargo build --locked
   --world-id "$WORLD_ID" \
   --json | grep -q '"player_input": "1"'
 
-"$BIN" --store-root "$STORE_ROOT" host-worker \
-  --world-id "$WORLD_ID" \
-  --text-backend manual \
-  --no-visual-jobs \
-  --once | grep -q '"event":"manual_agent_turn_required"'
-
-CLAIM_FILE="$STORE_ROOT/claim.json"
-"$BIN" --store-root "$STORE_ROOT" visual-job-claim \
-  --world-id "$WORLD_ID" \
-  --slot menu_background \
-  --claimed-by smoke-local \
-  --json >"$CLAIM_FILE"
-
-CLAIM_ID="$(sed -n 's/.*"claim_id": "\(.*\)".*/\1/p' "$CLAIM_FILE" | head -n 1)"
-DESTINATION_PATH="$(sed -n 's/.*"destination_path": "\(.*\)".*/\1/p' "$CLAIM_FILE" | head -n 1)"
-
-if [[ -z "$CLAIM_ID" || -z "$DESTINATION_PATH" ]]; then
-  echo "failed to parse visual job claim" >&2
-  exit 1
-fi
-
-GENERATED_PATH="$STORE_ROOT/generated.png"
-printf '\211PNG\r\n\032\nsmoke-png' >"$GENERATED_PATH"
-
-"$BIN" --store-root "$STORE_ROOT" visual-job-complete \
-  --world-id "$WORLD_ID" \
-  --slot menu_background \
-  --claim-id "$CLAIM_ID" \
-  --generated-path "$GENERATED_PATH" \
-  --json >/dev/null
-
-test -f "$DESTINATION_PATH"
-
 "$BIN" --store-root "$STORE_ROOT" visual-assets \
   --world-id "$WORLD_ID" \
-  --json | grep -q '"exists": true'
+  --json | grep -q '"codex_app_call"'
 
 "$BIN" --store-root "$STORE_ROOT" validate \
   --world-id "$WORLD_ID" \

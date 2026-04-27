@@ -99,7 +99,6 @@ Codex App prep flow:
 ```bash
 singulari-world host-worker \
   --text-backend codex-app-server \
-  --no-visual-jobs \
   --interval-ms 750
 ```
 
@@ -109,29 +108,11 @@ This is what the Codex App agent should start when the operator says
 managed loopback port, records the runtime URL in the store-root `agent_bridge`
 directory, and dispatches only when a pending world turn exists. It can be
 started before any world exists; it idles until the browser creates or loads the
-active world. Prep mode disables visual jobs; image work belongs to Codex App's
-host image capability and must not be faked by the active Codex chat session.
+active world. Visual jobs close through the same app-server loop:
+claim -> Codex App `imageGeneration` -> saved PNG -> completion metadata.
 Keep Codex App open while playing. Hosts that already own the websocket may pass
 `--codex-app-server-url`. `codex-exec-resume` remains the on-demand CLI backend
 for hosts that do not run a websocket app-server.
-
-Manual image jobs:
-
-```bash
-singulari-world visual-job-claim --world-id <world-id> --json
-# Codex App host image generation saves PNG to claim.job.destination_path.
-singulari-world visual-job-complete \
-  --world-id <world-id> \
-  --slot <slot> \
-  --claim-id <claim-id> \
-  --json
-```
-
-On image-generation host failure:
-
-```bash
-singulari-world visual-job-release --world-id <world-id> --slot <slot> --json
-```
 
 Automatic image jobs go through the installed `singulari-world-mcp` server.
 `worldsim_claim_visual_job` returns structured content containing
@@ -148,7 +129,7 @@ The standalone simulator owns:
 - text-turn pending/commit
 - Codex thread binding
 - host-worker event supervisor
-- image job claim/complete/release contracts
+- image job app-server and MCP completion contracts
 
 The embedding host still owns:
 
