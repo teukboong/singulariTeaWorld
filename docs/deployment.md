@@ -7,6 +7,9 @@ This repository is designed to be published without private world state.
 - Keep `Cargo.lock` committed.
 - Keep `.world-store/`, `target/`, `dist/`, generated images, local DB files, and
   personal world exports out of git.
+- Keep local-only scrub terms in `.privacy-denylist` or
+  `SINGULARI_PRIVACY_DENYLIST_INLINE`; both are consumed by
+  `scripts/privacy-audit.sh` without committing private terms.
 - Run the full release gate before pushing:
 
 ```bash

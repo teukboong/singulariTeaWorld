@@ -395,6 +395,8 @@ fn budgeted_turn_cg_decision(
             "visual budget mode가 eager라 서사 턴마다 CG 후보를 만든다.",
         );
     }
+    // Keep MSRV at Rust 1.88 while newer Clippy prefers `is_multiple_of`.
+    #[allow(unknown_lints, clippy::manual_is_multiple_of)]
     if turn_index > 0 && turn_index % cadence == 0 {
         return turn_cg_decision(
             "visual_budget_policy",
@@ -1141,10 +1143,10 @@ fn display_location(
     location: &str,
     place: Option<&crate::models::PlaceRecord>,
 ) -> String {
-    if let Some(place) = place {
-        if place.name != "미정" {
-            return place.name.clone();
-        }
+    if let Some(place) = place
+        && place.name != "미정"
+    {
+        return place.name.clone();
     }
     if location == crate::models::OPENING_LOCATION_ID {
         return inferred_opening_place(world);

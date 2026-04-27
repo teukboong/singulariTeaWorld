@@ -181,23 +181,23 @@ fn apply_character_metadata(
     character: &mut CharacterRecord,
     changed_fields: &mut Vec<String>,
 ) {
-    if let Some(name) = options.name.as_ref() {
-        if character.name.visible != *name {
-            character.name.visible.clone_from(name);
-            push_changed_field(changed_fields, "name");
-        }
+    if let Some(name) = options.name.as_ref()
+        && character.name.visible != *name
+    {
+        character.name.visible.clone_from(name);
+        push_changed_field(changed_fields, "name");
     }
-    if let Some(role) = options.role.as_ref() {
-        if character.role != *role {
-            character.role.clone_from(role);
-            push_changed_field(changed_fields, "role");
-        }
+    if let Some(role) = options.role.as_ref()
+        && character.role != *role
+    {
+        character.role.clone_from(role);
+        push_changed_field(changed_fields, "role");
     }
-    if let Some(knowledge_state) = options.knowledge_state.as_ref() {
-        if character.knowledge_state != *knowledge_state {
-            character.knowledge_state.clone_from(knowledge_state);
-            push_changed_field(changed_fields, "knowledge_state");
-        }
+    if let Some(knowledge_state) = options.knowledge_state.as_ref()
+        && character.knowledge_state != *knowledge_state
+    {
+        character.knowledge_state.clone_from(knowledge_state);
+        push_changed_field(changed_fields, "knowledge_state");
     }
 }
 

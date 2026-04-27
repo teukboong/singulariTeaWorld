@@ -1650,18 +1650,18 @@ impl AgentWatchDispatchConfig {
         store_root: Option<&Path>,
         world_id: &str,
     ) -> Result<Option<AgentWatchDispatch>> {
-        if let Some(thread_id) = &self.cli_thread_id {
-            if self.bound_worlds.insert(world_id.to_owned()) {
-                save_codex_thread_binding(&SaveCodexThreadBindingOptions {
-                    store_root: store_root.map(Path::to_path_buf),
-                    world_id: world_id.to_owned(),
-                    thread_id: thread_id.clone(),
-                    codex_bin: self
-                        .resolved_codex_bin()
-                        .map(|path| path.display().to_string()),
-                    source: "agent_watch_cli".to_owned(),
-                })?;
-            }
+        if let Some(thread_id) = &self.cli_thread_id
+            && self.bound_worlds.insert(world_id.to_owned())
+        {
+            save_codex_thread_binding(&SaveCodexThreadBindingOptions {
+                store_root: store_root.map(Path::to_path_buf),
+                world_id: world_id.to_owned(),
+                thread_id: thread_id.clone(),
+                codex_bin: self
+                    .resolved_codex_bin()
+                    .map(|path| path.display().to_string()),
+                source: "agent_watch_cli".to_owned(),
+            })?;
         }
         let Some(binding) = load_codex_thread_binding(store_root, world_id)? else {
             return Ok(None);

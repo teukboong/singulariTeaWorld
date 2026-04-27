@@ -351,13 +351,13 @@ fn validate_canon_events(
                 ));
             }
         }
-        if let Some(location) = &event.location {
-            if !known_refs.contains(location) {
-                errors.push(format!(
-                    "canon event {} references unknown location {}",
-                    event.event_id, location
-                ));
-            }
+        if let Some(location) = &event.location
+            && !known_refs.contains(location)
+        {
+            errors.push(format!(
+                "canon event {} references unknown location {}",
+                event.event_id, location
+            ));
         }
     }
 }

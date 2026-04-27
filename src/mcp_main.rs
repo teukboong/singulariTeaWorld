@@ -469,12 +469,12 @@ fn worldsim_commit_agent_turn(
     let response: AgentTurnResponse = serde_json::from_value(params.response)
         .context("worldsim_commit_agent_turn response object is not a valid agent turn response")?;
     let world_id = resolve_world_id(store_root.as_deref(), Some(response.world_id.as_str()))?;
-    if let Some(requested_world_id) = params.world_id.as_deref() {
-        if requested_world_id != world_id {
-            bail!(
-                "worldsim_commit_agent_turn world_id mismatch: argument={requested_world_id}, response={world_id}"
-            );
-        }
+    if let Some(requested_world_id) = params.world_id.as_deref()
+        && requested_world_id != world_id
+    {
+        bail!(
+            "worldsim_commit_agent_turn world_id mismatch: argument={requested_world_id}, response={world_id}"
+        );
     }
     commit_agent_turn(&AgentCommitTurnOptions {
         store_root,

@@ -17,3 +17,6 @@ vn-web/current-vn.json
 *.swp
 *.tmp
 *.log
+
+# Local-only privacy scrub terms. Never commit personal identifiers here.
+.privacy-denylist

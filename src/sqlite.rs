@@ -80,15 +80,15 @@ pub fn configure_sqlite_connection(
         conn.execute_batch("PRAGMA foreign_keys = ON;")
             .with_context(|| format!("{} foreign_keys failed", options.db_name))?;
     }
-    if let Some(journal_mode) = options.journal_mode {
-        if !pragma_already_matches(conn, "journal_mode", journal_mode)? {
-            apply_pragma_with_retry(conn, options, "journal_mode", journal_mode)?;
-        }
+    if let Some(journal_mode) = options.journal_mode
+        && !pragma_already_matches(conn, "journal_mode", journal_mode)?
+    {
+        apply_pragma_with_retry(conn, options, "journal_mode", journal_mode)?;
     }
-    if let Some(synchronous) = options.synchronous {
-        if !pragma_already_matches(conn, "synchronous", synchronous)? {
-            apply_pragma_with_retry(conn, options, "synchronous", synchronous)?;
-        }
+    if let Some(synchronous) = options.synchronous
+        && !pragma_already_matches(conn, "synchronous", synchronous)?
+    {
+        apply_pragma_with_retry(conn, options, "synchronous", synchronous)?;
     }
 
     Ok(())

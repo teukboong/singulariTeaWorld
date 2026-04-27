@@ -33,6 +33,7 @@ smoke ok: world_id=<id> store_root=<temp-dir>
 Run before publishing or after changing runtime behavior:
 
 ```bash
+scripts/privacy-audit.sh
 cargo fmt --all -- --check
 cargo check --locked
 cargo test --locked
@@ -214,6 +215,7 @@ Implemented:
 - agent pending/commit loop
 - realtime Codex thread binding fallback
 - visual job claim/complete/release contract
+- privacy audit gate for tracked files and git history
 - release and smoke scripts
 
 Still host-owned:

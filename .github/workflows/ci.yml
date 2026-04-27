@@ -11,7 +11,9 @@ jobs:
   rust:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6.0.2
+      - name: Privacy audit
+        run: scripts/privacy-audit.sh
       - name: Install Rust
         run: |
           rustup toolchain install 1.88.0 --profile minimal --component rustfmt --component clippy

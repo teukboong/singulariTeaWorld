@@ -6,6 +6,7 @@ DIST_DIR="$ROOT_DIR/dist/$(date +%Y%m%d%H%M%S)"
 
 cd "$ROOT_DIR"
 
+scripts/privacy-audit.sh
 cargo fmt --all -- --check
 cargo check --locked
 cargo test --locked

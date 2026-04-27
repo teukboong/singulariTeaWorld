@@ -111,6 +111,16 @@ Do not commit private presets, real conversation memories, generated world saves
 or local image assets. Fictional world state belongs in a local world store or an
 explicit export bundle chosen by the user.
 
+Run the privacy audit before publishing:
+
+```bash
+scripts/privacy-audit.sh
+```
+
+For personal names, emails, private project names, or local-only lore, put one
+literal term per line in `.privacy-denylist`. That file is ignored by git and is
+also honored by `scripts/release-build.sh`.
+
 ## Release Gate
 
 ```bash
