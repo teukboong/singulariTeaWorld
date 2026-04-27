@@ -28,33 +28,52 @@ cargo run --bin singulari-world -- start \
 cargo run --bin singulari-world -- vn-serve --port 4177
 ```
 
-Agent-authored VN flow:
+## Codex App Play Mode
+
+The intended local play flow is:
+
+1. Open Codex App.
+2. Tell the agent: `싱귤러리 월드 준비해줘`.
+3. Let the agent start the background worker below.
+4. Run or open the VN web app and keep Codex App open while playing.
+
+Prep command:
 
 ```bash
-SINGULARI_WORLD_AGENT_BRIDGE=1 cargo run --bin singulari-world -- vn-serve --port 4177
-```
+cargo build --locked --bin singulari-world
 
-Background job bridge for packaged apps:
-
-```bash
-codex app-server --listen ws://127.0.0.1:<port>
-
-cargo run --bin singulari-world -- host-worker \
+target/debug/singulari-world --store-root .world-store host-worker \
   --interval-ms 750 \
-  --text-backend codex-app-server
+  --text-backend codex-app-server \
+  --claim-visual-jobs \
+  --visual-backend codex-app-server
 ```
 
-`host-worker` is the cross-platform process an embedding app should start and
-stop with the VN app. Its primary realtime text backend is `codex-app-server`,
-which talks to the official Codex app-server websocket and starts a model turn
-only when a pending world turn exists. If no `--codex-app-server-url` is
-provided, the worker starts `codex app-server` on a loopback port, records the
-runtime URL under the store-root `agent_bridge` directory, and stops it when the
-worker exits. `codex-exec-resume` remains the on-demand CLI backend for hosts
-that do not run an app-server websocket. Image jobs are queue-based too: Codex
-App consumes the redacted
-`codex_app.image.generate` job and saves the PNG to the returned
-`destination_path`.
+Then start the VN app:
+
+```bash
+target/debug/singulari-world --store-root .world-store vn-serve --port 4177
+```
+
+Open:
+
+```text
+http://127.0.0.1:4177/
+```
+
+`host-worker` is the cross-platform process an embedding app should start
+before the VN app needs agent-authored turns. Its primary realtime text backend
+is `codex-app-server`, which talks to the official Codex app-server websocket
+and starts a model turn only when a pending world turn exists. If no
+`--codex-app-server-url` is provided, the worker starts `codex app-server` on a
+loopback port, records the runtime URL under the store-root `agent_bridge`
+directory, and stops it when the worker exits. Keep Codex App open while the web
+app is in use. Idle ticks spend zero model tokens.
+
+Image jobs are queue-based too: `--visual-backend codex-app-server` claims
+redacted visual jobs, asks Codex App for a real `imageGeneration` item, reads
+its `savedPath`, then completes the job into the world store. There is no
+external provider or local placeholder path.
 
 Each world owns a durable Codex `thread_id` under
 `worlds/<world-id>/agent_bridge/codex_thread_binding.json`. That thread keeps
@@ -62,6 +81,18 @@ the warm narrative context; the world DB remains source of truth and is injected
 into every turn so Codex compaction or thread rebuilds do not erase canon.
 When no active world exists yet, `host-worker` idles until the browser creates
 or loads one.
+
+For phone play over Tailscale, use the same VN web app, not a separate mobile
+URL:
+
+```bash
+target/debug/singulari-world --store-root .world-store vn-serve \
+  --host <tailscale-ip-or-hostname> \
+  --port 4177
+```
+
+The VN server allowlist accepts loopback and Tailscale addresses only. Do not
+use `0.0.0.0` as a shortcut.
 
 The MCP server runs over stdio:
 
@@ -90,6 +121,16 @@ cargo run --bin singulari-world -- visual-job-complete \
   --slot "<slot>" \
   --claim-id "<claim-id>" \
   --json
+```
+
+For the packaged runtime, prefer the automatic app-server image path instead of
+manual claim/complete:
+
+```bash
+cargo run --bin singulari-world -- host-worker \
+  --text-backend codex-app-server \
+  --claim-visual-jobs \
+  --visual-backend codex-app-server
 ```
 
 ## Seed Anchor

@@ -78,27 +78,57 @@ Open:
 http://127.0.0.1:4177/
 ```
 
+For Tailscale phone play, keep the same responsive web app and bind only to a
+Tailscale address or hostname:
+
+```bash
+cargo run --locked --bin singulari-world -- vn-serve \
+  --host <tailscale-ip-or-hostname> \
+  --port 4177
+```
+
+The VN server is intentionally not a general LAN server. Loopback and Tailscale
+are allowed; `0.0.0.0` and normal LAN addresses should fail closed.
+
 ## Background Worker Contract
 
 The browser writes durable pending jobs. It does not call an LLM directly.
 
-Text turns:
+Codex App prep flow:
 
 ```bash
 singulari-world host-worker \
   --text-backend codex-app-server \
+  --claim-visual-jobs \
+  --visual-backend codex-app-server \
   --interval-ms 750
 ```
 
-The intended packaged-app backend is `codex-app-server`. By default, the worker
-starts `codex app-server` on a managed loopback port, records the runtime URL in
-the store-root `agent_bridge` directory, and dispatches only when a pending world
-turn exists. It can be started before any world exists; it idles until the
-browser creates or loads the active world. Hosts that already own the websocket may pass
-`--codex-app-server-url`. `codex-exec-resume` remains the on-demand CLI backend
-for hosts that do not run a websocket app-server.
+This is what the Codex App agent should start when the operator says
+`싱귤러리 월드 준비해줘`. The intended packaged-app backend is
+`codex-app-server`. By default, the worker starts `codex app-server` on a
+managed loopback port, records the runtime URL in the store-root `agent_bridge`
+directory, and dispatches only when a pending world turn or image job exists.
+It can be started before any world exists; it idles until the browser creates or
+loads the active world. Keep Codex App open while playing. Hosts that already
+own the websocket may pass `--codex-app-server-url`. `codex-exec-resume` remains
+the on-demand CLI backend for hosts that do not run a websocket app-server.
 
-Image jobs:
+Automatic image jobs through Codex App app-server:
+
+```bash
+singulari-world host-worker \
+  --text-backend codex-app-server \
+  --claim-visual-jobs \
+  --visual-backend codex-app-server \
+  --interval-ms 750
+```
+
+This mode uses Codex App `imageGeneration`, captures the generated item's
+`savedPath`, and completes the job into the active world store. It does not use
+external providers or generated placeholders.
+
+Manual image jobs:
 
 ```bash
 singulari-world visual-job-claim --world-id <world-id> --json
@@ -130,10 +160,7 @@ The standalone simulator owns:
 
 The embedding host still owns:
 
-- starting/stopping `agent-watch`
+- keeping Codex App open and authenticated
 - starting/stopping `host-worker`
-- starting/stopping the Codex app-server websocket
-- passing `--codex-app-server-url` to `host-worker`
-- consuming `visual_job_pending`
-- calling its image generation capability
-- saving PNG files to the returned destination paths
+- optionally passing `--codex-app-server-url` when it owns app-server itself
+- starting/stopping the VN server

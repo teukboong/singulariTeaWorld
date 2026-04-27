@@ -69,6 +69,53 @@ Open:
 http://127.0.0.1:4177/
 ```
 
+## Codex App Prep
+
+When the operator says `싱귤러리 월드 준비해줘` from Codex App, prepare the
+background runtime, not a one-off chat turn.
+
+From this repository, build the binary and start one long-running worker:
+
+```bash
+cargo build --locked --bin singulari-world
+
+target/debug/singulari-world --store-root .world-store host-worker \
+  --text-backend codex-app-server \
+  --claim-visual-jobs \
+  --visual-backend codex-app-server \
+  --interval-ms 750
+```
+
+That worker starts a managed loopback `codex app-server` when no
+`--codex-app-server-url` is provided. It consumes both pending text turns and
+redacted CG jobs through Codex App, then writes completed results back into the
+world store. Keep Codex App open while playing; idle worker ticks spend zero
+model tokens and wait for browser-created work.
+
+After prep, the only user-facing runtime that still needs to run is the VN app:
+
+```bash
+target/debug/singulari-world --store-root .world-store vn-serve --port 4177
+```
+
+Open:
+
+```text
+http://127.0.0.1:4177/
+```
+
+For phone play over Tailscale, use the same web app and pass only a Tailscale
+address or hostname:
+
+```bash
+target/debug/singulari-world --store-root .world-store vn-serve \
+  --host <tailscale-ip-or-hostname> \
+  --port 4177
+```
+
+Do not bind the VN server to `0.0.0.0` for convenience. The server allowlist is
+loopback plus Tailscale, so normal LAN exposure should fail closed.
+
 Use a specific store:
 
 ```bash
@@ -113,6 +160,10 @@ Core MCP tools:
 
 The browser queues player input; a trusted local agent commits the visible turn.
 
+For normal Codex App play, prefer the prep command above. Manual
+`agent-submit` / `agent-next` / `agent-commit` commands are debugging and
+fallback tools.
+
 Queue input:
 
 ```bash
@@ -140,6 +191,8 @@ run the host worker with the realtime app-server backend:
 ```bash
 singulari-world host-worker \
   --text-backend codex-app-server \
+  --claim-visual-jobs \
+  --visual-backend codex-app-server \
   --interval-ms 750
 ```
 
@@ -168,6 +221,20 @@ binding and let the next dispatch rebuild from the world store.
 ## Visual Job Worker
 
 Image jobs are host-consumed jobs, not `codex exec` jobs.
+
+Preferred packaged-app path:
+
+```bash
+singulari-world host-worker \
+  --text-backend codex-app-server \
+  --claim-visual-jobs \
+  --visual-backend codex-app-server \
+  --interval-ms 750
+```
+
+That path uses Codex App app-server `imageGeneration`, reads the generated
+item's `savedPath`, and completes the job into the world store. It must not call
+external providers, local drawing fallbacks, or chat-session image generation.
 
 Claim one job:
 
@@ -235,6 +302,6 @@ Implemented:
 
 Still host-owned:
 
-- app-managed start/stop of `agent-watch`
-- actual Codex App image-generation invocation
+- keeping Codex App open while the worker uses app-server
+- app-managed start/stop of `host-worker`
 - packaged installers for macOS/Windows/Linux

@@ -4,6 +4,7 @@ const currentApiUrl = "/api/vn/current";
 const chooseApiUrl = "/api/vn/choose";
 const agentPendingApiUrl = "/api/vn/agent/pending";
 const runtimeStatusApiUrl = "/api/vn/runtime-status";
+const cgGalleryApiUrl = "/api/vn/cg/gallery";
 const worldsApiUrl = "/api/vn/worlds";
 const selectWorldApiUrl = "/api/vn/worlds/select";
 const newWorldApiUrl = "/api/vn/worlds/new";
@@ -16,6 +17,7 @@ const LOG_PAGE_SIZE = 5;
 const SIDE_DOCK_RIGHT_EXIT_GRACE_MS = 900;
 const VISUAL_JOB_POLL_MS = 2500;
 const RUNTIME_STATUS_POLL_MS = 3000;
+const DEFAULT_VIEW_MODE = "text";
 const AGENT_WAITING_BADGE = "흐름 수렴 중";
 const AGENT_WAITING_COPY = {
   initial: [
@@ -33,7 +35,6 @@ const DEFAULT_SETTINGS = {
   cgPrompt: "",
   guideChoiceEnabled: true,
   autoReveal: false,
-  defaultView: "cg",
   textScale: "1",
   reduceMotion: false,
 };
@@ -51,6 +52,7 @@ const state = {
   baseImagePrompt: "",
   visualAssets: null,
   runtimeStatus: null,
+  cgGallery: null,
   worlds: [],
   activeWorldId: "",
   agentPollTimer: null,
@@ -58,7 +60,7 @@ const state = {
   runtimePollTimer: null,
   awaitingAgent: false,
   settings: loadSettings(),
-  viewMode: loadViewMode(),
+  viewMode: DEFAULT_VIEW_MODE,
 };
 
 let sideDockRightExitTimer = null;
@@ -102,6 +104,7 @@ const els = {
   sideTabs: Array.from(document.querySelectorAll("[data-side-tab]")),
   sidePanes: {
     status: document.getElementById("sideStatus"),
+    gallery: document.getElementById("sideGallery"),
     textlog: document.getElementById("sideTextLog"),
     settings: document.getElementById("sideSettings"),
     console: document.getElementById("sideConsole"),
@@ -111,6 +114,9 @@ const els = {
   currentTextLog: document.getElementById("currentTextLog"),
   fullTurnMarkdown: document.getElementById("fullTurnMarkdown"),
   monitoringGrid: document.getElementById("monitoringGrid"),
+  cgGallery: document.getElementById("cgGallery"),
+  galleryStatus: document.getElementById("galleryStatus"),
+  refreshGalleryButton: document.getElementById("refreshGalleryButton"),
   runtimeStatusPanel: document.getElementById("runtimeStatusPanel"),
   runtimeDetails: document.getElementById("runtimeDetails"),
   scanList: document.getElementById("scanList"),
@@ -124,7 +130,6 @@ const els = {
   settingCgPrompt: document.getElementById("settingCgPrompt"),
   settingGuideChoice: document.getElementById("settingGuideChoice"),
   settingAutoReveal: document.getElementById("settingAutoReveal"),
-  settingDefaultView: document.getElementById("settingDefaultView"),
   settingTextScale: document.getElementById("settingTextScale"),
   settingReduceMotion: document.getElementById("settingReduceMotion"),
   settingMainMenu: document.getElementById("settingMainMenu"),
@@ -160,6 +165,7 @@ async function init() {
   });
   els.freeformButton.addEventListener("click", chooseFreeform);
   els.generateTurnCgButton.addEventListener("click", () => requestTurnCgRetry());
+  els.refreshGalleryButton.addEventListener("click", () => refreshCgGallery({ force: true }));
   els.freeformInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       chooseFreeform();
@@ -184,7 +190,7 @@ async function init() {
     });
   }
   applySettings();
-  setViewMode(state.settings.defaultView);
+  setViewMode(DEFAULT_VIEW_MODE);
 }
 
 async function loadInitialPacket() {
@@ -231,6 +237,7 @@ function renderPacket(packet) {
     revealChoices();
   }
   refreshRuntimeStatus();
+  refreshCgGallery();
   scheduleRuntimeStatusPoll();
   startVisualJobPolling();
 }
@@ -449,7 +456,7 @@ async function requestTurnCgRetry(options = {}) {
   state.busy = true;
   setTurnCgStatus("loading", "요청 중");
   syncTurnCgButton();
-  setCgJobStatus("턴 CG 요청 중...");
+  setCgJobStatus("턴 CG 요청 중");
   try {
     const packet = await fetchJson(cgRetryApiUrl, {
       method: "POST",
@@ -460,7 +467,7 @@ async function requestTurnCgRetry(options = {}) {
     if (openConsole) {
       selectSideTab("console");
     }
-    setCgJobStatus("Codex App host 대기 중");
+    setCgJobStatus("이미지 연결 대기 중");
     startVisualJobPolling();
   } catch (error) {
     setCgJobStatus(`턴 CG 요청 실패: ${error.message}`);
@@ -902,20 +909,7 @@ function revealChoices() {
 
 function setViewMode(mode) {
   state.viewMode = mode === "text" ? "text" : "cg";
-  try {
-    localStorage.setItem("singulari.vn.viewMode", state.viewMode);
-  } catch (_) {
-    // localStorage may be unavailable in locked-down preview contexts.
-  }
   applyViewMode();
-}
-
-function loadViewMode() {
-  try {
-    return localStorage.getItem("singulari.vn.viewMode") === "text" ? "text" : "cg";
-  } catch (_) {
-    return "cg";
-  }
 }
 
 function applyViewMode() {
@@ -1147,7 +1141,7 @@ function renderCodexView(view, redactionPolicy) {
     els.codexStructured.append(policy);
   }
   if (!view) {
-    appendEmpty(els.codexStructured, "5번 기록을 선택하면 DB-backed Archive View가 여기에 열린다.");
+    appendEmpty(els.codexStructured, "5번 기록을 선택하면 공개 기록이 여기에 열린다.");
     return;
   }
   appendCodexSection(
@@ -1233,6 +1227,9 @@ function selectSideTab(target) {
     els.sideDock.classList.remove("is-log-expanded");
   } else {
     syncTextLogExpansion();
+  }
+  if (target === "gallery") {
+    refreshCgGallery();
   }
 }
 
@@ -1320,13 +1317,13 @@ function renderCgJobPanel() {
     els.cgJobPanel.append(saved);
   }
   if (!visualJobs.length && !savedAssets.length) {
-    appendEmpty(els.cgJobPanel, "Codex 이미지 host가 아직 연결되지 않았어.");
+    appendEmpty(els.cgJobPanel, "이미지 연결이 아직 열리지 않았다.");
   }
   if (visualJobs.length) {
     const details = document.createElement("details");
     details.className = "raw-markdown";
     const summary = document.createElement("summary");
-    summary.textContent = "대기 중인 job 상세";
+    summary.textContent = "대기 상세";
     const pre = document.createElement("pre");
     pre.textContent = visualJobs
       .map((job) => {
@@ -1341,6 +1338,91 @@ function renderCgJobPanel() {
     els.requestTurnCgRetry.disabled = !turnCgJobsEnabled() || image.exists;
   }
   syncTurnCgButton();
+}
+
+async function refreshCgGallery(options = {}) {
+  if (!els.cgGallery || !state.apiAvailable || explicitPacketUrl) {
+    renderCgGallery(null);
+    return;
+  }
+  const force = Boolean(options.force);
+  if (force) {
+    setGalleryStatus("갤러리 갱신 중");
+  }
+  try {
+    const gallery = await fetchJson(cgGalleryApiUrl);
+    state.cgGallery = gallery;
+    renderCgGallery(gallery);
+    setGalleryStatus(gallery.items?.length ? `${gallery.items.length}장 준비됨` : "저장된 CG 없음");
+  } catch (error) {
+    setGalleryStatus(`갤러리 갱신 실패: ${error.message}`);
+  }
+}
+
+function renderCgGallery(gallery) {
+  if (!els.cgGallery) {
+    return;
+  }
+  els.cgGallery.replaceChildren();
+  const items = gallery?.items || [];
+  if (!items.length) {
+    appendEmpty(els.cgGallery, "아직 저장된 턴 CG가 없다.");
+    return;
+  }
+  for (const item of items) {
+    els.cgGallery.append(cgGalleryCard(item));
+  }
+}
+
+function cgGalleryCard(item) {
+  const card = document.createElement("article");
+  card.className = "cg-gallery-card";
+
+  const image = document.createElement("img");
+  image.src = item.asset_url;
+  image.alt = `${item.turn_id} CG`;
+  image.loading = "lazy";
+
+  const body = document.createElement("div");
+  body.className = "cg-gallery-body";
+
+  const meta = document.createElement("div");
+  meta.className = "cg-gallery-meta";
+  const turn = document.createElement("span");
+  turn.textContent = `turn ${item.turn_index}`;
+  const id = document.createElement("span");
+  id.textContent = item.turn_id;
+  meta.append(turn, id);
+
+  const summary = document.createElement("p");
+  summary.className = "cg-gallery-summary";
+  summary.textContent = item.prompt_summary || "프롬프트 요약 없음";
+
+  const details = document.createElement("details");
+  details.className = "cg-gallery-prompt raw-markdown";
+  const detailsSummary = document.createElement("summary");
+  detailsSummary.textContent = "프롬프트";
+  const prompt = document.createElement("pre");
+  prompt.textContent = item.image_prompt || "프롬프트 없음";
+  details.append(detailsSummary, prompt);
+
+  const actions = document.createElement("div");
+  actions.className = "cg-gallery-actions";
+  const download = document.createElement("a");
+  download.href = item.asset_url;
+  download.download = item.download_filename || `${item.turn_id}.png`;
+  download.textContent = "다운로드";
+  actions.append(download);
+
+  body.append(meta, summary, details, actions);
+  card.append(image, body);
+  return card;
+}
+
+function setGalleryStatus(text) {
+  if (els.galleryStatus) {
+    els.galleryStatus.textContent = text || "";
+  }
 }
 
 function visualSummaryRow(label, value, status) {
@@ -1409,7 +1491,7 @@ function turnCgSummaryText(image) {
     return "저장됨";
   }
   if (image.image_generation_job && turnCgJobsEnabled()) {
-    return "Codex App host 대기";
+    return "이미지 연결 대기";
   }
   return "이번 턴은 자동 생성 예산을 쓰지 않음";
 }
@@ -1441,7 +1523,7 @@ function visualJobLabel(slot) {
   if (slot?.startsWith("location_sheet")) {
     return "장소 시트";
   }
-  return slot || "visual job";
+  return slot || "비주얼 항목";
 }
 
 function startVisualJobPolling() {
@@ -1477,6 +1559,7 @@ function pollVisualJobs(attempt) {
       pollVisualJobs(attempt + 1);
     } else {
       setCgJobStatus("CG 반영 완료");
+      refreshCgGallery();
     }
   }, VISUAL_JOB_POLL_MS);
 }
@@ -1497,17 +1580,13 @@ function syncTurnCgButton() {
     !turnCgJobsEnabled() ||
     Boolean(image?.exists);
   els.generateTurnCgButton.disabled = disabled;
-  const action = image?.auto_decision?.action || "unknown";
-  const remaining = image?.auto_decision?.cadence_turns_remaining;
   els.generateTurnCgButton.title = image?.exists
     ? "이미 이 턴 CG가 저장되어 있어."
-    : `현재 턴 서사 기반 CG 생성 요청. decision=${action}${
-        Number.isFinite(remaining) ? `, cadence remaining=${remaining}` : ""
-      }`;
-  if (state.busy) {
-    setTurnCgStatus("loading", "요청 중");
-  } else if (image?.exists) {
+    : "현재 턴 서사 기반 CG 생성 요청";
+  if (image?.exists) {
     setTurnCgStatus("ready", "저장됨");
+  } else if (state.busy) {
+    setTurnCgStatus("loading", "요청 중");
   } else if (image?.image_generation_job) {
     setTurnCgStatus("loading", "생성 대기");
   } else if (missingWorldBackgroundJobs().length) {
@@ -1534,7 +1613,6 @@ function bindSettings() {
   els.settingCgPrompt.value = state.settings.cgPrompt;
   els.settingGuideChoice.checked = state.settings.guideChoiceEnabled;
   els.settingAutoReveal.checked = state.settings.autoReveal;
-  els.settingDefaultView.value = state.settings.defaultView;
   els.settingTextScale.value = state.settings.textScale;
   els.settingReduceMotion.checked = state.settings.reduceMotion;
 
@@ -1557,10 +1635,6 @@ function bindSettings() {
     }
   });
   els.settingAutoReveal.addEventListener("change", () => updateSetting("autoReveal", els.settingAutoReveal.checked));
-  els.settingDefaultView.addEventListener("change", () => {
-    updateSetting("defaultView", els.settingDefaultView.value);
-    setViewMode(els.settingDefaultView.value);
-  });
   els.settingTextScale.addEventListener("input", () => updateSetting("textScale", els.settingTextScale.value));
   els.settingReduceMotion.addEventListener("change", () => updateSetting("reduceMotion", els.settingReduceMotion.checked));
 }
@@ -1574,7 +1648,9 @@ function updateSetting(key, value) {
 
 function loadSettings() {
   try {
-    return { ...DEFAULT_SETTINGS, ...JSON.parse(localStorage.getItem("singulari.vn.settings") || "{}") };
+    const loaded = JSON.parse(localStorage.getItem("singulari.vn.settings") || "{}");
+    delete loaded.defaultView;
+    return { ...DEFAULT_SETTINGS, ...loaded };
   } catch (_) {
     return { ...DEFAULT_SETTINGS };
   }

@@ -98,6 +98,21 @@ The simulator does not call external image APIs and does not route image
 generation through `codex exec`. It exposes player-visible jobs for Codex App to
 consume through its host image-generation capability.
 
+For normal Codex App play, image jobs are consumed by the same prep worker used
+for text turns:
+
+```bash
+singulari-world --store-root .world-store host-worker \
+  --text-backend codex-app-server \
+  --claim-visual-jobs \
+  --visual-backend codex-app-server \
+  --interval-ms 750
+```
+
+That worker uses Codex App `imageGeneration`, reads the generated item's
+`savedPath`, verifies PNG bytes through completion, and writes the asset into
+the world store. Manual claim/complete remains a fallback contract.
+
 Worker loop:
 
 1. Run `host-worker --claim-visual-jobs`, poll `agent-watch` stdout, or call

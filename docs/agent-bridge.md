@@ -46,20 +46,35 @@ jobs into the world store:
 - `visual_job_pending`: a menu/stage/turn/character/location image job is waiting
   for Codex App's built-in image generation capability.
 
-For a packaged app, Codex App should own the cross-platform background process
-instead of relying on OS-specific schedulers such as launchd or Windows Task
-Scheduler. The app-facing entrypoint is `host-worker`. Start it when the VN app
-opens, stop it when the app closes:
+For local Codex App play, the operator phrase `싱귤러리 월드 준비해줘` means:
+start the background worker and leave it running so the browser can advance
+world turns without a manual chat turn. The app-facing entrypoint is
+`host-worker`:
 
 ```bash
-singulari-world --store-root .world-store host-worker --world-id <world-id>
+singulari-world --store-root .world-store host-worker \
+  --text-backend codex-app-server \
+  --claim-visual-jobs \
+  --visual-backend codex-app-server \
+  --interval-ms 750
 ```
 
-The primary realtime text backend is `codex-app-server`; the host starts or
-receives a Codex app-server websocket URL and the worker dispatches text turns
-only when a pending turn exists. `codex-app-poller` is a legacy event-only
-contract. Use the explicit CLI backend when the host cannot run an app-server
-websocket:
+Codex App should remain open while the VN browser is used. The worker starts a
+managed loopback `codex app-server` when no `--codex-app-server-url` is passed,
+dispatches pending text turns through that websocket, claims redacted visual
+jobs, asks Codex App for `imageGeneration`, and commits the completed text/image
+results back into the world store. When there is no active world or no pending
+work, it idles.
+
+For a packaged app, Codex App should own this cross-platform background process
+instead of relying on OS-specific schedulers such as launchd or Windows Task
+Scheduler. Start it before opening the VN app, stop it when the app closes. Omit
+`--world-id` in the normal app flow so it can follow whichever world the browser
+creates or loads.
+
+The primary realtime text backend is `codex-app-server`. `codex-app-poller` is a
+legacy event-only contract. Use the explicit CLI backend only when the host
+cannot run an app-server websocket:
 
 ```bash
 singulari-world --store-root .world-store host-worker \
@@ -93,7 +108,16 @@ exactly to `destination_path`, then refresh `worldsim_current` or
 Image generation is not dispatched through `codex exec`. It is also queue-based:
 the simulator exposes a redacted visual job, then Codex App's agent/host layer
 consumes the job with its image-generation capability and saves the PNG. The
-stable worker contract is:
+normal Codex App worker does that directly:
+
+```bash
+singulari-world --store-root .world-store host-worker \
+  --text-backend codex-app-server \
+  --claim-visual-jobs \
+  --visual-backend codex-app-server
+```
+
+The manual contract remains:
 
 ```bash
 singulari-world --store-root .world-store visual-job-claim \
@@ -156,6 +180,24 @@ If no `--codex-app-server-url` is provided, `host-worker` starts
 `codex app-server` on a loopback port and writes
 `codex_app_server_runtime.json` under the store-root `agent_bridge` directory. Pass
 an explicit URL only when the embedding host owns the app-server process.
+
+After the background worker is ready, the browser-facing runtime is just the VN
+server:
+
+```bash
+singulari-world --store-root .world-store vn-serve --port 4177
+```
+
+For Tailscale phone play, serve the same app on a Tailscale address or hostname:
+
+```bash
+singulari-world --store-root .world-store vn-serve \
+  --host <tailscale-ip-or-hostname> \
+  --port 4177
+```
+
+Do not use a regular LAN bind or `0.0.0.0`; the VN server allowlist is loopback
+plus Tailscale.
 
 When `host-worker --text-backend codex-exec-resume` sees a pending turn, it
 starts `codex exec resume <codex-thread-id> -` with a bounded prompt and waits

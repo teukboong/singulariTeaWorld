@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Singulari World VN</title>
     <link rel="icon" href="data:," />
-    <link rel="stylesheet" href="./styles.css?v=20260428-visual-runtime2" />
-    <script defer src="./app.js?v=20260428-visual-runtime2"></script>
+    <link rel="stylesheet" href="./styles.css?v=20260428-gallery1" />
+    <script defer src="./app.js?v=20260428-gallery1"></script>
   </head>
   <body>
     <main class="vn-shell" data-world-theme="default">
@@ -59,12 +59,10 @@
               CG 생성
             </button>
             <span id="turnCgStatus" class="turn-cg-status" aria-live="polite"></span>
-          </div>
-          <div class="view-toggle" aria-label="view mode">
-            <button id="cgModeButton" type="button" data-view-mode="cg" class="is-active">
-              CG
-            </button>
-            <button id="textModeButton" type="button" data-view-mode="text">Text</button>
+            <div class="view-toggle" aria-label="view mode">
+              <button id="textModeButton" type="button" data-view-mode="text" class="is-active">Text</button>
+              <button id="cgModeButton" type="button" data-view-mode="cg">CG</button>
+            </div>
           </div>
         </div>
       </section>
@@ -78,12 +76,8 @@
           </div>
           <div id="sceneText" class="scene-text"></div>
           <div class="text-nav" aria-label="text navigation">
-            <button id="previousButton" class="text-nav-button" type="button" aria-label="previous line">
-              ‹
-            </button>
-            <button id="advanceButton" class="text-nav-button" type="button" aria-label="next line">
-              ›
-            </button>
+            <button id="previousButton" class="text-nav-button" type="button" aria-label="previous line"></button>
+            <button id="advanceButton" class="text-nav-button" type="button" aria-label="next line"></button>
           </div>
         </article>
 
@@ -109,6 +103,7 @@
         <section class="side-panel">
           <nav class="side-tabs" aria-label="assistant drawer tabs">
             <button type="button" data-side-tab="status" class="is-active">스테이터스</button>
+            <button type="button" data-side-tab="gallery">갤러리</button>
             <button type="button" data-side-tab="textlog">텍스트 로그</button>
             <button type="button" data-side-tab="settings">설정</button>
             <button type="button" data-side-tab="console">콘솔</button>
@@ -119,6 +114,17 @@
             <section class="status-block">
               <h2>주인공 스테이터스</h2>
               <div id="protagonistStatus" class="protagonist-status"></div>
+            </section>
+          </div>
+
+          <div id="sideGallery" class="side-pane">
+            <section class="gallery-block">
+              <div class="gallery-header">
+                <h2>CG 갤러리</h2>
+                <button id="refreshGalleryButton" class="console-action" type="button">새로고침</button>
+              </div>
+              <p id="galleryStatus" class="cg-job-status"></p>
+              <div id="cgGallery" class="cg-gallery"></div>
             </section>
           </div>
 
@@ -182,13 +188,6 @@
               <span>턴 로드 시 선택지까지 바로 열기</span>
             </label>
             <label class="setting-field">
-              <span>기본 화면</span>
-              <select id="settingDefaultView">
-                <option value="cg">CG</option>
-                <option value="text">Text</option>
-              </select>
-            </label>
-            <label class="setting-field">
               <span>텍스트 크기</span>
               <input id="settingTextScale" type="range" min="0.9" max="1.25" step="0.05" />
             </label>
@@ -196,9 +195,6 @@
               <input id="settingReduceMotion" type="checkbox" />
               <span>전환 효과 줄이기</span>
             </label>
-            <p class="setting-note">
-              기본 화면은 CG와 서술 진행만 보여준다. 보조 정보는 우측 메뉴에서만 열린다.
-            </p>
           </div>
 
           <div id="sideConsole" class="side-pane">
@@ -231,14 +227,14 @@
               <div id="codexStructured" class="codex-structured"></div>
             </section>
             <div class="ops-column">
-              <label for="commandOutput">turn command</label>
+              <label for="commandOutput">턴 명령</label>
               <textarea id="commandOutput" readonly></textarea>
-              <button id="copyCommand" type="button">Copy</button>
+              <button id="copyCommand" type="button">복사</button>
             </div>
             <div class="ops-column">
-              <label for="imagePrompt">image provider prompt</label>
+              <label for="imagePrompt">이미지 프롬프트</label>
               <textarea id="imagePrompt" readonly></textarea>
-              <button id="copyPrompt" type="button">Copy</button>
+              <button id="copyPrompt" type="button">복사</button>
             </div>
           </div>
         </section>

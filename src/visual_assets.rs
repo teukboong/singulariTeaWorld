@@ -41,6 +41,7 @@ pub struct ClaimVisualJobOptions {
     pub slot: Option<String>,
     pub claimed_by: String,
     pub force: bool,
+    pub extra_jobs: Vec<ImageGenerationJob>,
 }
 
 #[derive(Debug, Clone)]
@@ -285,7 +286,16 @@ pub fn claim_visual_job(options: &ClaimVisualJobOptions) -> Result<VisualJobClai
         store_root: options.store_root.clone(),
         world_id: options.world_id.clone(),
     })?;
-    let jobs = selectable_visual_jobs(&manifest, options.slot.as_deref())?;
+    let jobs = selectable_visual_jobs(
+        &manifest,
+        options
+            .extra_jobs
+            .iter()
+            .filter(|job| !job.destination_path.is_empty())
+            .cloned()
+            .collect(),
+        options.slot.as_deref(),
+    )?;
     for job in jobs {
         let claim_path = visual_job_claim_path(&files.dir, job.slot.as_str());
         if claim_path.exists() && !options.force {
@@ -483,18 +493,25 @@ pub fn visual_generation_job(
 
 fn selectable_visual_jobs(
     manifest: &WorldVisualAssets,
+    extra_jobs: Vec<ImageGenerationJob>,
     slot: Option<&str>,
 ) -> Result<Vec<ImageGenerationJob>> {
+    let mut jobs = manifest.image_generation_jobs.clone();
+    for job in extra_jobs {
+        if jobs.iter().any(|candidate| candidate.slot == job.slot) {
+            continue;
+        }
+        jobs.push(job);
+    }
     if let Some(slot) = slot {
-        return manifest
-            .image_generation_jobs
+        return jobs
             .iter()
             .find(|job| job.slot == slot)
             .cloned()
             .map(|job| vec![job])
             .with_context(|| format!("no pending visual job for slot: {slot}"));
     }
-    Ok(manifest.image_generation_jobs.clone())
+    Ok(jobs)
 }
 
 fn visual_job_for_slot(manifest: &WorldVisualAssets, slot: &str) -> Option<ImageGenerationJob> {
@@ -1021,8 +1038,9 @@ fn asset_file_stem(entity_id: &str) -> String {
 mod tests {
     use super::{
         BuildWorldVisualAssetsOptions, CODEX_APP_IMAGE_GENERATION_TOOL, ClaimVisualJobOptions,
-        CompleteVisualJobOptions, ReleaseVisualJobClaimOptions, VisualJobClaimOutcome,
-        build_world_visual_assets, claim_visual_job, complete_visual_job, release_visual_job_claim,
+        CompleteVisualJobOptions, ReleaseVisualJobClaimOptions, VN_ASSETS_DIR,
+        VisualJobClaimOutcome, build_world_visual_assets, claim_visual_job, complete_visual_job,
+        release_visual_job_claim, visual_generation_job,
     };
     use crate::store::{InitWorldOptions, init_world};
     use tempfile::tempdir;
@@ -1122,6 +1140,7 @@ premise:
             slot: Some("menu_background".to_owned()),
             claimed_by: "test-worker".to_owned(),
             force: false,
+            extra_jobs: Vec::new(),
         })?;
         let VisualJobClaimOutcome::Claimed { claim } = claimed else {
             anyhow::bail!("menu background should be claimable");
@@ -1159,6 +1178,7 @@ premise:
             slot: Some("stage_background".to_owned()),
             claimed_by: "test-worker".to_owned(),
             force: false,
+            extra_jobs: Vec::new(),
         })?;
         let VisualJobClaimOutcome::Claimed { claim: stage_claim } = stage_claim else {
             anyhow::bail!("stage background should be claimable");
@@ -1172,6 +1192,69 @@ premise:
             release.claim.map(|claim| claim.claim_id),
             Some(stage_claim.claim_id)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn visual_job_claim_accepts_extra_turn_cg_jobs() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(
+            &seed_path,
+            r#"
+schema_version: singulari.world_seed.v1
+world_id: stw_visual_turn_cg
+title: "턴 CG 클레임"
+premise:
+  genre: "해무 낀 항구 판타지"
+  protagonist: "현대인의 전생, 남자 주인공"
+"#,
+        )?;
+        let initialized = init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+        let turn_cg_path = initialized
+            .world_dir
+            .join(VN_ASSETS_DIR)
+            .join("turn_cg")
+            .join("turn_0001.png");
+        let extra_job = visual_generation_job(
+            "turn_cg:turn_0001".to_owned(),
+            "player-visible turn CG prompt".to_owned(),
+            turn_cg_path.display().to_string(),
+            Vec::new(),
+            Vec::new(),
+            "save exactly to destination_path without blocking VN flow",
+        );
+
+        let claimed = claim_visual_job(&ClaimVisualJobOptions {
+            store_root: Some(store.clone()),
+            world_id: "stw_visual_turn_cg".to_owned(),
+            slot: Some("turn_cg:turn_0001".to_owned()),
+            claimed_by: "test-worker".to_owned(),
+            force: false,
+            extra_jobs: vec![extra_job],
+        })?;
+        let VisualJobClaimOutcome::Claimed { claim } = claimed else {
+            anyhow::bail!("turn CG should be claimable through extra jobs");
+        };
+        assert_eq!(claim.slot, "turn_cg:turn_0001");
+
+        let source = temp.path().join("turn-generated.png");
+        std::fs::write(&source, MINIMAL_PNG)?;
+        let completion = complete_visual_job(&CompleteVisualJobOptions {
+            store_root: Some(store),
+            world_id: "stw_visual_turn_cg".to_owned(),
+            slot: "turn_cg:turn_0001".to_owned(),
+            claim_id: Some(claim.claim_id),
+            generated_path: Some(source),
+        })?;
+
+        assert_eq!(completion.slot, "turn_cg:turn_0001");
+        assert!(turn_cg_path.is_file());
         Ok(())
     }
 }

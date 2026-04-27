@@ -505,6 +505,7 @@ fn worldsim_claim_visual_job(
         slot: params.slot,
         claimed_by: params.claimed_by,
         force: params.force,
+        extra_jobs: Vec::new(),
     })
 }
 

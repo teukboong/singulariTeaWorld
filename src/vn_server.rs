@@ -19,7 +19,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -35,6 +35,9 @@ const AGENT_BRIDGE_ENV: &str = "SINGULARI_WORLD_AGENT_BRIDGE";
 const INITIAL_AGENT_TURN_INPUT: &str = "세계 개막";
 const VN_CHOOSE_RESPONSE_SCHEMA_VERSION: &str = "singulari.vn_choose_response.v1";
 const VN_RUNTIME_STATUS_SCHEMA_VERSION: &str = "singulari.vn_runtime_status.v1";
+const VN_CG_GALLERY_SCHEMA_VERSION: &str = "singulari.vn_cg_gallery.v1";
+const TURN_CG_ASSET_DIR: &str = "assets/vn/turn_cg";
+const PROMPT_SUMMARY_MAX_CHARS: usize = 180;
 
 #[derive(Debug, Clone)]
 pub struct VnServeOptions {
@@ -195,6 +198,26 @@ struct VnRuntimeDetails {
     latest_dispatch: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VnCgGalleryResponse {
+    schema_version: String,
+    world_id: String,
+    title: String,
+    items: Vec<VnCgGalleryItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VnCgGalleryItem {
+    turn_id: String,
+    turn_index: u32,
+    asset_url: String,
+    download_filename: String,
+    prompt_summary: String,
+    image_prompt: String,
+    prompt_policy: String,
+    generated_from_packet: bool,
+}
+
 #[derive(Debug)]
 struct VnServerState {
     store_root: Option<PathBuf>,
@@ -220,9 +243,9 @@ struct HttpResponse {
 /// # Errors
 ///
 /// Returns an error when the active world cannot be resolved, the host is not
-/// local-only, or the TCP listener cannot bind.
+/// loopback/Tailscale-scoped, or the TCP listener cannot bind.
 pub fn serve_vn(options: &VnServeOptions) -> Result<()> {
-    ensure_local_host(options.host.as_str())?;
+    ensure_allowed_vn_host(options.host.as_str())?;
     let world_id = resolve_world_id(options.store_root.as_deref(), options.world_id.as_deref())?;
     let state = VnServerState {
         store_root: options.store_root.clone(),
@@ -240,7 +263,9 @@ pub fn serve_vn(options: &VnServeOptions) -> Result<()> {
                     Ok(request) => route_request(&state, &request),
                     Err(error) => error_response("400 Bad Request", error.to_string()),
                 };
-                write_response(&mut stream, &response)?;
+                if let Err(error) = write_response(&mut stream, &response) {
+                    eprintln!("vn server response write failed: {error}");
+                }
             }
             Err(error) => eprintln!("vn server connection failed: {error}"),
         }
@@ -263,6 +288,7 @@ fn route_request(state: &VnServerState, request: &HttpRequest) -> HttpResponse {
         })),
         ("GET", "/api/vn/worlds") => world_list_response(state),
         ("GET", "/api/vn/visual-assets") => visual_assets_response(state),
+        ("GET", "/api/vn/cg/gallery") => cg_gallery_response(state),
         ("GET", "/api/vn/runtime-status") => runtime_status_response(state),
         ("POST", "/api/vn/worlds/select") => select_world_response(state, &request.body),
         ("POST", "/api/vn/worlds/new") => new_world_response(state, &request.body),
@@ -303,6 +329,13 @@ fn visual_assets_response(state: &VnServerState) -> HttpResponse {
             Err(error) => return error_response("500 Internal Server Error", error.to_string()),
         },
     }) {
+        Ok(response) => json_response(&response),
+        Err(error) => error_response("500 Internal Server Error", error.to_string()),
+    }
+}
+
+fn cg_gallery_response(state: &VnServerState) -> HttpResponse {
+    match cg_gallery(state) {
         Ok(response) => json_response(&response),
         Err(error) => error_response("500 Internal Server Error", error.to_string()),
     }
@@ -730,6 +763,85 @@ fn current_packet(state: &VnServerState) -> Result<crate::vn::VnPacket> {
     build_vn_packet(&options)
 }
 
+fn cg_gallery(state: &VnServerState) -> Result<VnCgGalleryResponse> {
+    let world_id = state.world_id()?;
+    let world = crate::store::load_world_record(state.store_root.as_deref(), world_id.as_str())?;
+    let store_paths = resolve_store_paths(state.store_root.as_deref())?;
+    let files = world_file_paths(&store_paths, world_id.as_str());
+    let cg_dir = files.dir.join(TURN_CG_ASSET_DIR);
+    let mut turn_ids = Vec::new();
+    if cg_dir.exists() {
+        for entry in fs::read_dir(cg_dir.as_path())
+            .with_context(|| format!("failed to read {}", cg_dir.display()))?
+        {
+            let entry = entry.with_context(|| format!("failed to read {}", cg_dir.display()))?;
+            let path = entry.path();
+            if path.extension().and_then(std::ffi::OsStr::to_str) != Some("png") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(std::ffi::OsStr::to_str) else {
+                continue;
+            };
+            if safe_asset_component(stem) {
+                turn_ids.push(stem.to_owned());
+            }
+        }
+    }
+    turn_ids.sort_by_key(|turn_id| turn_index(turn_id.as_str()));
+    let items = turn_ids
+        .into_iter()
+        .map(|turn_id| cg_gallery_item(state, world_id.as_str(), turn_id))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(VnCgGalleryResponse {
+        schema_version: VN_CG_GALLERY_SCHEMA_VERSION.to_owned(),
+        world_id,
+        title: world.title,
+        items,
+    })
+}
+
+fn cg_gallery_item(
+    state: &VnServerState,
+    world_id: &str,
+    turn_id: String,
+) -> Result<VnCgGalleryItem> {
+    let mut options = BuildVnPacketOptions::new(world_id.to_owned());
+    options.store_root.clone_from(&state.store_root);
+    options.turn_id = Some(turn_id.clone());
+    let packet = build_vn_packet(&options)?;
+    let image_prompt = packet.image.image_prompt;
+    Ok(VnCgGalleryItem {
+        turn_index: turn_index(turn_id.as_str()),
+        asset_url: format!("/world-assets/{world_id}/{TURN_CG_ASSET_DIR}/{turn_id}.png"),
+        download_filename: format!("{world_id}-{turn_id}.png"),
+        prompt_summary: summarize_prompt(image_prompt.as_str()),
+        image_prompt,
+        prompt_policy: packet.image.prompt_policy,
+        generated_from_packet: true,
+        turn_id,
+    })
+}
+
+fn turn_index(turn_id: &str) -> u32 {
+    turn_id
+        .strip_prefix("turn_")
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or_default()
+}
+
+fn summarize_prompt(prompt: &str) -> String {
+    let normalized = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() <= PROMPT_SUMMARY_MAX_CHARS {
+        return normalized;
+    }
+    let mut summary = normalized
+        .chars()
+        .take(PROMPT_SUMMARY_MAX_CHARS)
+        .collect::<String>();
+    summary.push('…');
+    summary
+}
+
 fn world_list(state: &VnServerState) -> Result<VnWorldListResponse> {
     let active_world_id = state.world_id()?;
     Ok(VnWorldListResponse {
@@ -1067,11 +1179,30 @@ fn is_inline_freeform(input: &str) -> bool {
     !action.is_empty()
 }
 
-fn ensure_local_host(host: &str) -> Result<()> {
+fn ensure_allowed_vn_host(host: &str) -> Result<()> {
     if matches!(host, "127.0.0.1" | "localhost") {
         return Ok(());
     }
-    bail!("vn server host must be local-only: got {host}");
+    if host.ends_with(".ts.net") {
+        return Ok(());
+    }
+    if host
+        .parse::<IpAddr>()
+        .is_ok_and(|addr| addr.is_loopback() || is_tailscale_ipv4(addr))
+    {
+        return Ok(());
+    }
+    bail!("vn server host must be loopback or Tailscale-scoped: got {host}");
+}
+
+fn is_tailscale_ipv4(addr: IpAddr) -> bool {
+    let IpAddr::V4(addr) = addr else {
+        return false;
+    };
+    let octets = addr.octets();
+    let lower = Ipv4Addr::new(100, 64, 0, 0).octets();
+    let upper = Ipv4Addr::new(100, 127, 255, 255).octets();
+    octets >= lower && octets <= upper
 }
 
 fn read_request(stream: &mut TcpStream) -> Result<HttpRequest> {
@@ -1206,9 +1337,10 @@ fn choose_request_body(input: &str) -> Vec<u8> {
 mod tests {
     use super::{
         VnCgRetryRequest, VnNewWorldRequest, VnSaveWorldResponse, VnServerState,
-        VnWorldSwitchResponse, cg_retry_response, choose_request_body, choose_response,
-        load_request_body, load_world_response, new_world, read_world_asset, runtime_status,
-        save_request_body, save_world_response, validate_vn_input, world_list,
+        VnWorldSwitchResponse, cg_gallery, cg_retry_response, choose_request_body, choose_response,
+        ensure_allowed_vn_host, load_request_body, load_world_response, new_world,
+        read_world_asset, runtime_status, save_request_body, save_world_response,
+        validate_vn_input, world_list,
     };
     use crate::store::{InitWorldOptions, init_world};
     use crate::transfer::{ExportWorldOptions, export_world};
@@ -1227,6 +1359,17 @@ mod tests {
         assert!(validate_vn_input("7").is_err());
         assert!(validate_vn_input("8").is_err());
         assert!(validate_vn_input("문서관을 본다").is_err());
+    }
+
+    #[test]
+    fn vn_host_allows_loopback_and_tailscale_only() {
+        assert!(ensure_allowed_vn_host("127.0.0.1").is_ok());
+        assert!(ensure_allowed_vn_host("localhost").is_ok());
+        assert!(ensure_allowed_vn_host("100.64.0.1").is_ok());
+        assert!(ensure_allowed_vn_host("100.127.255.255").is_ok());
+        assert!(ensure_allowed_vn_host("macbookair.tailnet.ts.net").is_ok());
+        assert!(ensure_allowed_vn_host("0.0.0.0").is_err());
+        assert!(ensure_allowed_vn_host("192.168.0.10").is_err());
     }
 
     #[test]
@@ -1403,6 +1546,56 @@ premise:
             status.narrative.label.as_str(),
             "서사 연결됨" | "Codex 연결 필요"
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn cg_gallery_lists_saved_turn_images_with_prompt_metadata() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(
+            &seed_path,
+            r#"
+schema_version: singulari.world_seed.v1
+world_id: stw_vn_gallery
+title: "갤러리 세계"
+premise:
+  genre: "중세 판타지"
+  protagonist: "현대인의 전생, 남자 주인공"
+"#,
+        )?;
+        init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+        advance_turn(&AdvanceTurnOptions {
+            store_root: Some(store.clone()),
+            world_id: "stw_vn_gallery".to_owned(),
+            input: "1".to_owned(),
+        })?;
+        let turn_cg_dir = store
+            .join("worlds/stw_vn_gallery")
+            .join(VN_ASSETS_DIR)
+            .join("turn_cg");
+        std::fs::create_dir_all(turn_cg_dir.as_path())?;
+        std::fs::write(turn_cg_dir.join("turn_0001.png"), b"png fixture")?;
+        let state = VnServerState {
+            store_root: Some(store),
+            world_id: Mutex::new("stw_vn_gallery".to_owned()),
+        };
+
+        let gallery = cg_gallery(&state)?;
+
+        assert_eq!(gallery.schema_version, "singulari.vn_cg_gallery.v1");
+        assert_eq!(gallery.items.len(), 1);
+        let item = &gallery.items[0];
+        assert_eq!(item.turn_id, "turn_0001");
+        assert_eq!(item.turn_index, 1);
+        assert!(item.asset_url.ends_with("/assets/vn/turn_cg/turn_0001.png"));
+        assert!(item.image_prompt.contains("Scene narrative"));
+        assert!(!item.prompt_summary.is_empty());
         Ok(())
     }
 
