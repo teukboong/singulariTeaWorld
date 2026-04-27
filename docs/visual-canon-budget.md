@@ -100,7 +100,8 @@ consume through its host image-generation capability.
 
 Worker loop:
 
-1. Poll `agent-watch` stdout or call `worldsim_visual_assets`.
+1. Run `host-worker --claim-visual-jobs`, poll `agent-watch` stdout, or call
+   `worldsim_visual_assets`.
 2. Claim one job with `visual-job-claim` / `worldsim_claim_visual_job`.
 3. Run Codex App image generation with `claim.job.prompt`,
    `claim.job.reference_paths`, and `claim.job.destination_path`.

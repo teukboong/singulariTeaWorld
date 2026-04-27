@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use singulari_world::{
     AdvanceTurnOptions, AgentCommitTurnOptions, AgentSubmitTurnOptions, AgentTurnResponse,
@@ -415,6 +415,35 @@ enum Commands {
         codex_bin: Option<PathBuf>,
     },
 
+    /// Run the embedding-host supervisor loop for text and visual jobs.
+    HostWorker {
+        #[arg(long)]
+        world_id: Option<String>,
+
+        #[arg(long, default_value_t = 750)]
+        interval_ms: u64,
+
+        #[arg(long)]
+        once: bool,
+
+        #[arg(long, value_enum, default_value = "host-session-api")]
+        text_backend: HostTextBackend,
+
+        #[arg(long)]
+        no_visual_jobs: bool,
+
+        #[arg(long)]
+        claim_visual_jobs: bool,
+
+        /// Thread used only by the codex-exec-resume fallback backend.
+        #[arg(long, env = "SINGULARI_WORLD_CODEX_THREAD_ID")]
+        codex_thread_id: Option<String>,
+
+        /// Codex CLI path used only by the codex-exec-resume fallback backend.
+        #[arg(long, env = "SINGULARI_WORLD_CODEX_BIN")]
+        codex_bin: Option<PathBuf>,
+    },
+
     /// Bind a world to the Codex thread that should receive realtime turns.
     CodexThreadBind {
         #[arg(long)]
@@ -471,6 +500,26 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum HostTextBackend {
+    /// Main embedding-host path. The reference CLI emits a host action event.
+    HostSessionApi,
+    /// Fallback path using `codex exec resume <thread-id> -`.
+    CodexExecResume,
+    /// Development path. Emit pending turn hints without dispatching.
+    Manual,
+}
+
+impl HostTextBackend {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::HostSessionApi => "host-session-api",
+            Self::CodexExecResume => "codex-exec-resume",
+            Self::Manual => "manual",
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -704,6 +753,28 @@ fn dispatch(cli: Cli) -> Result<()> {
             no_visual_jobs,
             codex_thread_id,
             codex_bin,
+        )?,
+        Commands::HostWorker {
+            world_id,
+            interval_ms,
+            once,
+            text_backend,
+            no_visual_jobs,
+            claim_visual_jobs,
+            codex_thread_id,
+            codex_bin,
+        } => handle_host_worker(
+            store_root.as_deref(),
+            world_id.as_deref(),
+            &HostWorkerOptions {
+                interval_ms,
+                once,
+                text_backend,
+                no_visual_jobs,
+                claim_visual_jobs,
+                codex_thread_id,
+                codex_bin,
+            },
         )?,
         Commands::CodexThreadBind {
             world_id,
@@ -1504,6 +1575,306 @@ fn handle_agent_watch(
         }
         thread::sleep(interval);
     }
+    Ok(())
+}
+
+const HOST_WORKER_EVENT_SCHEMA_VERSION: &str = "singulari.host_worker_event.v1";
+const HOST_WORKER_CONSUMER: &str = "codex_app_host_worker";
+
+#[derive(Debug, Clone)]
+struct HostWorkerOptions {
+    interval_ms: u64,
+    once: bool,
+    text_backend: HostTextBackend,
+    no_visual_jobs: bool,
+    claim_visual_jobs: bool,
+    codex_thread_id: Option<String>,
+    codex_bin: Option<PathBuf>,
+}
+
+fn handle_host_worker(
+    store_root: Option<&Path>,
+    world_id: Option<&str>,
+    options: &HostWorkerOptions,
+) -> Result<()> {
+    let interval = Duration::from_millis(options.interval_ms.max(250));
+    let mut emitted = HashSet::new();
+    let mut dispatch_config = AgentWatchDispatchConfig::from_cli(
+        options.codex_thread_id.clone(),
+        options.codex_bin.clone(),
+    );
+    let initial_world_id = resolve_world_id(store_root, world_id)?;
+    emit_host_event(&serde_json::json!({
+        "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
+        "event": "worker_started",
+        "world_id": initial_world_id,
+        "text_backend": options.text_backend.as_str(),
+        "visual_jobs": if options.no_visual_jobs {
+            "disabled"
+        } else if options.claim_visual_jobs {
+            "claim_and_emit"
+        } else {
+            "observe_only"
+        },
+        "consumer": HOST_WORKER_CONSUMER,
+    }))?;
+
+    loop {
+        let world_id = resolve_world_id(store_root, world_id)?;
+        let dispatch = if options.text_backend == HostTextBackend::CodexExecResume {
+            dispatch_config.resolve(store_root, world_id.as_str())?
+        } else {
+            None
+        };
+        let mut emitted_this_tick = false;
+        if emit_host_pending_agent_turn_event(
+            store_root,
+            world_id.as_str(),
+            options.text_backend,
+            &mut emitted,
+            dispatch.as_ref(),
+        )? {
+            emitted_this_tick = true;
+        }
+        if !options.no_visual_jobs
+            && emit_host_visual_job_events(
+                store_root,
+                world_id.as_str(),
+                options.claim_visual_jobs,
+                &mut emitted,
+            )?
+        {
+            emitted_this_tick = true;
+        }
+        if options.once {
+            if !emitted_this_tick {
+                emit_host_event(&serde_json::json!({
+                    "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
+                    "event": "worker_idle",
+                    "world_id": world_id,
+                    "text_backend": options.text_backend.as_str(),
+                    "consumer": HOST_WORKER_CONSUMER,
+                }))?;
+            }
+            break;
+        }
+        thread::sleep(interval);
+    }
+    Ok(())
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "Host worker backend fan-out stays colocated so each JSONL event contract is visible at the CLI boundary"
+)]
+fn emit_host_pending_agent_turn_event(
+    store_root: Option<&Path>,
+    world_id: &str,
+    text_backend: HostTextBackend,
+    emitted: &mut HashSet<String>,
+    dispatch: Option<&AgentWatchDispatch>,
+) -> Result<bool> {
+    let Ok(pending) = load_pending_agent_turn(store_root, world_id) else {
+        return Ok(false);
+    };
+    match text_backend {
+        HostTextBackend::HostSessionApi => {
+            let event_key = format!("host-session:{}:{}", pending.world_id, pending.turn_id);
+            if !emitted.insert(event_key) {
+                return Ok(false);
+            }
+            emit_host_event(&serde_json::json!({
+                "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
+                "event": "host_session_turn_required",
+                "world_id": pending.world_id,
+                "turn_id": pending.turn_id,
+                "player_input": pending.player_input,
+                "pending_ref": pending.pending_ref,
+                "host_capability": "codex_app.thread.dispatch",
+                "status": "host_action_required",
+                "command_hint": format!("singulari-world agent-next --world-id {} --json", world_id),
+                "consumer": HOST_WORKER_CONSUMER,
+            }))?;
+            Ok(true)
+        }
+        HostTextBackend::Manual => {
+            let event_key = format!("manual:{}:{}", pending.world_id, pending.turn_id);
+            if !emitted.insert(event_key) {
+                return Ok(false);
+            }
+            emit_host_event(&serde_json::json!({
+                "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
+                "event": "manual_agent_turn_required",
+                "world_id": pending.world_id,
+                "turn_id": pending.turn_id,
+                "player_input": pending.player_input,
+                "pending_ref": pending.pending_ref,
+                "command_hint": format!("singulari-world agent-next --world-id {} --json", world_id),
+                "consumer": HOST_WORKER_CONSUMER,
+            }))?;
+            Ok(true)
+        }
+        HostTextBackend::CodexExecResume => {
+            let Some(dispatch) = dispatch else {
+                let event_key = format!(
+                    "codex-exec-blocked:{}:{}",
+                    pending.world_id, pending.turn_id
+                );
+                if !emitted.insert(event_key) {
+                    return Ok(false);
+                }
+                emit_host_event(&serde_json::json!({
+                    "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
+                    "event": "codex_exec_dispatch_blocked",
+                    "reason": "missing_codex_thread_binding",
+                    "world_id": pending.world_id,
+                    "turn_id": pending.turn_id,
+                    "pending_ref": pending.pending_ref,
+                    "bind_command_hint": format!(
+                        "singulari-world codex-thread-bind --world-id {} --thread-id <codex-thread-id> --codex-bin <codex>",
+                        world_id
+                    ),
+                    "consumer": HOST_WORKER_CONSUMER,
+                }))?;
+                return Ok(true);
+            };
+            match dispatch_pending_agent_turn(store_root, &pending, dispatch)? {
+                DispatchOutcome::Started(record) => {
+                    let event_key = format!(
+                        "codex-exec-started:{}:{}:{}",
+                        pending.world_id, pending.turn_id, dispatch.thread_id
+                    );
+                    if !emitted.insert(event_key) {
+                        return Ok(false);
+                    }
+                    emit_host_event(&serde_json::json!({
+                        "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
+                        "event": "codex_exec_dispatch_started",
+                        "world_id": pending.world_id,
+                        "turn_id": pending.turn_id,
+                        "thread_id": dispatch.thread_id.as_str(),
+                        "binding_source": dispatch.binding_source.as_str(),
+                        "binding_updated_at": dispatch.binding_updated_at.as_str(),
+                        "pid": record.pid,
+                        "record_path": record.record_path,
+                        "prompt_path": record.prompt_path,
+                        "stdout_path": record.stdout_path,
+                        "stderr_path": record.stderr_path,
+                        "consumer": HOST_WORKER_CONSUMER,
+                    }))?;
+                    Ok(true)
+                }
+                DispatchOutcome::AlreadyDispatched(record_path) => {
+                    let event_key = format!(
+                        "codex-exec-skipped:{}:{}:{}",
+                        pending.world_id, pending.turn_id, dispatch.thread_id
+                    );
+                    if !emitted.insert(event_key) {
+                        return Ok(false);
+                    }
+                    emit_host_event(&serde_json::json!({
+                        "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
+                        "event": "codex_exec_dispatch_skipped",
+                        "reason": "already_dispatched",
+                        "world_id": pending.world_id,
+                        "turn_id": pending.turn_id,
+                        "thread_id": dispatch.thread_id.as_str(),
+                        "record_path": record_path,
+                        "consumer": HOST_WORKER_CONSUMER,
+                    }))?;
+                    Ok(true)
+                }
+            }
+        }
+    }
+}
+
+fn emit_host_visual_job_events(
+    store_root: Option<&Path>,
+    world_id: &str,
+    claim_visual_jobs: bool,
+    emitted: &mut HashSet<String>,
+) -> Result<bool> {
+    let manifest = build_world_visual_assets(&BuildWorldVisualAssetsOptions {
+        store_root: store_root.map(Path::to_path_buf),
+        world_id: world_id.to_owned(),
+    })?;
+    let mut any_emitted = false;
+    for job in manifest.image_generation_jobs {
+        if load_visual_job_claim(store_root, manifest.world_id.as_str(), job.slot.as_str())?
+            .is_some()
+        {
+            continue;
+        }
+        if claim_visual_jobs {
+            let outcome = claim_visual_job(&ClaimVisualJobOptions {
+                store_root: store_root.map(Path::to_path_buf),
+                world_id: manifest.world_id.clone(),
+                slot: Some(job.slot.clone()),
+                claimed_by: "singulari_host_worker".to_owned(),
+                force: false,
+            })?;
+            if let singulari_world::VisualJobClaimOutcome::Claimed { claim } = outcome {
+                let complete_command_hint = format!(
+                    "singulari-world visual-job-complete --world-id {} --slot {} --claim-id {} --json",
+                    claim.world_id, claim.slot, claim.claim_id
+                );
+                let release_command_hint = format!(
+                    "singulari-world visual-job-release --world-id {} --slot {} --json",
+                    claim.world_id, claim.slot
+                );
+                emit_host_event(&serde_json::json!({
+                    "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
+                    "event": "codex_app_image_generate_required",
+                    "world_id": claim.world_id.as_str(),
+                    "slot": claim.slot.as_str(),
+                    "claim_id": claim.claim_id.as_str(),
+                    "claimed_by": claim.claimed_by.as_str(),
+                    "claimed_at": claim.claimed_at.as_str(),
+                    "tool": claim.job.tool.as_str(),
+                    "codex_app_call": &claim.job.codex_app_call,
+                    "prompt": claim.job.prompt.as_str(),
+                    "reference_paths": &claim.job.reference_paths,
+                    "destination_path": claim.job.destination_path.as_str(),
+                    "complete_command_hint": complete_command_hint,
+                    "release_command_hint": release_command_hint,
+                    "consumer": HOST_WORKER_CONSUMER,
+                }))?;
+                return Ok(true);
+            }
+            continue;
+        }
+
+        let event_key = format!("visual-available:{}:{}", manifest.world_id, job.slot);
+        if !emitted.insert(event_key) {
+            continue;
+        }
+        let claim_command_hint = format!(
+            "singulari-world visual-job-claim --world-id {} --slot {} --json",
+            manifest.world_id, job.slot
+        );
+        emit_host_event(&serde_json::json!({
+            "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
+            "event": "visual_job_available",
+            "world_id": manifest.world_id.as_str(),
+            "slot": job.slot.as_str(),
+            "tool": job.tool.as_str(),
+            "codex_app_call": &job.codex_app_call,
+            "prompt": job.prompt.as_str(),
+            "reference_paths": &job.reference_paths,
+            "destination_path": job.destination_path.as_str(),
+            "claim_command_hint": claim_command_hint,
+            "consumer": HOST_WORKER_CONSUMER,
+        }))?;
+        any_emitted = true;
+    }
+    Ok(any_emitted)
+}
+
+fn emit_host_event(event: &serde_json::Value) -> Result<()> {
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "{}", serde_json::to_string(event)?)?;
+    stdout.flush()?;
     Ok(())
 }
 

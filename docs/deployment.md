@@ -90,8 +90,15 @@ singulari-world codex-thread-bind \
   --thread-id <codex-thread-id> \
   --codex-bin "$(command -v codex)"
 
-singulari-world agent-watch --world-id <world-id> --interval-ms 750
+singulari-world host-worker \
+  --world-id <world-id> \
+  --text-backend codex-exec-resume \
+  --interval-ms 750
 ```
+
+The intended first-party backend is `host-session-api`, where the embedding app
+routes pending turns into the active agent session through an official host API.
+The public reference fallback is `codex-exec-resume`.
 
 Image jobs:
 
@@ -120,11 +127,14 @@ The standalone simulator owns:
 - MCP tools
 - text-turn pending/commit
 - Codex thread binding
+- host-worker event supervisor
 - image job claim/complete/release contracts
 
 The embedding host still owns:
 
 - starting/stopping `agent-watch`
+- starting/stopping `host-worker`
+- handling `host-session-api` dispatch events
 - consuming `visual_job_pending`
 - calling its image generation capability
 - saving PNG files to the returned destination paths

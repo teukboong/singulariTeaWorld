@@ -28,6 +28,12 @@ cargo build --locked
   --world-id "$WORLD_ID" \
   --json | grep -q '"player_input": "1"'
 
+"$BIN" --store-root "$STORE_ROOT" host-worker \
+  --world-id "$WORLD_ID" \
+  --text-backend manual \
+  --no-visual-jobs \
+  --once | grep -q '"event":"manual_agent_turn_required"'
+
 CLAIM_FILE="$STORE_ROOT/claim.json"
 "$BIN" --store-root "$STORE_ROOT" visual-job-claim \
   --world-id "$WORLD_ID" \

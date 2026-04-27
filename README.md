@@ -37,28 +37,24 @@ SINGULARI_WORLD_AGENT_BRIDGE=1 cargo run --bin singulari-world -- vn-serve --por
 Background job bridge for packaged apps:
 
 ```bash
-cargo run --bin singulari-world -- agent-watch --once
-cargo run --bin singulari-world -- agent-watch --interval-ms 1500
 cargo run --bin singulari-world -- codex-thread-bind \
   --world-id "<world-id>" \
   --thread-id "$CODEX_THREAD_ID" \
   --codex-bin "$(command -v codex)"
-cargo run --bin singulari-world -- agent-watch \
+cargo run --bin singulari-world -- host-worker \
   --interval-ms 750 \
-  --world-id "<world-id>"
+  --world-id "<world-id>" \
+  --text-backend codex-exec-resume
 ```
 
-`agent-watch` is the cross-platform process Codex App should start and stop with
-the VN app. It emits JSONL events for pending narrative turns and visual asset
-jobs. Bind a world to the active Codex thread once with `codex-thread-bind`; the
-watcher reads that binding every tick and immediately dispatches pending
-narrative turns through `codex exec resume <thread> -`, so the active Codex
-thread can author and commit the scene without a cron/heartbeat delay. Passing
-`--codex-thread-id` to `agent-watch` is still supported as a bootstrap shortcut:
-it seeds or refreshes the durable binding for the watched world. Image jobs
-target Codex App's built-in image generation capability
-(`codex_app.image.generate`) and must be saved to the returned
-`destination_path`.
+`host-worker` is the cross-platform process an embedding app should start and
+stop with the VN app. Its intended main text backend is `host-session-api`,
+where the embedding host dispatches a bounded event into the active agent
+session through an official host API. The public reference fallback is
+`codex-exec-resume`, which uses a durable `codex-thread-bind` record and
+`codex exec resume <thread> -`. Image jobs target Codex App's built-in image
+generation capability (`codex_app.image.generate`) and must be saved to the
+returned `destination_path`.
 
 The MCP server runs over stdio:
 
@@ -128,4 +124,6 @@ scripts/release-build.sh
 ```
 
 See [docs/deployment.md](docs/deployment.md) for the public alpha deployment
-checklist, MCP install flow, and background worker contract.
+checklist, MCP install flow, and background worker contract. See
+[docs/host-worker.md](docs/host-worker.md) for the host lifecycle and backend
+contract.

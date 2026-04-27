@@ -48,7 +48,25 @@ jobs into the world store:
 
 For a packaged app, Codex App should own the cross-platform background process
 instead of relying on OS-specific schedulers such as launchd or Windows Task
-Scheduler. Start this process when the VN app opens, stop it when the app closes:
+Scheduler. The app-facing entrypoint is `host-worker`. Start it when the VN app
+opens, stop it when the app closes:
+
+```bash
+singulari-world --store-root .world-store host-worker --world-id <world-id>
+```
+
+The intended main text backend is `host-session-api`; the reference CLI does not
+call private app endpoints, so it emits `host_session_turn_required` for the
+embedding host. Use the explicit fallback backend when the host wants the CLI to
+dispatch through the public Codex command:
+
+```bash
+singulari-world --store-root .world-store host-worker \
+  --world-id <world-id> \
+  --text-backend codex-exec-resume
+```
+
+The lower-level watcher remains available for hosts that only need raw events:
 
 ```bash
 singulari-world --store-root .world-store agent-watch --world-id <world-id>
@@ -118,8 +136,9 @@ singulari-world --store-root .world-store codex-thread-bind \
 singulari-world --store-root .world-store codex-thread-show --world-id <world-id>
 ```
 
-When an `agent_turn_pending` event appears, the watcher immediately starts a
-detached `codex exec resume <codex-thread-id> -` worker with a bounded prompt.
+When `host-worker --text-backend codex-exec-resume` sees a pending turn, it
+starts a detached `codex exec resume <codex-thread-id> -` worker with a bounded
+prompt.
 That worker reads the pending packet, writes an `AgentTurnResponse`, commits the
 turn, and leaves only a short status line in the Codex thread. Dispatch records,
 prompts, stdout, and stderr are stored under the world's `agent_bridge/dispatches`
@@ -132,10 +151,10 @@ re-running `codex-thread-bind`; the long-running watcher does not need to be
 restarted. Passing `--codex-thread-id` to `agent-watch` seeds or refreshes that
 binding for the watched world.
 
-This is a realtime fallback for current Codex Desktop builds that do not expose
-an app-server control socket. A packaged first-party host can replace the
-`codex exec resume` dispatch with an internal `turn/start` call while preserving
-the same pending-turn and dispatch-record contract.
+This is a realtime fallback for hosts that do not expose an official session
+dispatch API. A packaged first-party host can replace the `codex exec resume`
+dispatch with an internal session event while preserving the same pending-turn
+and dispatch-record contract.
 
 No external image API is part of the runtime contract. The standalone MCP owns
 job discovery and redacted prompts; Codex App owns actual image generation and

@@ -135,7 +135,7 @@ singulari-world agent-commit \
 ```
 
 For realtime Codex thread dispatch, bind a world to the active Codex thread and
-run the watcher:
+run the host worker with the current fallback backend:
 
 ```bash
 singulari-world codex-thread-bind \
@@ -144,12 +144,19 @@ singulari-world codex-thread-bind \
   --codex-bin "$(command -v codex)" \
   --json
 
-singulari-world agent-watch --world-id <world-id> --interval-ms 750
+singulari-world host-worker \
+  --world-id <world-id> \
+  --text-backend codex-exec-resume \
+  --interval-ms 750
 ```
 
-`agent-watch` reads
+`host-worker` is the app-facing supervisor. Its intended main backend is
+`host-session-api`; the reference CLI emits a host action event for that backend
+and only dispatches text automatically when `--text-backend codex-exec-resume`
+is selected. The lower-level `agent-watch` command remains available for raw
+event watching. Both commands read
 `worlds/<world-id>/agent_bridge/codex_thread_binding.json` on every tick, so
-rebinding does not require restarting the watcher.
+rebinding does not require restarting the worker.
 
 ## Visual Job Worker
 
@@ -214,6 +221,7 @@ Implemented:
 - MCP server
 - agent pending/commit loop
 - realtime Codex thread binding fallback
+- host worker supervisor contract
 - visual job claim/complete/release contract
 - privacy audit gate for tracked files and git history
 - release and smoke scripts
