@@ -12,11 +12,15 @@ vn-web/current-vn.json
 *.db-wal
 
 # Local/editor noise.
+.playwright-cli/
 .idea/
 .vscode/
 *.swp
 *.tmp
 *.log
+
+# Local extracted design references.
+design-system/
 
 # Local-only privacy scrub terms. Never commit personal identifiers here.
 .privacy-denylist

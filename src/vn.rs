@@ -316,6 +316,10 @@ fn turn_cg_image_generation_job(
     )
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "Turn CG budget decisions keep all cadence, retry, and force-generation reasons in one auditable policy function"
+)]
 fn budgeted_turn_cg_decision(
     packet: &RenderPacket,
     asset_exists: bool,
@@ -363,6 +367,16 @@ fn budgeted_turn_cg_decision(
             false,
             cadence_turns_remaining,
             "초기 접속 장면은 세계 배경 레이어를 우선 사용한다.",
+        );
+    }
+    if turn_index == 1 {
+        return turn_cg_decision(
+            "visual_budget_policy",
+            "generate_scene",
+            true,
+            false,
+            0,
+            "첫 서사 턴은 시드에서 건져 올린 장면이므로 초기 turn CG 후보를 만든다.",
         );
     }
     if packet.mode == "codex" {
@@ -1361,8 +1375,8 @@ premise:
         );
         assert_eq!(packet.image.generator, CODEX_APP_IMAGE_GENERATION_TOOL);
         assert_eq!(packet.image.budget_policy.mode, "balanced");
-        assert_eq!(packet.image.auto_decision.action, "reuse_last");
-        assert!(packet.image.image_generation_job.is_none());
+        assert_eq!(packet.image.auto_decision.action, "generate_scene");
+        assert!(packet.image.image_generation_job.is_some());
         assert_eq!(packet.visual_assets.image_generation_jobs.len(), 3);
         assert!(packet.image.image_prompt.contains("Scene narrative"));
         assert!(

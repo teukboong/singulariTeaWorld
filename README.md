@@ -37,24 +37,28 @@ SINGULARI_WORLD_AGENT_BRIDGE=1 cargo run --bin singulari-world -- vn-serve --por
 Background job bridge for packaged apps:
 
 ```bash
-cargo run --bin singulari-world -- codex-thread-bind \
-  --world-id "<world-id>" \
-  --thread-id "$CODEX_THREAD_ID" \
-  --codex-bin "$(command -v codex)"
+codex app-server --listen ws://127.0.0.1:<port>
+
 cargo run --bin singulari-world -- host-worker \
   --interval-ms 750 \
   --world-id "<world-id>" \
-  --text-backend codex-exec-resume
+  --text-backend codex-app-server \
+  --codex-app-server-url "ws://127.0.0.1:<port>"
 ```
 
 `host-worker` is the cross-platform process an embedding app should start and
-stop with the VN app. Its intended main text backend is `host-session-api`,
-where the embedding host dispatches a bounded event into the active agent
-session through an official host API. The public reference fallback is
-`codex-exec-resume`, which uses a durable `codex-thread-bind` record and
-`codex exec resume <thread> -`. Image jobs target Codex App's built-in image
-generation capability (`codex_app.image.generate`) and must be saved to the
-returned `destination_path`.
+stop with the VN app. Its primary realtime text backend is `codex-app-server`,
+which talks to the official Codex app-server websocket and starts a model turn
+only when a pending world turn exists. `codex-exec-resume` remains the
+on-demand CLI backend for hosts that do not run an app-server websocket. Image
+jobs are queue-based too: Codex App consumes the redacted
+`codex_app.image.generate` job and saves the PNG to the returned
+`destination_path`.
+
+Each world owns a durable Codex `thread_id` under
+`worlds/<world-id>/agent_bridge/codex_thread_binding.json`. That thread keeps
+the warm narrative context; the world DB remains source of truth and is injected
+into every turn so Codex compaction or thread rebuilds do not erase canon.
 
 The MCP server runs over stdio:
 

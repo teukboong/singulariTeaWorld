@@ -5,11 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Singulari World VN</title>
     <link rel="icon" href="data:," />
-    <link rel="stylesheet" href="./styles.css?v=20260427-menu-hover-grace" />
-    <script defer src="./app.js?v=20260427-menu-hover-grace"></script>
+    <link rel="stylesheet" href="./styles.css?v=20260428-design-system-audit" />
+    <script defer src="./app.js?v=20260428-design-system-audit"></script>
   </head>
   <body>
-    <main class="vn-shell">
+    <main class="vn-shell" data-world-theme="default">
       <section id="launchOverlay" class="launch-overlay" aria-label="world launcher" hidden>
         <div class="launch-panel">
           <div class="launch-copy">
@@ -58,6 +58,7 @@
             <button id="generateTurnCgButton" class="turn-cg-button" type="button">
               CG 생성
             </button>
+            <span id="turnCgStatus" class="turn-cg-status" aria-live="polite"></span>
           </div>
           <div class="view-toggle" aria-label="view mode">
             <button id="cgModeButton" type="button" data-view-mode="cg" class="is-active">

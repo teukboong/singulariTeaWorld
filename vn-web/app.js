@@ -13,6 +13,17 @@ const launchSeenKey = "singulari.vn.launchSeen";
 const launchTransitionMs = 520;
 const LOG_PAGE_SIZE = 5;
 const SIDE_DOCK_RIGHT_EXIT_GRACE_MS = 900;
+const AGENT_WAITING_BADGE = "흐름 수렴 중";
+const AGENT_WAITING_COPY = {
+  initial: [
+    "세계의 흐름에서 첫 장면을 건져올리는 중.",
+    "시드가 아직 선택지가 되기 전의 어둠 속에서, 인물과 장소와 첫 사건이 서로의 이름을 맞춰보고 있다.",
+  ],
+  next: [
+    "세계의 흐름에서 다음 장면을 건져올리는 중.",
+    "네 선택이 사건의 결을 바꾸는 동안, 아직 말로 고정되지 않은 가능성들이 조용히 가라앉고 있다.",
+  ],
+};
 const DEFAULT_SETTINGS = {
   cgEnabled: true,
   turnCgMode: "guide_auto",
@@ -39,6 +50,7 @@ const state = {
   worlds: [],
   activeWorldId: "",
   agentPollTimer: null,
+  awaitingAgent: false,
   settings: loadSettings(),
   viewMode: loadViewMode(),
 };
@@ -65,6 +77,7 @@ const els = {
   worldTitle: document.getElementById("worldTitle"),
   turnId: document.getElementById("turnId"),
   generateTurnCgButton: document.getElementById("generateTurnCgButton"),
+  turnCgStatus: document.getElementById("turnCgStatus"),
   locationId: document.getElementById("locationId"),
   eventId: document.getElementById("eventId"),
   outcomeBadge: document.getElementById("outcomeBadge"),
@@ -123,6 +136,7 @@ async function init() {
     const packet = await loadInitialPacket();
     renderPacket(packet);
     await hydrateWorldLauncher();
+    await hydrateAgentPendingState();
   } catch (error) {
     renderLoadError(error);
   }
@@ -179,6 +193,7 @@ async function loadInitialPacket() {
 
 function renderPacket(packet) {
   state.packet = packet;
+  state.awaitingAgent = false;
   state.activeWorldId = packet.world_id;
   document.title = `${packet.title} · ${packet.turn_id}`;
   els.worldTitle.textContent = packet.title;
@@ -190,7 +205,7 @@ function renderPacket(packet) {
   state.visualAssets = packet.visual_assets || null;
   syncImagePrompt();
   applyWorldVisuals(packet);
-  els.shell.classList.remove("is-loading");
+  els.shell.classList.remove("is-loading", "is-awaiting-agent");
 
   if (packet.image.existing_image_url) {
     els.sceneImage.classList.add("has-image");
@@ -229,6 +244,20 @@ async function hydrateWorldLauncher() {
   renderWorldList();
   if (!hasLaunchSeen()) {
     showLaunchOverlay("previous");
+  }
+}
+
+async function hydrateAgentPendingState() {
+  if (!state.apiAvailable || explicitPacketUrl) {
+    return;
+  }
+  try {
+    const status = await fetchJson(agentPendingApiUrl);
+    if (status.status === "waiting_agent") {
+      handleWaitingAgentTurn(status, { initial: state.packet?.turn_id === "turn_0000" });
+    }
+  } catch (_) {
+    // Pending state is advisory for hydration; the current packet remains usable.
   }
 }
 
@@ -331,7 +360,7 @@ async function startNewWorld() {
     return;
   }
   state.busy = true;
-  setLaunchStatus("새 세계를 여는 중...");
+  setLaunchStatus("세계의 흐름에서 첫 장면을 건져올리는 중...");
   try {
     const title = els.newWorldTitle.value.trim();
     const response = await fetchJson(newWorldApiUrl, {
@@ -414,10 +443,11 @@ async function requestTurnCgRetry(options = {}) {
   }
   if (!state.apiAvailable || explicitPacketUrl) {
     setWorldOperationStatus("턴 CG 생성은 VN 서버에 연결된 화면에서만 가능해.");
-    showTransientLine("턴 CG 생성은 VN 서버에 연결된 화면에서만 가능해.");
+    setTurnCgStatus("error", "서버 연결 필요");
     return;
   }
   state.busy = true;
+  setTurnCgStatus("loading", "요청 중");
   syncTurnCgButton();
   setWorldOperationStatus("턴 CG 백그라운드 생성 요청 중...");
   try {
@@ -431,10 +461,9 @@ async function requestTurnCgRetry(options = {}) {
       selectSideTab("console");
     }
     setWorldOperationStatus("턴 CG 백그라운드 생성 요청됨.");
-    showTransientLine("이 턴의 서사를 바탕으로 CG 생성 job을 요청했어.");
   } catch (error) {
     setWorldOperationStatus(`턴 CG 생성 요청 실패: ${error.message}`);
-    showTransientLine(`턴 CG 생성 요청 실패: ${error.message}`);
+    setTurnCgStatus("error", "요청 실패");
   } finally {
     state.busy = false;
     syncTurnCgButton();
@@ -464,6 +493,9 @@ async function applyWorldSwitchResponse(response) {
   }
   renderWorldList();
   await enterVnFromLauncher();
+  if (response.agent_pending) {
+    handleWaitingAgentTurn(response.agent_pending, { initial: true });
+  }
 }
 
 async function enterVnFromLauncher() {
@@ -506,8 +538,11 @@ function applyWorldVisuals(packet) {
   const stage = visuals.stage_background;
   const menuUrl = menu?.exists ? menu.asset_url : "";
   const stageUrl = stage?.exists ? stage.asset_url : "";
-  document.documentElement.style.setProperty("--world-menu-image", cssImageValue(menuUrl));
-  document.documentElement.style.setProperty("--world-stage-image", cssImageValue(stageUrl));
+  const worldTheme = chooseWorldTheme(packet);
+  els.shell.dataset.worldTheme = worldTheme;
+  els.shell.classList.toggle("has-grain", worldTheme !== "default");
+  els.shell.style.setProperty("--world-menu-image", cssImageValue(menuUrl));
+  els.shell.style.setProperty("--world-stage-image", cssImageValue(stageUrl));
   els.shell.classList.toggle("has-world-stage", Boolean(stageUrl));
   if (els.worldBackdrop) {
     els.worldBackdrop.hidden = false;
@@ -518,6 +553,32 @@ function applyWorldVisuals(packet) {
   } else {
     applyMonochromePalette();
   }
+}
+
+function chooseWorldTheme(packet) {
+  const source = [
+    packet.title,
+    packet.scene?.location,
+    packet.scene?.current_event,
+    packet.scene?.status,
+    packet.image?.image_prompt,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  if (/court|궁정|왕궁|귀족|combat|battle|전투|검|피|blood|ember|화염|불/.test(source)) {
+    return "ember-court";
+  }
+  if (/river|강|post-war|전쟁|폐허|horror|공포|melancholy|우울|망령/.test(source)) {
+    return "long-river";
+  }
+  if (/glass|garden|arcology|future|near-future|surveillance|유리|정원|미래|감시|의식/.test(source)) {
+    return "glass-garden";
+  }
+  if (/dawn|modern|reincarnation|slice|새벽|아침|현대|전생|일상/.test(source)) {
+    return "dawn";
+  }
+  return "default";
 }
 
 function cssImageValue(url) {
@@ -573,11 +634,14 @@ async function extractPaletteFromImage(url) {
   const baseTone = isWarmEarthTone(base)
     ? mixColors(base, { r: 170, g: 174, b: 180 }, 0.82)
     : base;
+  const radialFrom = mixColors(baseTone, { r: 32, g: 32, b: 36 }, 0.72);
+  const radialTo = mixColors(baseTone, { r: 8, g: 8, b: 10 }, 0.9);
   return {
     accent: rgbString(accent),
-    muted: rgbString(mixColors(baseTone, { r: 170, g: 170, b: 170 }, 0.64)),
-    paper: rgbString(mixColors(accent, { r: 242, g: 242, b: 242 }, 0.78)),
-    line: rgbaString(accent, 0.24),
+    warmAccent: rgbString(mixColors(accent, { r: 232, g: 218, b: 166 }, 0.44)),
+    mood: rgbaString(accent, 0.055),
+    radialFrom: rgbString(radialFrom),
+    radialTo: rgbString(radialTo),
   };
 }
 
@@ -624,23 +688,31 @@ function loadImage(url) {
 }
 
 function applyExtractedPalette(palette) {
+  resetWorldPaletteOverrides();
   if (!palette) {
-    applyMonochromePalette();
     return;
   }
-  document.documentElement.style.setProperty("--gold", palette.accent);
-  document.documentElement.style.setProperty("--teal", palette.accent);
-  document.documentElement.style.setProperty("--muted", palette.muted);
-  document.documentElement.style.setProperty("--paper", palette.paper);
-  document.documentElement.style.setProperty("--line", palette.line);
+  els.shell.style.setProperty("--world-accent", palette.accent);
+  els.shell.style.setProperty("--world-accent-warm", palette.warmAccent);
+  els.shell.style.setProperty("--world-mood", palette.mood);
+  els.shell.style.setProperty("--world-radial-from", palette.radialFrom);
+  els.shell.style.setProperty("--world-radial-to", palette.radialTo);
 }
 
 function applyMonochromePalette() {
-  document.documentElement.style.setProperty("--gold", "#d8d8d8");
-  document.documentElement.style.setProperty("--teal", "#c3c3c3");
-  document.documentElement.style.setProperty("--muted", "#a9a9a9");
-  document.documentElement.style.setProperty("--paper", "#eeeeee");
-  document.documentElement.style.setProperty("--line", "rgba(238, 238, 238, 0.2)");
+  resetWorldPaletteOverrides();
+}
+
+function resetWorldPaletteOverrides() {
+  for (const propertyName of [
+    "--world-accent",
+    "--world-accent-warm",
+    "--world-mood",
+    "--world-radial-from",
+    "--world-radial-to",
+  ]) {
+    els.shell.style.removeProperty(propertyName);
+  }
 }
 
 function mixColors(left, right, rightWeight) {
@@ -699,10 +771,11 @@ function renderStoryProgress() {
     paragraph.textContent = text;
     els.sceneText.append(paragraph);
   }
-  els.choicePanel.hidden = !state.choicesRevealed;
-  els.shell.classList.toggle("choices-ready", state.choicesRevealed);
+  els.choicePanel.hidden = state.awaitingAgent || !state.choicesRevealed;
+  els.shell.classList.toggle("choices-ready", !state.awaitingAgent && state.choicesRevealed);
   els.previousButton.disabled = state.visibleLineCount <= 1 && !state.choicesRevealed;
-  els.advanceButton.disabled = state.choicesRevealed || !state.storyLines.length;
+  els.advanceButton.disabled =
+    state.awaitingAgent || state.choicesRevealed || !state.storyLines.length;
 }
 
 function renderCurrentTextLog() {
@@ -748,6 +821,9 @@ function advanceStory() {
     renderStoryProgress();
     return;
   }
+  if (state.awaitingAgent) {
+    return;
+  }
   revealChoices();
 }
 
@@ -775,6 +851,9 @@ function revealAllText() {
 }
 
 function revealChoices() {
+  if (state.awaitingAgent) {
+    return;
+  }
   revealAllText();
   state.choicesRevealed = true;
   renderStoryProgress();
@@ -846,7 +925,7 @@ function renderProtagonistStatus(protagonist) {
         const cellElement = document.createElement("div");
         cellElement.className = "status-cell";
         const label = document.createElement("span");
-        label.textContent = `${cell.emoji} ${cell.label}`;
+        label.textContent = sanitizeUiLabel(cell.label || cell.key);
         const value = document.createElement("strong");
         value.textContent = cell.value || "미정";
         cellElement.append(label, value);
@@ -865,6 +944,14 @@ function renderProtagonistStatus(protagonist) {
   appendListValue(els.protagonistStatus, "mind", protagonist.mind);
   appendListValue(els.protagonistStatus, "inventory", protagonist.inventory);
   appendListValue(els.protagonistStatus, "open questions", protagonist.open_questions);
+}
+
+function sanitizeUiLabel(value) {
+  const label = String(value || "")
+    .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return label || "상태";
 }
 
 function renderMonitoring(surface, packet) {
@@ -1176,6 +1263,26 @@ function syncTurnCgButton() {
     : `현재 턴 서사 기반 CG 생성 요청. decision=${action}${
         Number.isFinite(remaining) ? `, cadence remaining=${remaining}` : ""
       }`;
+  if (state.busy) {
+    setTurnCgStatus("loading", "요청 중");
+  } else if (image?.exists) {
+    setTurnCgStatus("", "");
+  } else if (image?.image_generation_job) {
+    setTurnCgStatus("loading", "생성 대기");
+  } else {
+    setTurnCgStatus("", "");
+  }
+}
+
+function setTurnCgStatus(kind, text) {
+  if (!els.turnCgStatus) {
+    return;
+  }
+  els.turnCgStatus.className = "turn-cg-status";
+  if (kind) {
+    els.turnCgStatus.classList.add(`is-${kind}`);
+  }
+  els.turnCgStatus.textContent = text || "";
 }
 
 function bindSettings() {
@@ -1270,6 +1377,9 @@ function syncImagePrompt() {
 
 
 function chooseFreeform() {
+  if (state.awaitingAgent) {
+    return;
+  }
   const packet = state.packet;
   if (!packet) {
     return;
@@ -1298,6 +1408,9 @@ function chooseFreeform() {
 }
 
 function chooseSlot(choice) {
+  if (state.awaitingAgent) {
+    return;
+  }
   if (state.apiAvailable) {
     submitTurnInput(String(choice.slot));
     return;
@@ -1306,7 +1419,7 @@ function chooseSlot(choice) {
 }
 
 function chooseShortcutSlot(slot) {
-  if (!state.choicesRevealed || !state.packet) {
+  if (state.awaitingAgent || !state.choicesRevealed || !state.packet) {
     return false;
   }
   const choice = state.packet.choices.find((item) => item.slot === slot);
@@ -1325,14 +1438,15 @@ function chooseShortcutSlot(slot) {
 }
 
 async function submitTurnInput(input) {
-  if (state.busy) {
+  if (state.busy || state.awaitingAgent) {
     return;
   }
   state.busy = true;
+  let waitingForAgent = false;
   state.choicesRevealed = false;
   els.choicePanel.hidden = true;
   els.shell.classList.add("is-loading");
-  els.outcomeBadge.textContent = "loading";
+  els.outcomeBadge.textContent = AGENT_WAITING_BADGE;
   try {
     const response = await fetchJson(chooseApiUrl, {
       method: "POST",
@@ -1340,6 +1454,7 @@ async function submitTurnInput(input) {
       body: JSON.stringify({ input }),
     });
     if (response.status === "waiting_agent") {
+      waitingForAgent = true;
       handleWaitingAgentTurn(response);
       return;
     }
@@ -1353,17 +1468,32 @@ async function submitTurnInput(input) {
     revealChoices();
   } finally {
     state.busy = false;
-    els.shell.classList.remove("is-loading");
+    if (!waitingForAgent) {
+      els.shell.classList.remove("is-loading");
+    }
   }
 }
 
-function handleWaitingAgentTurn(pending) {
-  showTransientLine("서사 작성 대기 중. worldsim agent가 이 턴을 받아 쓰면 화면이 갱신돼.");
-  els.outcomeBadge.textContent = "waiting agent";
+function handleWaitingAgentTurn(pending, options = {}) {
+  renderAgentWaitingStage(Boolean(options.initial));
   selectCommand(
     pending.command_hint || `singulari-world agent-next --world-id ${pending.world_id} --json`,
   );
   pollCommittedAgentTurn(pending.turn_id, 0);
+}
+
+function renderAgentWaitingStage(initial) {
+  state.awaitingAgent = true;
+  state.choicesRevealed = false;
+  state.storyLines = initial ? AGENT_WAITING_COPY.initial : AGENT_WAITING_COPY.next;
+  state.visibleLineCount = state.storyLines.length;
+  els.outcomeBadge.textContent = AGENT_WAITING_BADGE;
+  els.choices.replaceChildren();
+  els.freeformInput.value = "";
+  els.choicePanel.hidden = true;
+  els.shell.classList.add("is-loading", "is-awaiting-agent");
+  renderStoryProgress();
+  renderCurrentTextLog();
 }
 
 function pollCommittedAgentTurn(turnId, attempt) {
@@ -1394,7 +1524,7 @@ function pollCommittedAgentTurn(turnId, attempt) {
           return;
         }
       } catch (_) {
-        showTransientLine(`agent 결과 확인 실패: ${error.message}`);
+        showTransientLine(`세계의 흐름을 다시 읽지 못했어: ${error.message}`);
       }
     }
     if (attempt < 120) {

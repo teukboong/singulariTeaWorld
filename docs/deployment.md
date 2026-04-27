@@ -85,20 +85,19 @@ The browser writes durable pending jobs. It does not call an LLM directly.
 Text turns:
 
 ```bash
-singulari-world codex-thread-bind \
-  --world-id <world-id> \
-  --thread-id <codex-thread-id> \
-  --codex-bin "$(command -v codex)"
+codex app-server --listen ws://127.0.0.1:<port>
 
 singulari-world host-worker \
   --world-id <world-id> \
-  --text-backend codex-exec-resume \
+  --text-backend codex-app-server \
+  --codex-app-server-url ws://127.0.0.1:<port> \
   --interval-ms 750
 ```
 
-The intended first-party backend is `host-session-api`, where the embedding app
-routes pending turns into the active agent session through an official host API.
-The public reference fallback is `codex-exec-resume`.
+The intended packaged-app backend is `codex-app-server`, where the host starts
+or receives a Codex app-server websocket URL and dispatches only when a pending
+world turn exists. `codex-exec-resume` remains the on-demand CLI backend for
+hosts that do not run a websocket app-server.
 
 Image jobs:
 
@@ -134,7 +133,8 @@ The embedding host still owns:
 
 - starting/stopping `agent-watch`
 - starting/stopping `host-worker`
-- handling `host-session-api` dispatch events
+- starting/stopping the Codex app-server websocket
+- passing `--codex-app-server-url` to `host-worker`
 - consuming `visual_job_pending`
 - calling its image generation capability
 - saving PNG files to the returned destination paths

@@ -135,28 +135,34 @@ singulari-world agent-commit \
 ```
 
 For realtime Codex thread dispatch, bind a world to the active Codex thread and
-run the host worker with the current fallback backend:
+run the host worker with the realtime app-server backend:
 
 ```bash
-singulari-world codex-thread-bind \
-  --world-id <world-id> \
-  --thread-id <codex-thread-id> \
-  --codex-bin "$(command -v codex)" \
-  --json
+codex app-server --listen ws://127.0.0.1:<port>
 
 singulari-world host-worker \
   --world-id <world-id> \
-  --text-backend codex-exec-resume \
+  --text-backend codex-app-server \
+  --codex-app-server-url ws://127.0.0.1:<port> \
   --interval-ms 750
 ```
 
-`host-worker` is the app-facing supervisor. Its intended main backend is
-`host-session-api`; the reference CLI emits a host action event for that backend
-and only dispatches text automatically when `--text-backend codex-exec-resume`
-is selected. The lower-level `agent-watch` command remains available for raw
-event watching. Both commands read
+`host-worker` is the app-facing supervisor. Its primary realtime backend is
+`codex-app-server`; it uses the official Codex app-server websocket and spends
+zero model tokens while idle. `codex-app-poller` is a legacy event-only contract
+that emits a poller action event, and `codex-exec-resume` is the on-demand CLI
+backend for hosts without an app-server websocket. `host-session-api` is only a
+deprecated compatibility alias. The lower-level `agent-watch` command remains
+available for raw event watching. Both commands read
 `worlds/<world-id>/agent_bridge/codex_thread_binding.json` on every tick, so
 rebinding does not require restarting the worker.
+
+`world_id -> thread_id` is the durable realtime context contract. The websocket
+URL is replaceable runtime plumbing; the saved thread is the world's narrative
+working context. Codex may compact that thread normally, so every dispatched
+turn must still include the bounded world-store packet. If app-server
+`thread/resume` fails for a stale or missing thread, clear only that world's
+binding and let the next dispatch rebuild from the world store.
 
 ## Visual Job Worker
 
@@ -220,7 +226,7 @@ Implemented:
 - local VN server
 - MCP server
 - agent pending/commit loop
-- realtime Codex thread binding fallback
+- realtime Codex app-server and CLI thread dispatch
 - host worker supervisor contract
 - visual job claim/complete/release contract
 - privacy audit gate for tracked files and git history

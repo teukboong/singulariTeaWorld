@@ -1,6 +1,6 @@
 use crate::agent_bridge::{
-    AgentCommitTurnOptions, AgentSubmitTurnOptions, AgentTurnResponse, commit_agent_turn,
-    enqueue_agent_turn, load_pending_agent_turn,
+    AgentCommitTurnOptions, AgentSubmitTurnOptions, AgentTurnResponse, PendingAgentTurn,
+    commit_agent_turn, enqueue_agent_turn, load_pending_agent_turn,
 };
 use crate::start::{StartWorldOptions, start_world};
 use crate::store::{
@@ -29,6 +29,7 @@ const EXPORTS_DIR: &str = "exports";
 const MAX_REQUEST_BYTES: usize = 16 * 1024;
 const MAX_VN_INPUT_CHARS: usize = 2048;
 const AGENT_BRIDGE_ENV: &str = "SINGULARI_WORLD_AGENT_BRIDGE";
+const INITIAL_AGENT_TURN_INPUT: &str = "세계 개막";
 const VN_CHOOSE_RESPONSE_SCHEMA_VERSION: &str = "singulari.vn_choose_response.v1";
 
 #[derive(Debug, Clone)]
@@ -114,6 +115,8 @@ struct VnWorldSwitchResponse {
     active_world_id: String,
     packet: crate::vn::VnPacket,
     worlds: Vec<VnWorldSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent_pending: Option<VnAgentPendingResponse>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -408,18 +411,22 @@ fn choose_agent_pending_response(state: &VnServerState, input: String) -> HttpRe
         world_id,
         input,
     }) {
-        Ok(pending) => json_response(&VnAgentPendingResponse {
-            schema_version: VN_CHOOSE_RESPONSE_SCHEMA_VERSION.to_owned(),
-            status: "waiting_agent".to_owned(),
-            world_id: pending.world_id.clone(),
-            turn_id: pending.turn_id.clone(),
-            pending_ref: pending.pending_ref,
-            command_hint: format!(
-                "singulari-world agent-next --world-id {} --json",
-                pending.world_id
-            ),
-        }),
+        Ok(pending) => json_response(&vn_agent_pending_response(&pending)),
         Err(error) => error_response("400 Bad Request", error.to_string()),
+    }
+}
+
+fn vn_agent_pending_response(pending: &PendingAgentTurn) -> VnAgentPendingResponse {
+    VnAgentPendingResponse {
+        schema_version: VN_CHOOSE_RESPONSE_SCHEMA_VERSION.to_owned(),
+        status: "waiting_agent".to_owned(),
+        world_id: pending.world_id.clone(),
+        turn_id: pending.turn_id.clone(),
+        pending_ref: pending.pending_ref.clone(),
+        command_hint: format!(
+            "singulari-world agent-next --world-id {} --json",
+            pending.world_id
+        ),
     }
 }
 
@@ -500,6 +507,7 @@ fn select_world(state: &VnServerState, world_id: &str) -> Result<VnWorldSwitchRe
         active_world_id: world_id.to_owned(),
         packet: current_packet(state)?,
         worlds: list_worlds(state)?,
+        agent_pending: None,
     })
 }
 
@@ -513,10 +521,21 @@ fn new_world(state: &VnServerState, request: VnNewWorldRequest) -> Result<VnWorl
     })?;
     let world_id = started.initialized.world.world_id;
     state.set_world_id(world_id.as_str())?;
+    let agent_pending = if agent_bridge_enabled() {
+        let pending = enqueue_agent_turn(&AgentSubmitTurnOptions {
+            store_root: state.store_root.clone(),
+            world_id: world_id.clone(),
+            input: INITIAL_AGENT_TURN_INPUT.to_owned(),
+        })?;
+        Some(vn_agent_pending_response(&pending))
+    } else {
+        None
+    };
     Ok(VnWorldSwitchResponse {
         active_world_id: world_id,
         packet: current_packet(state)?,
         worlds: list_worlds(state)?,
+        agent_pending,
     })
 }
 
@@ -574,6 +593,7 @@ fn load_world(
         active_world_id: report.world_id,
         packet: current_packet(state)?,
         worlds: list_worlds(state)?,
+        agent_pending: None,
     })
 }
 

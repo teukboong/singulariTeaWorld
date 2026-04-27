@@ -55,10 +55,11 @@ opens, stop it when the app closes:
 singulari-world --store-root .world-store host-worker --world-id <world-id>
 ```
 
-The intended main text backend is `host-session-api`; the reference CLI does not
-call private app endpoints, so it emits `host_session_turn_required` for the
-embedding host. Use the explicit fallback backend when the host wants the CLI to
-dispatch through the public Codex command:
+The primary realtime text backend is `codex-app-server`; the host starts or
+receives a Codex app-server websocket URL and the worker dispatches text turns
+only when a pending turn exists. `codex-app-poller` is a legacy event-only
+contract. Use the explicit CLI backend when the host cannot run an app-server
+websocket:
 
 ```bash
 singulari-world --store-root .world-store host-worker \
@@ -89,8 +90,10 @@ exactly to `destination_path`, then refresh `worldsim_current` or
 {"event":"visual_job_pending","world_id":"...","slot":"stage_background","tool":"codex_app.image.generate","codex_app_call":{"capability":"image_generation","destination_path":"..."}}
 ```
 
-Image generation is not dispatched through `codex exec`. It is a Codex App host
-capability. The stable worker contract is:
+Image generation is not dispatched through `codex exec`. It is also queue-based:
+the simulator exposes a redacted visual job, then Codex App's agent/host layer
+consumes the job with its image-generation capability and saves the PNG. The
+stable worker contract is:
 
 ```bash
 singulari-world --store-root .world-store visual-job-claim \
@@ -98,8 +101,8 @@ singulari-world --store-root .world-store visual-job-claim \
   --slot <slot> \
   --json
 
-# Codex App host runs codex_app.image.generate with the returned prompt and
-# saves a PNG to claim.job.destination_path.
+# Codex App consumes the job with codex_app.image.generate and saves a PNG to
+# claim.job.destination_path.
 
 singulari-world --store-root .world-store visual-job-complete \
   --world-id <world-id> \
@@ -136,25 +139,38 @@ singulari-world --store-root .world-store codex-thread-bind \
 singulari-world --store-root .world-store codex-thread-show --world-id <world-id>
 ```
 
+When `host-worker --text-backend codex-app-server` sees a pending turn, it
+connects to the configured Codex app-server websocket, resumes or starts the
+world's dedicated Codex thread, sends the bounded realtime prompt through
+`turn/start`, and waits for completion. A first successful unbound dispatch
+persists the returned thread id to `codex_thread_binding.json`.
+
+The world-specific Codex thread is the narrative working context, not the
+source of truth. The worker expects Codex to compact long threads according to
+normal Codex runtime behavior, and it compensates by reinjecting the bounded
+world-store packet on every turn. If a bound thread cannot be resumed because it
+is stale or missing, the worker clears that world's binding so the next dispatch
+can start a fresh thread from the same world DB.
+
 When `host-worker --text-backend codex-exec-resume` sees a pending turn, it
-starts a detached `codex exec resume <codex-thread-id> -` worker with a bounded
-prompt.
+starts `codex exec resume <codex-thread-id> -` with a bounded prompt and waits
+for it to finish.
 That worker reads the pending packet, writes an `AgentTurnResponse`, commits the
 turn, and leaves only a short status line in the Codex thread. Dispatch records,
-prompts, stdout, and stderr are stored under the world's `agent_bridge/dispatches`
-directory so duplicate watcher ticks do not start duplicate Codex turns.
+prompts, stdout, stderr, and completion status are stored under the world's
+`agent_bridge/dispatches` directory so duplicate watcher ticks do not start
+duplicate Codex turns.
 
 The durable binding lives at
-`worlds/<world-id>/agent_bridge/codex_thread_binding.json`. `agent-watch` reads
-that file on every tick, so moving play to a new Codex chat only requires
-re-running `codex-thread-bind`; the long-running watcher does not need to be
-restarted. Passing `--codex-thread-id` to `agent-watch` seeds or refreshes that
-binding for the watched world.
+`worlds/<world-id>/agent_bridge/codex_thread_binding.json`. `host-worker` and
+`agent-watch` read that file on every tick, so moving play to a new Codex chat
+only requires re-running `codex-thread-bind`; the long-running watcher does not
+need to be restarted. Passing `--codex-thread-id` to `host-worker` or
+`agent-watch` seeds or refreshes that binding for the watched world.
 
-This is a realtime fallback for hosts that do not expose an official session
-dispatch API. A packaged first-party host can replace the `codex exec resume`
-dispatch with an internal session event while preserving the same pending-turn
-and dispatch-record contract.
+`codex-exec-resume` is a realtime CLI backend for hosts that do not run a
+Codex app-server websocket. `codex_app_poller_turn_required` remains only a
+legacy event-only contract.
 
 No external image API is part of the runtime contract. The standalone MCP owns
 job discovery and redacted prompts; Codex App owns actual image generation and
