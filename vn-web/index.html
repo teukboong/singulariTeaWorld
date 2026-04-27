@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Singulari World VN</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="./styles.css?v=20260427-menu-hover-grace" />
+    <script defer src="./app.js?v=20260427-menu-hover-grace"></script>
+  </head>
+  <body>
+    <main class="vn-shell">
+      <section id="launchOverlay" class="launch-overlay" aria-label="world launcher" hidden>
+        <div class="launch-panel">
+          <div class="launch-copy">
+            <span>Singulari World</span>
+            <h1>세계 접속</h1>
+            <p>새 브라우저 세션에서만 첫 접속 문이 열린다. 새로고침은 지금 플레이 중인 세계를 유지한다.</p>
+          </div>
+          <div class="launch-actions">
+            <button id="continueWorldButton" type="button">현재 세계 계속</button>
+            <button id="newWorldModeButton" type="button">새 세계</button>
+            <button id="previousWorldModeButton" type="button">이전 세계 선택</button>
+          </div>
+          <section id="newWorldPanel" class="launch-subpanel">
+            <label>
+              <span>새 세계 제목</span>
+              <input id="newWorldTitle" type="text" autocomplete="off" placeholder="비워두면 시드에서 제목을 만든다" />
+            </label>
+            <label>
+              <span>세계관 시드</span>
+              <textarea
+                id="newWorldSeed"
+                rows="5"
+                placeholder="장르, 주인공, 핵심 긴장, 원하는 톤을 자유롭게 적어줘"
+              ></textarea>
+            </label>
+            <button id="startNewWorldButton" type="button">이 시드로 시작</button>
+          </section>
+          <section id="previousWorldPanel" class="launch-subpanel">
+            <div id="worldList" class="world-list"></div>
+          </section>
+          <p id="launchStatus" class="launch-status"></p>
+        </div>
+      </section>
+
+      <section class="scene-stage" aria-label="scene image">
+        <div id="worldBackdrop" class="world-backdrop" aria-hidden="true"></div>
+        <div id="sceneImage" class="scene-image" role="img" aria-label="turn scene">
+          <div class="scene-empty">
+            <span>SCENE CG</span>
+          </div>
+        </div>
+        <div class="scene-hud">
+          <div class="story-ident">
+            <span id="worldTitle">Singulari World</span>
+            <span id="turnId">turn</span>
+            <button id="generateTurnCgButton" class="turn-cg-button" type="button">
+              CG 생성
+            </button>
+          </div>
+          <div class="view-toggle" aria-label="view mode">
+            <button id="cgModeButton" type="button" data-view-mode="cg" class="is-active">
+              CG
+            </button>
+            <button id="textModeButton" type="button" data-view-mode="text">Text</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="lower-band">
+        <article class="text-window" aria-label="scene text">
+          <div class="speaker-line">
+            <span id="locationId">location</span>
+            <span id="eventId">event</span>
+            <span id="outcomeBadge">pending</span>
+          </div>
+          <div id="sceneText" class="scene-text"></div>
+          <div class="text-nav" aria-label="text navigation">
+            <button id="previousButton" class="text-nav-button" type="button" aria-label="previous line">
+              ‹
+            </button>
+            <button id="advanceButton" class="text-nav-button" type="button" aria-label="next line">
+              ›
+            </button>
+          </div>
+        </article>
+
+        <aside id="choicePanel" class="choice-panel" aria-label="choices" hidden>
+          <div id="choices" class="choices"></div>
+          <div class="freeform-row">
+            <input
+              id="freeformInput"
+              type="text"
+              autocomplete="off"
+              placeholder="7 자유서술"
+              aria-label="7 자유서술"
+            />
+            <button id="freeformButton" type="button">7</button>
+          </div>
+        </aside>
+      </section>
+
+      <aside id="sideDock" class="side-dock" aria-label="assistant drawer">
+        <button id="sidePeekButton" class="side-peek" type="button" aria-expanded="false" aria-label="open assistant drawer">
+          <span>MENU</span>
+        </button>
+        <section class="side-panel">
+          <nav class="side-tabs" aria-label="assistant drawer tabs">
+            <button type="button" data-side-tab="status" class="is-active">스테이터스</button>
+            <button type="button" data-side-tab="textlog">텍스트 로그</button>
+            <button type="button" data-side-tab="settings">설정</button>
+            <button type="button" data-side-tab="console">콘솔</button>
+          </nav>
+
+          <div id="sideStatus" class="side-pane is-active">
+            <div id="selectedChoiceCard" class="turn-summary"></div>
+            <section class="status-block">
+              <h2>주인공 스테이터스</h2>
+              <div id="protagonistStatus" class="protagonist-status"></div>
+            </section>
+          </div>
+
+          <div id="sideTextLog" class="side-pane">
+            <section class="text-log-block">
+              <h2>현재 서술</h2>
+              <div id="currentTextLog" class="current-text-log"></div>
+            </section>
+            <section class="text-log-block">
+              <h2>이전 서술</h2>
+              <div class="log-pager">
+                <button id="logPrevPage" type="button">이전</button>
+                <span id="logPageLabel">1 / 1</span>
+                <button id="logNextPage" type="button">다음</button>
+              </div>
+              <div id="turnLogList" class="turn-log-list"></div>
+            </section>
+            <details class="raw-markdown">
+              <summary>렌더 원문</summary>
+              <pre id="fullTurnMarkdown"></pre>
+            </details>
+          </div>
+
+          <div id="sideSettings" class="side-pane">
+            <div class="setting-actions">
+              <button id="settingMainMenu" type="button">메인 메뉴로 이동</button>
+              <button id="settingSaveWorld" type="button">세계 저장</button>
+              <button id="settingLoadWorld" type="button">세계 불러오기</button>
+            </div>
+            <label class="setting-field">
+              <span>불러올 세계 번들 경로</span>
+              <input
+                id="settingLoadWorldBundle"
+                type="text"
+                autocomplete="off"
+                placeholder="/path/to/world/store/exports/stw_..."
+              />
+            </label>
+            <p id="settingWorldStatus" class="setting-world-status"></p>
+            <label class="setting-field setting-check">
+              <input id="settingCgEnabled" type="checkbox" />
+              <span>CG 생성 켜기</span>
+            </label>
+            <label class="setting-field">
+              <span>턴 CG 생성</span>
+              <select id="settingTurnCgMode">
+                <option value="guide_auto">자동 판단</option>
+                <option value="off">끄기</option>
+              </select>
+            </label>
+            <label class="setting-field">
+              <span>CG 생성 프롬프트 커스텀</span>
+              <textarea id="settingCgPrompt" rows="5" placeholder="비워두면 기본 프롬프트를 쓴다"></textarea>
+            </label>
+            <label class="setting-field setting-check">
+              <input id="settingGuideChoice" type="checkbox" />
+              <span>안내자 선택 표시</span>
+            </label>
+            <label class="setting-field setting-check">
+              <input id="settingAutoReveal" type="checkbox" />
+              <span>턴 로드 시 선택지까지 바로 열기</span>
+            </label>
+            <label class="setting-field">
+              <span>기본 화면</span>
+              <select id="settingDefaultView">
+                <option value="cg">CG</option>
+                <option value="text">Text</option>
+              </select>
+            </label>
+            <label class="setting-field">
+              <span>텍스트 크기</span>
+              <input id="settingTextScale" type="range" min="0.9" max="1.25" step="0.05" />
+            </label>
+            <label class="setting-field setting-check">
+              <input id="settingReduceMotion" type="checkbox" />
+              <span>전환 효과 줄이기</span>
+            </label>
+            <p class="setting-note">
+              기본 화면은 CG와 서술 진행만 보여준다. 보조 정보는 우측 메뉴에서만 열린다.
+            </p>
+          </div>
+
+          <div id="sideConsole" class="side-pane">
+            <section class="console-block">
+              <h2>CG 백그라운드</h2>
+              <div id="cgJobPanel" class="cg-job-panel"></div>
+              <button id="requestTurnCgRetry" class="console-action" type="button">
+                백그라운드 재시도 요청
+              </button>
+            </section>
+            <section class="console-block">
+              <h2>모니터링</h2>
+              <div id="monitoringGrid" class="dashboard-grid"></div>
+            </section>
+            <section class="console-block">
+              <h2>감각 스캔</h2>
+              <div id="scanList" class="scan-list"></div>
+            </section>
+            <section class="console-block">
+              <h2>Archive View</h2>
+              <div id="codexStructured" class="codex-structured"></div>
+            </section>
+            <div class="ops-column">
+              <label for="commandOutput">turn command</label>
+              <textarea id="commandOutput" readonly></textarea>
+              <button id="copyCommand" type="button">Copy</button>
+            </div>
+            <div class="ops-column">
+              <label for="imagePrompt">image provider prompt</label>
+              <textarea id="imagePrompt" readonly></textarea>
+              <button id="copyPrompt" type="button">Copy</button>
+            </div>
+          </div>
+        </section>
+      </aside>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,19 @@
+target/
+dist/
+.DS_Store
+Thumbs.db
+
+# Local runtime state and generated assets.
+.world-store/
+.singulari-world/
+vn-web/current-vn.json
+*.db
+*.db-shm
+*.db-wal
+
+# Local/editor noise.
+.idea/
+.vscode/
+*.swp
+*.tmp
+*.log

@@ -1,0 +1,11 @@
+schema_version: singulari.world_seed.v1
+world_id: example_fantasy_reincarnation
+title: "Example Fantasy Reincarnation"
+created_by: "local_user"
+premise:
+  genre: "fantasy"
+  protagonist: "modern reincarnated male protagonist"
+  special_condition: "physically and mentally gifted; unusual talent"
+anchor_character:
+  display_role: "core counterpart"
+  relationship_to_world: "seed-defined central story character"
