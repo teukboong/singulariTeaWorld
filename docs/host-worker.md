@@ -37,7 +37,7 @@ Text turn dispatch has three backend modes:
     only that world's binding. The next tick can rebuild a fresh thread from the
     world store instead of staying stuck on the dead context.
   - If no explicit URL is provided, the worker starts `codex app-server` on a
-    loopback port, records `codex_app_server_runtime.json` in the world
+    loopback port, records `codex_app_server_runtime.json` in the store-root
     `agent_bridge` directory, and kills that child process when the worker exits.
   - An embedding host may still pass an explicit websocket URL when it owns the
     app-server process itself.
@@ -93,7 +93,6 @@ Run the websocket app-server backend:
 
 ```bash
 singulari-world host-worker \
-  --world-id <world-id> \
   --text-backend codex-app-server \
   --interval-ms 750
 ```
@@ -103,6 +102,10 @@ dispatch stores a world-specific thread binding automatically. Passing
 `--codex-thread-id` makes it resume an existing thread instead. The websocket
 URL is runtime plumbing, while the durable narrative context is the saved
 `thread_id`.
+
+Omit `--world-id` in an embedding app. The worker will emit
+`worker_waiting_for_active_world` until the browser creates or loads a world,
+then it follows the active world binding.
 
 Pass `--codex-app-server-url ws://127.0.0.1:<port>` only when the embedding host
 already owns the app-server process.

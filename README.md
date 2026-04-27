@@ -41,7 +41,6 @@ codex app-server --listen ws://127.0.0.1:<port>
 
 cargo run --bin singulari-world -- host-worker \
   --interval-ms 750 \
-  --world-id "<world-id>" \
   --text-backend codex-app-server
 ```
 
@@ -50,7 +49,7 @@ stop with the VN app. Its primary realtime text backend is `codex-app-server`,
 which talks to the official Codex app-server websocket and starts a model turn
 only when a pending world turn exists. If no `--codex-app-server-url` is
 provided, the worker starts `codex app-server` on a loopback port, records the
-runtime URL under the world `agent_bridge` directory, and stops it when the
+runtime URL under the store-root `agent_bridge` directory, and stops it when the
 worker exits. `codex-exec-resume` remains the on-demand CLI backend for hosts
 that do not run an app-server websocket. Image jobs are queue-based too: Codex
 App consumes the redacted
@@ -61,6 +60,8 @@ Each world owns a durable Codex `thread_id` under
 `worlds/<world-id>/agent_bridge/codex_thread_binding.json`. That thread keeps
 the warm narrative context; the world DB remains source of truth and is injected
 into every turn so Codex compaction or thread rebuilds do not erase canon.
+When no active world exists yet, `host-worker` idles until the browser creates
+or loads one.
 
 The MCP server runs over stdio:
 

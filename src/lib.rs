@@ -63,10 +63,10 @@ pub use start::{
     world_seed_from_compact_text,
 };
 pub use store::{
-    ACTIVE_WORLD_BINDING_SCHEMA_VERSION, ActiveWorldBinding, InitWorldOptions, InitializedWorld,
-    SINGULARI_WORLD_HOME_ENV, StorePaths, init_world, latest_snapshot_path, load_active_world,
-    load_latest_snapshot, load_world_record, resolve_store_paths, resolve_world_id,
-    save_active_world,
+    ACTIVE_WORLD_BINDING_SCHEMA_VERSION, ACTIVE_WORLD_FILENAME, ActiveWorldBinding,
+    InitWorldOptions, InitializedWorld, SINGULARI_WORLD_HOME_ENV, StorePaths, init_world,
+    latest_snapshot_path, load_active_world, load_latest_snapshot, load_world_record,
+    resolve_store_paths, resolve_world_id, save_active_world,
 };
 pub use transfer::{
     EXPORT_MANIFEST_SCHEMA_VERSION, ExportManifest, ExportWorldOptions, ExportWorldReport,

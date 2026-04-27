@@ -2,17 +2,17 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
-use singulari_world::resolve_store_paths;
 use singulari_world::{
-    AdvanceTurnOptions, AgentCommitTurnOptions, AgentSubmitTurnOptions, AgentTurnResponse,
-    ApplyCharacterAnchorOptions, InitWorldOptions, RenderPacketLoadOptions, ValidationStatus,
-    advance_turn, apply_character_anchor, build_codex_view, build_resume_pack, commit_agent_turn,
-    enqueue_agent_turn, force_chapter_summary, init_world, load_active_world, load_latest_snapshot,
-    load_pending_agent_turn, load_render_packet, load_world_record, recent_entity_updates,
-    recent_relationship_updates, refresh_world_docs, render_advanced_turn_report,
-    render_chat_route, render_codex_view_section_markdown, render_packet_markdown,
-    render_resume_pack_markdown, render_started_world_report, repair_world_db, resolve_world_id,
-    route_chat_input, search_world_db, start_world, validate_world, world_db_stats,
+    ACTIVE_WORLD_FILENAME, AdvanceTurnOptions, AgentCommitTurnOptions, AgentSubmitTurnOptions,
+    AgentTurnResponse, ApplyCharacterAnchorOptions, InitWorldOptions, RenderPacketLoadOptions,
+    ValidationStatus, advance_turn, apply_character_anchor, build_codex_view, build_resume_pack,
+    commit_agent_turn, enqueue_agent_turn, force_chapter_summary, init_world, load_active_world,
+    load_latest_snapshot, load_pending_agent_turn, load_render_packet, load_world_record,
+    recent_entity_updates, recent_relationship_updates, refresh_world_docs,
+    render_advanced_turn_report, render_chat_route, render_codex_view_section_markdown,
+    render_packet_markdown, render_resume_pack_markdown, render_started_world_report,
+    repair_world_db, resolve_store_paths, resolve_world_id, route_chat_input, search_world_db,
+    start_world, validate_world, world_db_stats,
 };
 use singulari_world::{
     BuildCodexViewOptions, BuildResumePackOptions, BuildVnPacketOptions,
@@ -1630,11 +1630,11 @@ fn handle_host_worker(
         options.node_bin.clone(),
         options.codex_bin.clone(),
     );
-    let initial_world_id = resolve_world_id(store_root, world_id)?;
+    let initial_world_id = resolve_host_worker_world_id(store_root, world_id)?;
     emit_host_event(&serde_json::json!({
         "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
         "event": "worker_started",
-        "world_id": initial_world_id,
+        "world_id": initial_world_id.as_deref(),
         "text_backend": options.text_backend.as_str(),
         "visual_jobs": if options.no_visual_jobs {
             "disabled"
@@ -1647,7 +1647,29 @@ fn handle_host_worker(
     }))?;
 
     loop {
-        let world_id = resolve_world_id(store_root, world_id)?;
+        let Some(world_id) = resolve_host_worker_world_id(store_root, world_id)? else {
+            if emitted.insert("worker-waiting-for-active-world".to_owned()) {
+                emit_host_event(&serde_json::json!({
+                    "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
+                    "event": "worker_waiting_for_active_world",
+                    "world_id": null,
+                    "text_backend": options.text_backend.as_str(),
+                    "consumer": HOST_WORKER_CONSUMER,
+                }))?;
+            }
+            if options.once {
+                emit_host_event(&serde_json::json!({
+                    "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
+                    "event": "worker_idle",
+                    "world_id": null,
+                    "text_backend": options.text_backend.as_str(),
+                    "consumer": HOST_WORKER_CONSUMER,
+                }))?;
+                break;
+            }
+            thread::sleep(interval);
+            continue;
+        };
         let exec_dispatch = if options.text_backend == HostTextBackend::CodexExecResume {
             exec_dispatch_config.resolve(store_root, world_id.as_str())?
         } else {
@@ -1694,6 +1716,21 @@ fn handle_host_worker(
         thread::sleep(interval);
     }
     Ok(())
+}
+
+fn resolve_host_worker_world_id(
+    store_root: Option<&Path>,
+    world_id: Option<&str>,
+) -> Result<Option<String>> {
+    if world_id.is_some() {
+        return resolve_world_id(store_root, world_id).map(Some);
+    }
+    let store_paths = resolve_store_paths(store_root)?;
+    let active_path = store_paths.root.join(ACTIVE_WORLD_FILENAME);
+    if !active_path.exists() {
+        return Ok(None);
+    }
+    Ok(Some(load_active_world(store_root)?.world_id))
 }
 
 #[allow(
@@ -2390,9 +2427,9 @@ fn spawn_managed_codex_app_server(
     })
 }
 
-fn codex_app_server_runtime_dir(store_root: Option<&Path>, world_id: &str) -> Result<PathBuf> {
+fn codex_app_server_runtime_dir(store_root: Option<&Path>, _world_id: &str) -> Result<PathBuf> {
     let paths = resolve_store_paths(store_root)?;
-    Ok(paths.worlds_dir.join(world_id).join("agent_bridge"))
+    Ok(paths.root.join("agent_bridge"))
 }
 
 fn reserve_loopback_port() -> Result<u16> {

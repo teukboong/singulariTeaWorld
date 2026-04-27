@@ -139,7 +139,6 @@ run the host worker with the realtime app-server backend:
 
 ```bash
 singulari-world host-worker \
-  --world-id <world-id> \
   --text-backend codex-app-server \
   --interval-ms 750
 ```
@@ -148,7 +147,7 @@ singulari-world host-worker \
 `codex-app-server`; it uses the official Codex app-server websocket and spends
 zero model tokens while idle. If no explicit websocket URL is provided, it
 starts a managed loopback `codex app-server`, records the runtime URL in the
-world `agent_bridge` directory, and stops the child when the worker exits.
+store-root `agent_bridge` directory, and stops the child when the worker exits.
 `codex-app-poller` is a legacy event-only contract that emits a poller action
 event, and `codex-exec-resume` is the on-demand CLI backend for hosts without an
 app-server websocket. `host-session-api` is only a deprecated compatibility
@@ -156,6 +155,8 @@ alias. The lower-level `agent-watch` command remains available for raw event
 watching. Both commands read
 `worlds/<world-id>/agent_bridge/codex_thread_binding.json` on every tick, so
 rebinding does not require restarting the worker.
+When no active world exists, `host-worker` waits instead of failing, so the app
+can start it before the user creates or loads a world.
 
 `world_id -> thread_id` is the durable realtime context contract. The websocket
 URL is replaceable runtime plumbing; the saved thread is the world's narrative

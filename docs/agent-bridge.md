@@ -154,7 +154,7 @@ can start a fresh thread from the same world DB.
 
 If no `--codex-app-server-url` is provided, `host-worker` starts
 `codex app-server` on a loopback port and writes
-`codex_app_server_runtime.json` under the world `agent_bridge` directory. Pass
+`codex_app_server_runtime.json` under the store-root `agent_bridge` directory. Pass
 an explicit URL only when the embedding host owns the app-server process.
 
 When `host-worker --text-backend codex-exec-resume` sees a pending turn, it

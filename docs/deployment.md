@@ -86,15 +86,15 @@ Text turns:
 
 ```bash
 singulari-world host-worker \
-  --world-id <world-id> \
   --text-backend codex-app-server \
   --interval-ms 750
 ```
 
 The intended packaged-app backend is `codex-app-server`. By default, the worker
 starts `codex app-server` on a managed loopback port, records the runtime URL in
-the world `agent_bridge` directory, and dispatches only when a pending world
-turn exists. Hosts that already own the websocket may pass
+the store-root `agent_bridge` directory, and dispatches only when a pending world
+turn exists. It can be started before any world exists; it idles until the
+browser creates or loads the active world. Hosts that already own the websocket may pass
 `--codex-app-server-url`. `codex-exec-resume` remains the on-demand CLI backend
 for hosts that do not run a websocket app-server.
 
