@@ -1646,6 +1646,7 @@ fn handle_agent_watch(
 const HOST_WORKER_EVENT_SCHEMA_VERSION: &str = "singulari.host_worker_event.v1";
 const HOST_WORKER_CONSUMER: &str = "codex_app_host_worker";
 const CODEX_APP_SERVER_TURN_HELPER: &str = include_str!("codex_app_server_turn.mjs");
+const CODEX_APP_SERVER_IMAGE_HELPER: &str = include_str!("codex_app_server_image.mjs");
 
 #[derive(Debug, Clone)]
 struct HostWorkerOptions {
@@ -2081,22 +2082,61 @@ fn emit_host_visual_job_events(
             })?;
             if let singulari_world::VisualJobClaimOutcome::Claimed { claim } = outcome {
                 if visual_backend == HostVisualBackend::CodexAppServer {
-                    let release = release_visual_job_claim(&ReleaseVisualJobClaimOptions {
-                        store_root: store_root.map(Path::to_path_buf),
-                        world_id: claim.world_id.clone(),
-                        slot: claim.slot.clone(),
-                    })?;
-                    emit_host_event(&serde_json::json!({
-                        "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
-                        "event": "codex_app_image_generate_unsupported",
-                        "world_id": claim.world_id.as_str(),
-                        "slot": claim.slot.as_str(),
-                        "claim_id": claim.claim_id.as_str(),
-                        "status": "released",
-                        "released_at": release.released_at,
-                        "reason": "codex app-server imageGeneration is not available through this worker path; use Codex App host capability or manual claim/complete",
-                        "consumer": HOST_WORKER_CONSUMER,
-                    }))?;
+                    let Some(app_server_dispatch) = app_server_dispatch else {
+                        release_visual_job_claim(&ReleaseVisualJobClaimOptions {
+                            store_root: store_root.map(Path::to_path_buf),
+                            world_id: claim.world_id.clone(),
+                            slot: claim.slot.clone(),
+                        })?;
+                        emit_host_event(&serde_json::json!({
+                            "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
+                            "event": "codex_app_image_generate_failed",
+                            "world_id": claim.world_id.as_str(),
+                            "slot": claim.slot.as_str(),
+                            "claim_id": claim.claim_id.as_str(),
+                            "status": "missing_app_server_dispatch",
+                            "consumer": HOST_WORKER_CONSUMER,
+                        }))?;
+                        return Ok(true);
+                    };
+                    match dispatch_visual_job_via_app_server(
+                        store_root,
+                        &claim,
+                        app_server_dispatch,
+                    ) {
+                        Ok(record) => {
+                            emit_host_event(&serde_json::json!({
+                                "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
+                                "event": "codex_app_image_generate_completed",
+                                "world_id": record.world_id.as_str(),
+                                "slot": record.slot.as_str(),
+                                "claim_id": record.claim_id.as_deref(),
+                                "saved_path": record.saved_path.as_deref(),
+                                "destination_path": record.destination_path.as_str(),
+                                "record_path": record.record_path.as_str(),
+                                "status": record.status.as_str(),
+                                "consumer": HOST_WORKER_CONSUMER,
+                            }))?;
+                        }
+                        Err(error) => {
+                            let release =
+                                release_visual_job_claim(&ReleaseVisualJobClaimOptions {
+                                    store_root: store_root.map(Path::to_path_buf),
+                                    world_id: claim.world_id.clone(),
+                                    slot: claim.slot.clone(),
+                                })?;
+                            emit_host_event(&serde_json::json!({
+                                "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
+                                "event": "codex_app_image_generate_failed",
+                                "world_id": claim.world_id.as_str(),
+                                "slot": claim.slot.as_str(),
+                                "claim_id": claim.claim_id.as_str(),
+                                "error": error.to_string(),
+                                "released_at": release.released_at,
+                                "consumer": HOST_WORKER_CONSUMER,
+                            }))?;
+                        }
+                    }
                     return Ok(true);
                 }
                 let complete_command_hint = format!(
@@ -2753,6 +2793,33 @@ struct CodexAppServerDispatchRecord {
     completed_at: String,
 }
 
+#[derive(Debug, Serialize)]
+struct CodexAppServerImageDispatchRecord {
+    schema_version: &'static str,
+    status: String,
+    world_id: String,
+    slot: String,
+    claim_id: Option<String>,
+    app_server_url: String,
+    app_server_managed: bool,
+    app_server_runtime_path: Option<String>,
+    node_bin: String,
+    pid: u32,
+    record_path: String,
+    prompt_path: String,
+    result_path: String,
+    helper_path: String,
+    stdout_path: String,
+    stderr_path: String,
+    saved_path: Option<String>,
+    destination_path: String,
+    completion_path: Option<String>,
+    dispatched_at: String,
+    exit_code: Option<i32>,
+    error: Option<String>,
+    completed_at: String,
+}
+
 fn dispatch_pending_agent_turn(
     store_root: Option<&Path>,
     pending: &singulari_world::PendingAgentTurn,
@@ -3046,6 +3113,214 @@ fn dispatch_pending_agent_turn_via_app_server(
     fs::write(&record_path, serde_json::to_vec_pretty(&record)?)
         .with_context(|| format!("failed to update {}", record_path.display()))?;
     Ok(AppServerDispatchOutcome::Started(Box::new(record)))
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "Image dispatch keeps the host imageGeneration call and visual-job completion in one process-boundary record"
+)]
+fn dispatch_visual_job_via_app_server(
+    store_root: Option<&Path>,
+    claim: &singulari_world::VisualJobClaim,
+    dispatch: &CodexAppServerDispatch,
+) -> Result<CodexAppServerImageDispatchRecord> {
+    let dispatch_dir = visual_dispatch_dir_for_world(store_root, claim.world_id.as_str())?;
+    fs::create_dir_all(&dispatch_dir)
+        .with_context(|| format!("failed to create {}", dispatch_dir.display()))?;
+    let slot_component = safe_file_component(claim.slot.as_str());
+    let claim_component = safe_file_component(claim.claim_id.as_str());
+    let record_path = dispatch_dir.join(format!(
+        "{slot_component}-{claim_component}-appserver-image.json"
+    ));
+    let prompt_path = dispatch_dir.join(format!(
+        "{slot_component}-{claim_component}-image-prompt.md"
+    ));
+    let result_path = dispatch_dir.join(format!(
+        "{slot_component}-{claim_component}-image-result.json"
+    ));
+    let helper_path = dispatch_dir.join("codex_app_server_image.mjs");
+    let stdout_path = dispatch_dir.join(format!(
+        "{slot_component}-{claim_component}-image-stdout.log"
+    ));
+    let stderr_path = dispatch_dir.join(format!(
+        "{slot_component}-{claim_component}-image-stderr.log"
+    ));
+    let prompt = build_codex_app_server_image_prompt(&claim.job);
+    fs::write(&prompt_path, prompt.as_bytes())
+        .with_context(|| format!("failed to write {}", prompt_path.display()))?;
+    fs::write(&helper_path, CODEX_APP_SERVER_IMAGE_HELPER.as_bytes())
+        .with_context(|| format!("failed to write {}", helper_path.display()))?;
+
+    let dispatched_at = Utc::now().to_rfc3339();
+    let claim_record = serde_json::json!({
+        "schema_version": "singulari.codex_app_server_image_dispatch_record.v1",
+        "status": "dispatching",
+        "world_id": claim.world_id.as_str(),
+        "slot": claim.slot.as_str(),
+        "claim_id": claim.claim_id.as_str(),
+        "app_server_url": dispatch.app_server_url.as_str(),
+        "app_server_managed": dispatch.app_server_managed,
+        "app_server_runtime_path": dispatch
+            .app_server_runtime_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        "node_bin": dispatch.node_bin.display().to_string(),
+        "prompt_path": prompt_path.display().to_string(),
+        "result_path": result_path.display().to_string(),
+        "helper_path": helper_path.display().to_string(),
+        "stdout_path": stdout_path.display().to_string(),
+        "stderr_path": stderr_path.display().to_string(),
+        "destination_path": claim.job.destination_path.as_str(),
+        "dispatched_at": dispatched_at.as_str(),
+    });
+    if !write_dispatch_claim(record_path.as_path(), &claim_record)? {
+        anyhow::bail!(
+            "codex app-server image dispatch already exists: record_path={}",
+            record_path.display()
+        );
+    }
+
+    let stdout = File::create(&stdout_path)
+        .with_context(|| format!("failed to create {}", stdout_path.display()))?;
+    let stderr = File::create(&stderr_path)
+        .with_context(|| format!("failed to create {}", stderr_path.display()))?;
+    let cwd = std::env::current_dir().context("failed to resolve current working directory")?;
+    let mut child = Command::new(&dispatch.node_bin)
+        .arg(&helper_path)
+        .arg("--url")
+        .arg(dispatch.app_server_url.as_str())
+        .arg("--cwd")
+        .arg(cwd)
+        .arg("--prompt-path")
+        .arg(&prompt_path)
+        .arg("--result-path")
+        .arg(&result_path)
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .with_context(|| {
+            format!(
+                "failed to spawn codex app-server image helper: node={}",
+                dispatch.node_bin.display()
+            )
+        })?;
+    let pid = child.id();
+    let exit_status = child
+        .wait()
+        .context("failed to wait for codex app-server image helper")?;
+    let result = read_json_value_if_present(result_path.as_path())?;
+    let saved_path = app_server_image_saved_path(result.as_ref());
+    let mut destination_path = claim.job.destination_path.clone();
+    let mut completion_path = None;
+    let mut error = if exit_status.success() {
+        None
+    } else {
+        Some(app_server_image_error_message(
+            result.as_ref(),
+            format!("image helper exited with status {exit_status}"),
+        ))
+    };
+
+    if error.is_none() {
+        match saved_path.as_ref() {
+            Some(path) => match complete_visual_job(&CompleteVisualJobOptions {
+                store_root: store_root.map(Path::to_path_buf),
+                world_id: claim.world_id.clone(),
+                slot: claim.slot.clone(),
+                claim_id: Some(claim.claim_id.clone()),
+                generated_path: Some(path.clone()),
+            }) {
+                Ok(completion) => {
+                    destination_path = completion.destination_path;
+                    completion_path = Some(completion.completion_path);
+                }
+                Err(complete_error) => {
+                    error = Some(complete_error.to_string());
+                }
+            },
+            None => {
+                error = Some(app_server_image_error_message(
+                    result.as_ref(),
+                    "image generation completed without savedPath".to_owned(),
+                ));
+            }
+        }
+    }
+
+    let status = if error.is_none() {
+        "completed"
+    } else {
+        "failed"
+    }
+    .to_owned();
+    let record = CodexAppServerImageDispatchRecord {
+        schema_version: "singulari.codex_app_server_image_dispatch_record.v1",
+        status,
+        world_id: claim.world_id.clone(),
+        slot: claim.slot.clone(),
+        claim_id: Some(claim.claim_id.clone()),
+        app_server_url: dispatch.app_server_url.clone(),
+        app_server_managed: dispatch.app_server_managed,
+        app_server_runtime_path: dispatch
+            .app_server_runtime_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        node_bin: dispatch.node_bin.display().to_string(),
+        pid,
+        record_path: record_path.display().to_string(),
+        prompt_path: prompt_path.display().to_string(),
+        result_path: result_path.display().to_string(),
+        helper_path: helper_path.display().to_string(),
+        stdout_path: stdout_path.display().to_string(),
+        stderr_path: stderr_path.display().to_string(),
+        saved_path: saved_path.map(|path| path.display().to_string()),
+        destination_path,
+        completion_path,
+        dispatched_at,
+        exit_code: exit_status.code(),
+        error,
+        completed_at: Utc::now().to_rfc3339(),
+    };
+    fs::write(&record_path, serde_json::to_vec_pretty(&record)?)
+        .with_context(|| format!("failed to update {}", record_path.display()))?;
+    if let Some(error) = &record.error {
+        anyhow::bail!("{error}");
+    }
+    Ok(record)
+}
+
+fn visual_dispatch_dir_for_world(store_root: Option<&Path>, world_id: &str) -> Result<PathBuf> {
+    let paths = resolve_store_paths(store_root)?;
+    Ok(paths
+        .worlds_dir
+        .join(world_id)
+        .join("visual_jobs")
+        .join("dispatches"))
+}
+
+fn build_codex_app_server_image_prompt(job: &ImageGenerationJob) -> String {
+    if job.reference_paths.is_empty() {
+        return job.prompt.clone();
+    }
+    format!(
+        "{}\n\nReference continuity notes: {}",
+        job.prompt,
+        job.reference_paths.join(", ")
+    )
+}
+
+fn app_server_image_saved_path(result: Option<&serde_json::Value>) -> Option<PathBuf> {
+    result
+        .and_then(|value| value.get("saved_path"))
+        .and_then(serde_json::Value::as_str)
+        .map(PathBuf::from)
+}
+
+fn app_server_image_error_message(result: Option<&serde_json::Value>, fallback: String) -> String {
+    result
+        .and_then(|value| value.get("error"))
+        .and_then(serde_json::Value::as_str)
+        .map_or(fallback, str::to_owned)
 }
 
 fn clear_stale_app_server_binding_from_existing_record(
