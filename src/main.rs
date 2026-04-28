@@ -11,19 +11,19 @@ use singulari_world::{
     load_latest_snapshot, load_pending_agent_turn, load_render_packet,
     load_world_backend_selection, load_world_record, recent_entity_updates,
     recent_relationship_updates, refresh_world_docs, render_advanced_turn_report,
-    render_chat_route, render_codex_view_section_markdown, render_packet_markdown,
-    render_projection_health_report, render_resume_pack_markdown, render_started_world_report,
-    repair_world_db, resolve_store_paths, resolve_world_id, route_chat_input, search_world_db,
-    start_world, validate_world, world_db_stats,
+    render_chat_route, render_codex_view_section_markdown, render_host_supervisor_plan,
+    render_packet_markdown, render_projection_health_report, render_resume_pack_markdown,
+    render_started_world_report, repair_world_db, resolve_store_paths, resolve_world_id,
+    route_chat_input, search_world_db, start_world, validate_world, world_db_stats,
 };
 use singulari_world::{
     BuildCodexViewOptions, BuildResumePackOptions, BuildVnPacketOptions,
     BuildWorldVisualAssetsOptions, ChatRouteOptions, ClaimVisualJobOptions, CodexViewSection,
     CompleteVisualJobOptions, ExportWorldOptions, ImageGenerationJob, ImportWorldOptions,
     ReleaseVisualJobClaimOptions, StartWorldOptions, VisualArtifactKind, VnServeOptions,
-    build_projection_health_report, build_vn_packet, build_world_visual_assets, claim_visual_job,
-    complete_visual_job, export_world, import_world, load_visual_job_claim,
-    release_visual_job_claim, serve_vn,
+    build_host_supervisor_plan, build_projection_health_report, build_vn_packet,
+    build_world_visual_assets, claim_visual_job, complete_visual_job, export_world, import_world,
+    load_visual_job_claim, release_visual_job_claim, serve_vn,
 };
 use std::collections::HashSet;
 use std::fmt;
@@ -548,6 +548,15 @@ enum Commands {
         webgpt_timeout_secs: u64,
     },
 
+    /// Print deterministic host supervisor lane plan without dispatching jobs.
+    HostSupervisor {
+        #[arg(long)]
+        world_id: Option<String>,
+
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Export a world as a filesystem bundle directory.
     ExportWorld {
         #[arg(long)]
@@ -830,6 +839,9 @@ fn dispatch(cli: Cli) -> Result<()> {
                 webgpt_timeout_secs,
             },
         )?,
+        Commands::HostSupervisor { world_id, json } => {
+            handle_host_supervisor(store_root.as_deref(), world_id.as_deref(), json)?;
+        }
         Commands::ExportWorld {
             world_id,
             output,
@@ -1412,6 +1424,21 @@ fn handle_repair_db(store_root: Option<&Path>, world_id: Option<&str>, json: boo
         println!("snapshots: {}", report.snapshots);
         println!("render_packets: {}", report.render_packets);
         println!("search_documents: {}", report.search_documents);
+    }
+    Ok(())
+}
+
+fn handle_host_supervisor(
+    store_root: Option<&Path>,
+    world_id: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    let world_id = resolve_world_id(store_root, world_id)?;
+    let plan = build_host_supervisor_plan(store_root, world_id.as_str())?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&plan)?);
+    } else {
+        println!("{}", render_host_supervisor_plan(&plan));
     }
     Ok(())
 }

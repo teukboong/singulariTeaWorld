@@ -89,6 +89,17 @@ must leave pending CG jobs queued and untouched.
 
 ## Reference CLI
 
+Supervisor plan without dispatching jobs:
+
+```bash
+singulari-world --store-root .world-store host-supervisor --world-id <world-id>
+```
+
+This reads the unified job adapter plus projection health and returns the
+deterministic lane decision: `text`, `image`, `idle`, `ready`, or `blocked`.
+It never calls WebGPT and never claims visual jobs. Use it before wiring a
+long-running supervisor loop or when the UI says a backend is stuck.
+
 One-shot worker:
 
 ```bash

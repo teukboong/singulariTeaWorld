@@ -5,6 +5,7 @@ pub mod chat;
 pub mod codex_view;
 pub mod entity_update;
 pub mod extra_memory;
+pub mod host_supervisor;
 pub mod job_ledger;
 pub mod models;
 pub mod projection_health;
@@ -53,6 +54,11 @@ pub use extra_memory::{
     REMEMBERED_EXTRAS_FILENAME, REMEMBERED_EXTRAS_SCHEMA_VERSION, RememberedExtra,
     RememberedExtrasStore, apply_extra_memory_projection, commit_extra_memory_projection,
     compile_extra_memory_projection, local_faces_for_codex_view, retrieve_extra_memory_packet,
+};
+pub use host_supervisor::{
+    HOST_SUPERVISOR_PLAN_SCHEMA_VERSION, HostSupervisorLaneKind, HostSupervisorLanePlan,
+    HostSupervisorPlan, HostSupervisorStatus, build_host_supervisor_plan,
+    render_host_supervisor_plan,
 };
 pub use job_ledger::{
     ReadWorldJobsOptions, WORLD_JOB_LEDGER_SCHEMA_VERSION, WorldJob, WorldJobKind, WorldJobStatus,
