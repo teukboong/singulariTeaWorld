@@ -259,6 +259,9 @@ fn turn_commit_health(
                 envelope.world_id, envelope.turn_id
             ));
         }
+        if envelope.status == TurnCommitStatus::Committed {
+            errors.extend(missing_committed_materialization_errors(envelope));
+        }
     }
     if let Some(snapshot) = latest_snapshot {
         let latest_committed = envelopes
@@ -282,6 +285,28 @@ fn turn_commit_health(
         Vec::new(),
         errors,
     )
+}
+
+fn missing_committed_materialization_errors(envelope: &TurnCommitEnvelope) -> Vec<String> {
+    let mut errors = Vec::new();
+    for (field, value) in [
+        ("response_path", envelope.response_path.as_deref()),
+        ("render_packet_path", envelope.render_packet_path.as_deref()),
+        ("commit_record_path", envelope.commit_record_path.as_deref()),
+    ] {
+        match value {
+            Some(path) if Path::new(path).is_file() => {}
+            Some(path) => errors.push(format!(
+                "committed turn materialization missing: turn={}, field={field}, path={path}",
+                envelope.turn_id
+            )),
+            None => errors.push(format!(
+                "committed turn materialization missing: turn={}, field={field}, path=<none>",
+                envelope.turn_id
+            )),
+        }
+    }
+    errors
 }
 
 fn extra_memory_health(world_id: &str, world_dir: &Path) -> ProjectionComponentHealth {
@@ -481,7 +506,10 @@ mod tests {
     use crate::projection_health::{
         ProjectionHealthStatus, build_projection_health_report, render_projection_health_report,
     };
-    use crate::store::{InitWorldOptions, init_world};
+    use crate::store::{InitWorldOptions, append_jsonl, init_world};
+    use crate::turn_commit::{
+        TURN_COMMIT_ENVELOPE_SCHEMA_VERSION, TurnCommitEnvelope, TurnCommitStatus,
+    };
     use tempfile::tempdir;
 
     fn seed_body() -> &'static str {
@@ -533,6 +561,53 @@ premise:
         assert!(report.components.iter().any(|component| {
             component.component == "extra_memory"
                 && component.status == ProjectionHealthStatus::Failed
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn projection_health_fails_committed_turn_with_missing_materialization() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(&seed_path, seed_body())?;
+        let initialized = init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+        append_jsonl(
+            &initialized.world_dir.join("turn_commits.jsonl"),
+            &TurnCommitEnvelope {
+                schema_version: TURN_COMMIT_ENVELOPE_SCHEMA_VERSION.to_owned(),
+                world_id: "stw_projection_health".to_owned(),
+                turn_id: "turn_0000".to_owned(),
+                parent_turn_id: "turn_0000".to_owned(),
+                player_input: "test".to_owned(),
+                status: TurnCommitStatus::Committed,
+                pending_ref: "agent_bridge/pending_turn.json".to_owned(),
+                response_path: Some(
+                    initialized
+                        .world_dir
+                        .join("missing-agent-response.json")
+                        .display()
+                        .to_string(),
+                ),
+                render_packet_path: None,
+                commit_record_path: None,
+                created_at: "2026-04-29T00:00:00Z".to_owned(),
+            },
+        )?;
+
+        let report = build_projection_health_report(Some(&store), "stw_projection_health")?;
+
+        assert_eq!(report.status, ProjectionHealthStatus::Failed);
+        assert!(report.components.iter().any(|component| {
+            component.component == "turn_commit"
+                && component.errors.iter().any(|error| {
+                    error.contains("committed turn materialization missing")
+                        && error.contains("missing-agent-response")
+                })
         }));
         Ok(())
     }
