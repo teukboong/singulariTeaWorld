@@ -7,7 +7,9 @@ use crate::backend_selection::{
     save_world_backend_selection,
 };
 use crate::host_supervisor::{HostSupervisorPlan, build_host_supervisor_plan};
-use crate::job_ledger::{ReadWorldJobsOptions, WorldJobKind, WorldJobStatus, read_world_jobs};
+use crate::job_ledger::{
+    ReadWorldJobsOptions, WorldJob, WorldJobKind, WorldJobStatus, read_world_jobs,
+};
 use crate::models::FREEFORM_CHOICE_SLOT;
 use crate::projection_health::{ProjectionHealthReport, build_projection_health_report};
 use crate::repair_extra_memory_projection;
@@ -234,6 +236,7 @@ struct VnVisualRuntimeStatus {
     pending_slots: Vec<String>,
     claimed_slots: Vec<String>,
     completed_slots: Vec<String>,
+    jobs: Vec<WorldJob>,
     turn_cg_status: String,
     latest_dispatch_status: Option<String>,
 }
@@ -953,6 +956,7 @@ fn visual_runtime_status(
         .filter(|job| job.status == WorldJobStatus::Completed)
         .map(|job| job.slot.clone())
         .collect::<Vec<_>>();
+    let jobs = visual_jobs.into_iter().cloned().collect::<Vec<WorldJob>>();
     let turn_cg_status = if packet.image.image_generation_job.is_some() {
         "pending"
     } else if packet.image.exists {
@@ -997,6 +1001,7 @@ fn visual_runtime_status(
         pending_slots,
         claimed_slots,
         completed_slots,
+        jobs,
         turn_cg_status,
         latest_dispatch_status,
     })
@@ -1849,6 +1854,7 @@ mod tests {
         save_world_response, validate_vn_input, world_list,
     };
     use crate::backend_selection::{WorldTextBackend, WorldVisualBackend};
+    use crate::job_ledger::{WorldJobKind, WorldJobStatus};
     use crate::store::{InitWorldOptions, init_world};
     use crate::transfer::{ExportWorldOptions, export_world};
     use crate::turn::{AdvanceTurnOptions, advance_turn};
@@ -2074,6 +2080,16 @@ premise:
                 .pending_slots
                 .contains(&"stage_background".to_owned())
         );
+        assert!(status.visual.jobs.iter().any(|job| {
+            job.slot == "menu_background"
+                && job.kind == WorldJobKind::UiAsset
+                && job.status == WorldJobStatus::Pending
+        }));
+        assert!(status.visual.jobs.iter().any(|job| {
+            job.slot == "stage_background"
+                && job.kind == WorldJobKind::UiAsset
+                && job.status == WorldJobStatus::Pending
+        }));
         assert!(matches!(
             status.narrative.label.as_str(),
             "서사 연결됨" | "WebGPT 서사 연결됨"
