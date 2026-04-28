@@ -701,7 +701,20 @@ select {
     rgba(7, 8, 10, 0.54);
 }
 
+.runtime-lights span[data-status="healthy"] {
+  border-color: color-mix(in srgb, #9fe6a0 46%, var(--line-soft));
+  color: color-mix(in srgb, #9fe6a0 78%, var(--paper));
+  background:
+    linear-gradient(180deg, rgba(159, 230, 160, 0.14), rgba(159, 230, 160, 0.055)),
+    rgba(7, 8, 10, 0.54);
+}
+
 .runtime-lights span[data-status="online"]::before {
+  background: #9fe6a0;
+  box-shadow: 0 0 10px rgba(159, 230, 160, 0.68);
+}
+
+.runtime-lights span[data-status="healthy"]::before {
   background: #9fe6a0;
   box-shadow: 0 0 10px rgba(159, 230, 160, 0.68);
 }
@@ -709,7 +722,8 @@ select {
 .runtime-lights span[data-status="pending"],
 .runtime-lights span[data-status="claimed"],
 .runtime-lights span[data-status="rebuilt"],
-.runtime-lights span[data-status="standby"] {
+.runtime-lights span[data-status="standby"],
+.runtime-lights span[data-status="degraded"] {
   border-color: color-mix(in srgb, var(--gold) 42%, var(--line-soft));
   color: color-mix(in srgb, var(--gold) 78%, var(--paper));
 }
@@ -717,18 +731,21 @@ select {
 .runtime-lights span[data-status="pending"]::before,
 .runtime-lights span[data-status="claimed"]::before,
 .runtime-lights span[data-status="rebuilt"]::before,
-.runtime-lights span[data-status="standby"]::before {
+.runtime-lights span[data-status="standby"]::before,
+.runtime-lights span[data-status="degraded"]::before {
   background: var(--gold);
   box-shadow: 0 0 9px color-mix(in srgb, var(--gold) 58%, transparent);
 }
 
 .runtime-lights span[data-status="needs_connection"],
+.runtime-lights span[data-status="failed"],
 .runtime-lights span[data-status="unknown"] {
   border-color: color-mix(in srgb, #f1b5b5 44%, var(--line-soft));
   color: color-mix(in srgb, #f1b5b5 76%, var(--paper));
 }
 
 .runtime-lights span[data-status="needs_connection"]::before,
+.runtime-lights span[data-status="failed"]::before,
 .runtime-lights span[data-status="unknown"]::before {
   background: #f1b5b5;
   box-shadow: 0 0 9px rgba(241, 181, 181, 0.54);
@@ -1284,7 +1301,7 @@ select {
 .runtime-status-panel {
   display: grid;
   gap: 8px;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .runtime-status-pill,
@@ -1299,6 +1316,7 @@ select {
 
 .runtime-status-pill[data-status="connected"],
 .runtime-status-pill[data-status="ready"],
+.runtime-status-pill[data-status="healthy"],
 .runtime-status-pill[data-online="true"],
 .cg-job-row[data-status="saved"] {
   border-color: color-mix(in srgb, var(--world-accent) 42%, var(--line-soft));
@@ -1307,11 +1325,13 @@ select {
 .runtime-status-pill[data-status="pending"],
 .runtime-status-pill[data-status="claimed"],
 .runtime-status-pill[data-status="rebuilt"],
+.runtime-status-pill[data-status="degraded"],
 .cg-job-row[data-status="pending"] {
   border-color: color-mix(in srgb, var(--gold) 45%, var(--line-soft));
 }
 
-.runtime-status-pill[data-status="needs_connection"] {
+.runtime-status-pill[data-status="needs_connection"],
+.runtime-status-pill[data-status="failed"] {
   border-color: color-mix(in srgb, #f1b5b5 44%, var(--line-soft));
 }
 

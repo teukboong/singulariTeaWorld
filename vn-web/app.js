@@ -92,6 +92,7 @@ const els = {
   runtimeLights: document.getElementById("runtimeLights"),
   runtimeLightText: document.querySelector("[data-runtime-light='text']"),
   runtimeLightVisual: document.querySelector("[data-runtime-light='visual']"),
+  runtimeLightState: document.querySelector("[data-runtime-light='state']"),
   locationId: document.getElementById("locationId"),
   eventId: document.getElementById("eventId"),
   outcomeBadge: document.getElementById("outcomeBadge"),
@@ -1110,9 +1111,11 @@ function renderRuntimeStatus(status) {
   const selection = status?.backend_selection || {};
   const narrative = status?.narrative || {};
   const visual = status?.visual || {};
+  const projection = projectionRuntimeLane(status?.details?.projection_health);
   els.runtimeStatusPanel.append(
     runtimeStatusPill("서사", narrative, selection.text_backend),
     runtimeStatusPill("CG", visual, selection.visual_backend),
+    runtimeStatusPill("상태", projection, "store"),
   );
   if (els.runtimeDetails) {
     els.runtimeDetails.textContent = JSON.stringify(status?.details || {}, null, 2);
@@ -1122,6 +1125,30 @@ function renderRuntimeStatus(status) {
 function renderRuntimeLights(status) {
   renderRuntimeLight(els.runtimeLightText, "TXT", status?.narrative);
   renderRuntimeLight(els.runtimeLightVisual, "IMG", status?.visual);
+  renderRuntimeLight(els.runtimeLightState, "DB", projectionRuntimeLane(status?.details?.projection_health));
+}
+
+function projectionRuntimeLane(report) {
+  const status = report?.status || "unknown";
+  const failed = Array.isArray(report?.components)
+    ? report.components.filter((component) => component.status === "failed").length
+    : 0;
+  const degraded = Array.isArray(report?.components)
+    ? report.components.filter((component) => component.status === "degraded").length
+    : 0;
+  const detail =
+    status === "healthy"
+      ? "core/db/commit/memory/jobs aligned"
+      : `failed=${failed}, degraded=${degraded}`;
+  return {
+    label: status === "healthy" ? "저장소 정상" : "저장소 점검 필요",
+    status,
+    backend: "store",
+    online: status === "healthy",
+    detail,
+    endpoint: null,
+    latest_dispatch_status: null,
+  };
 }
 
 function renderRuntimeLight(element, label, lane) {

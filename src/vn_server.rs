@@ -8,6 +8,7 @@ use crate::backend_selection::{
 };
 use crate::job_ledger::{ReadWorldJobsOptions, WorldJobKind, WorldJobStatus, read_world_jobs};
 use crate::models::FREEFORM_CHOICE_SLOT;
+use crate::projection_health::{ProjectionHealthReport, build_projection_health_report};
 use crate::start::{StartWorldOptions, start_world};
 use crate::store::{
     WORLD_FILENAME, read_json, resolve_store_paths, resolve_world_id, save_active_world,
@@ -239,6 +240,7 @@ struct VnRuntimeDetails {
     backend_selection: VnBackendSelectionStatus,
     latest_text_dispatch: Option<serde_json::Value>,
     latest_visual_dispatch: Option<serde_json::Value>,
+    projection_health: ProjectionHealthReport,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -686,6 +688,8 @@ fn runtime_status(state: &VnServerState) -> Result<VnRuntimeStatusResponse> {
     let pending = load_pending_agent_turn(state.store_root.as_deref(), world_id.as_str()).ok();
     let latest_text_dispatch = latest_text_dispatch_record(state, world_id.as_str())?;
     let latest_visual_dispatch = latest_visual_dispatch_record(state, world_id.as_str())?;
+    let projection_health =
+        build_projection_health_report(state.store_root.as_deref(), world_id.as_str())?;
     let packet = current_packet(state)?;
     let visual =
         visual_runtime_status(state, &packet, &selection, latest_visual_dispatch.as_ref())?;
@@ -742,6 +746,7 @@ fn runtime_status(state: &VnServerState) -> Result<VnRuntimeStatusResponse> {
             backend_selection: selection,
             latest_text_dispatch,
             latest_visual_dispatch,
+            projection_health,
         },
     })
 }
@@ -1976,6 +1981,10 @@ premise:
         assert_eq!(status.backend_selection.visual_backend, "webgpt");
         assert_eq!(status.narrative.backend, "webgpt");
         assert_eq!(status.visual.backend, "webgpt");
+        assert_eq!(
+            status.details.projection_health.status.to_string(),
+            "healthy"
+        );
         assert_eq!(status.visual.label, "CG 생성 대기");
         assert!(
             status
