@@ -1,5 +1,6 @@
 pub mod adjudication;
 pub mod agent_bridge;
+pub mod backend_selection;
 pub mod chat;
 pub mod codex_view;
 pub mod entity_update;
@@ -29,6 +30,11 @@ pub use agent_bridge::{
     CommittedAgentTurn, PendingAgentChoice, PendingAgentTurn, SaveCodexThreadBindingOptions,
     clear_codex_thread_binding, commit_agent_turn, enqueue_agent_turn, load_codex_thread_binding,
     load_pending_agent_turn, save_codex_thread_binding,
+};
+pub use backend_selection::{
+    WORLD_BACKEND_SELECTION_FILENAME, WORLD_BACKEND_SELECTION_SCHEMA_VERSION,
+    WorldBackendSelection, WorldTextBackend, WorldVisualBackend, backend_selection_path,
+    load_world_backend_selection, save_world_backend_selection,
 };
 pub use chat::{
     CHAT_ROUTE_SCHEMA_VERSION, ChatRoute, ChatRouteOptions, render_chat_route, route_chat_input,

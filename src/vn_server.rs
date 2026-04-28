@@ -3,6 +3,10 @@ use crate::agent_bridge::{
     commit_agent_turn, enqueue_agent_turn, load_codex_thread_binding, load_pending_agent_turn,
     normalize_narrative_level,
 };
+use crate::backend_selection::{
+    WorldBackendSelection, WorldTextBackend, WorldVisualBackend, load_world_backend_selection,
+    save_world_backend_selection,
+};
 use crate::start::{StartWorldOptions, start_world};
 use crate::store::{
     WORLD_FILENAME, read_json, resolve_store_paths, resolve_world_id, save_active_world,
@@ -33,6 +37,11 @@ const EXPORTS_DIR: &str = "exports";
 const MAX_REQUEST_BYTES: usize = 16 * 1024;
 const MAX_VN_INPUT_CHARS: usize = 2048;
 const AGENT_BRIDGE_ENV: &str = "SINGULARI_WORLD_AGENT_BRIDGE";
+const WEBGPT_TEXT_CDP_PORT_ENV: &str = "SINGULARI_WORLD_WEBGPT_TEXT_CDP_PORT";
+const WEBGPT_IMAGE_CDP_PORT_ENV: &str = "SINGULARI_WORLD_WEBGPT_IMAGE_CDP_PORT";
+const CODEX_APP_SERVER_URL_ENV: &str = "SINGULARI_WORLD_CODEX_APP_SERVER_URL";
+const DEFAULT_WEBGPT_TEXT_CDP_PORT: u16 = 9238;
+const DEFAULT_WEBGPT_IMAGE_CDP_PORT: u16 = 9239;
 const INITIAL_AGENT_TURN_INPUT: &str = "세계 개막";
 const VN_CHOOSE_RESPONSE_SCHEMA_VERSION: &str = "singulari.vn_choose_response.v1";
 const VN_RUNTIME_STATUS_SCHEMA_VERSION: &str = "singulari.vn_runtime_status.v1";
@@ -72,6 +81,10 @@ pub struct VnNewWorldRequest {
     pub seed_text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_backend: Option<WorldTextBackend>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visual_backend: Option<WorldVisualBackend>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,37 +181,59 @@ struct VnAgentStatusResponse {
 struct VnRuntimeStatusResponse {
     schema_version: String,
     world_id: String,
+    backend_selection: VnBackendSelectionStatus,
     narrative: VnNarrativeRuntimeStatus,
     visual: VnVisualRuntimeStatus,
     details: VnRuntimeDetails,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct VnBackendSelectionStatus {
+    text_backend: String,
+    visual_backend: String,
+    locked: bool,
+    source: String,
+    created_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct VnNarrativeRuntimeStatus {
     label: String,
     status: String,
+    backend: String,
+    online: bool,
+    detail: String,
+    endpoint: Option<String>,
     agent_bridge_enabled: bool,
     pending_turn_id: Option<String>,
     binding_present: bool,
+    latest_dispatch_status: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct VnVisualRuntimeStatus {
     label: String,
     status: String,
+    backend: String,
+    online: bool,
+    detail: String,
+    endpoint: Option<String>,
     pending_slots: Vec<String>,
     claimed_slots: Vec<String>,
     completed_slots: Vec<String>,
     turn_cg_status: String,
+    latest_dispatch_status: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct VnRuntimeDetails {
+    backend_selection: VnBackendSelectionStatus,
     thread_id: Option<String>,
     binding_source: Option<String>,
     binding_updated_at: Option<String>,
     app_server: Option<serde_json::Value>,
-    latest_dispatch: Option<serde_json::Value>,
+    latest_text_dispatch: Option<serde_json::Value>,
+    latest_visual_dispatch: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -573,42 +608,97 @@ fn request_turn_cg_retry(
 
 fn runtime_status(state: &VnServerState) -> Result<VnRuntimeStatusResponse> {
     let world_id = state.world_id()?;
+    let selection = backend_selection_status(state, world_id.as_str())?;
     let binding = load_codex_thread_binding(state.store_root.as_deref(), world_id.as_str())?;
     let pending = load_pending_agent_turn(state.store_root.as_deref(), world_id.as_str()).ok();
-    let latest_dispatch = latest_app_server_dispatch_record(state, world_id.as_str())?;
+    let latest_text_dispatch = latest_text_dispatch_record(state, world_id.as_str())?;
+    let latest_visual_dispatch = latest_visual_dispatch_record(state, world_id.as_str())?;
     let app_server = app_server_runtime_record(state)?;
     let packet = current_packet(state)?;
-    let visual = visual_runtime_status(state, &packet)?;
+    let visual =
+        visual_runtime_status(state, &packet, &selection, latest_visual_dispatch.as_ref())?;
     let agent_bridge_enabled = agent_bridge_enabled(state);
     let label = narrative_runtime_label(
         agent_bridge_enabled,
         pending.as_ref().map(|value| value.turn_id.as_str()),
         binding.as_ref().map(|value| value.source.as_str()),
-        latest_dispatch.as_ref(),
+        latest_text_dispatch.as_ref(),
     );
-    let narrative_status = match label {
-        "세계 흐름 복원 중" => "pending",
-        "새 서사 맥락 재구성됨" => "rebuilt",
-        "서사 연결됨" => "connected",
-        _ => "needs_connection",
-    };
+    let narrative_backend = selection.text_backend.as_str();
+    let narrative_endpoint = narrative_backend_endpoint(
+        narrative_backend,
+        app_server.as_ref(),
+        latest_text_dispatch.as_ref(),
+    );
+    let narrative_online =
+        backend_endpoint_online(narrative_backend, narrative_endpoint.as_deref());
+    let latest_text_status = effective_text_dispatch_status(
+        state,
+        world_id.as_str(),
+        latest_text_dispatch.as_ref(),
+        packet.turn_id.as_str(),
+        pending.is_some(),
+    )?;
+    let narrative_status = narrative_runtime_status_code(
+        label,
+        narrative_backend,
+        narrative_online,
+        pending.is_some(),
+    );
+    let narrative_detail = narrative_runtime_detail(
+        narrative_backend,
+        narrative_online,
+        pending.as_ref().map(|value| value.turn_id.as_str()),
+        latest_text_status.as_deref(),
+    );
     Ok(VnRuntimeStatusResponse {
         schema_version: VN_RUNTIME_STATUS_SCHEMA_VERSION.to_owned(),
-        world_id,
+        world_id: world_id.clone(),
+        backend_selection: selection.clone(),
         narrative: VnNarrativeRuntimeStatus {
             label: label.to_owned(),
-            status: narrative_status.to_owned(),
+            status: narrative_status,
+            backend: narrative_backend.to_owned(),
+            online: narrative_online,
+            detail: narrative_detail,
+            endpoint: narrative_endpoint,
             agent_bridge_enabled,
             pending_turn_id: pending.map(|value| value.turn_id),
             binding_present: binding.is_some(),
+            latest_dispatch_status: latest_text_status,
         },
         visual,
         details: VnRuntimeDetails {
+            backend_selection: selection,
             thread_id: binding.as_ref().map(|value| value.thread_id.clone()),
             binding_source: binding.as_ref().map(|value| value.source.clone()),
             binding_updated_at: binding.map(|value| value.updated_at),
             app_server,
-            latest_dispatch,
+            latest_text_dispatch,
+            latest_visual_dispatch,
+        },
+    })
+}
+
+fn backend_selection_status(
+    state: &VnServerState,
+    world_id: &str,
+) -> Result<VnBackendSelectionStatus> {
+    let selection = load_world_backend_selection(state.store_root.as_deref(), world_id)?;
+    Ok(match selection {
+        Some(selection) => VnBackendSelectionStatus {
+            text_backend: selection.text_backend.as_str().to_owned(),
+            visual_backend: selection.visual_backend.as_str().to_owned(),
+            locked: selection.locked,
+            source: selection.source,
+            created_at: Some(selection.created_at),
+        },
+        None => VnBackendSelectionStatus {
+            text_backend: WorldTextBackend::CodexAppServer.as_str().to_owned(),
+            visual_backend: WorldVisualBackend::CodexAppServer.as_str().to_owned(),
+            locked: false,
+            source: "vn_server_default".to_owned(),
+            created_at: None,
         },
     })
 }
@@ -640,9 +730,63 @@ fn narrative_runtime_label(
     "Codex 연결 필요"
 }
 
+fn narrative_runtime_status_code(
+    label: &str,
+    backend: &str,
+    online: bool,
+    pending: bool,
+) -> String {
+    if pending {
+        return "pending".to_owned();
+    }
+    if backend == WorldTextBackend::Webgpt.as_str() && !online {
+        return "needs_connection".to_owned();
+    }
+    if backend == WorldTextBackend::CodexAppServer.as_str() && !online {
+        return "standby".to_owned();
+    }
+    match label {
+        "새 서사 맥락 재구성됨" => "rebuilt",
+        "서사 연결됨" => "connected",
+        _ => "needs_connection",
+    }
+    .to_owned()
+}
+
+fn narrative_runtime_detail(
+    backend: &str,
+    online: bool,
+    pending_turn_id: Option<&str>,
+    latest_dispatch_status: Option<&str>,
+) -> String {
+    if let Some(turn_id) = pending_turn_id {
+        return format!("pending turn: {turn_id}");
+    }
+    if backend == WorldTextBackend::Webgpt.as_str() {
+        return if online {
+            format!(
+                "WebGPT text CDP online{}",
+                latest_dispatch_suffix(latest_dispatch_status)
+            )
+        } else {
+            "WebGPT text CDP offline; text lane cannot consume pending turns".to_owned()
+        };
+    }
+    if online {
+        format!(
+            "Codex app-server endpoint online{}",
+            latest_dispatch_suffix(latest_dispatch_status)
+        )
+    } else {
+        "Codex app-server is not currently listening; host-worker may start it on demand".to_owned()
+    }
+}
+
 fn visual_runtime_status(
     state: &VnServerState,
     packet: &crate::vn::VnPacket,
+    selection: &VnBackendSelectionStatus,
+    latest_visual_dispatch: Option<&serde_json::Value>,
 ) -> Result<VnVisualRuntimeStatus> {
     let manifest = build_world_visual_assets(&BuildWorldVisualAssetsOptions {
         store_root: state.store_root.clone(),
@@ -690,25 +834,50 @@ fn visual_runtime_status(
         "idle"
     }
     .to_owned();
-    let label = visual_runtime_label(&pending_jobs, &claimed_slots, &completed_slots);
+    let visual_backend = selection.visual_backend.as_str();
+    let endpoint = visual_backend_endpoint(visual_backend, latest_visual_dispatch);
+    let online = backend_endpoint_online(visual_backend, endpoint.as_deref());
+    let latest_dispatch_status = dispatch_status(latest_visual_dispatch);
+    let label = visual_runtime_label(
+        visual_backend,
+        online,
+        &pending_jobs,
+        &claimed_slots,
+        &completed_slots,
+    );
     let status = if !claimed_slots.is_empty() {
         "claimed"
     } else if !pending_jobs.is_empty() {
         "pending"
+    } else if !online && visual_backend != WorldVisualBackend::CodexAppServer.as_str() {
+        "needs_connection"
     } else {
         "ready"
     };
     Ok(VnVisualRuntimeStatus {
         label: label.to_owned(),
         status: status.to_owned(),
+        backend: visual_backend.to_owned(),
+        online,
+        detail: visual_runtime_detail(
+            visual_backend,
+            online,
+            &pending_slots,
+            &claimed_slots,
+            latest_dispatch_status.as_deref(),
+        ),
+        endpoint,
         pending_slots,
         claimed_slots,
         completed_slots,
         turn_cg_status,
+        latest_dispatch_status,
     })
 }
 
 fn visual_runtime_label(
+    backend: &str,
+    online: bool,
     pending_jobs: &[ImageGenerationJob],
     claimed_slots: &[String],
     completed_slots: &[String],
@@ -719,13 +888,200 @@ fn visual_runtime_label(
     if !pending_jobs.is_empty() {
         return "CG 생성 대기";
     }
+    if !online && backend == WorldVisualBackend::Webgpt.as_str() {
+        return "WebGPT 이미지 오프라인";
+    }
     if completed_slots.is_empty() {
         return "Codex 이미지 연결 필요";
     }
     "CG 준비됨"
 }
 
-fn latest_app_server_dispatch_record(
+fn visual_runtime_detail(
+    backend: &str,
+    online: bool,
+    pending_slots: &[String],
+    claimed_slots: &[String],
+    latest_dispatch_status: Option<&str>,
+) -> String {
+    if !claimed_slots.is_empty() {
+        return format!("claimed slots: {}", claimed_slots.join(", "));
+    }
+    if !pending_slots.is_empty() {
+        return format!("pending slots: {}", pending_slots.join(", "));
+    }
+    if backend == WorldVisualBackend::Webgpt.as_str() {
+        return if online {
+            format!(
+                "WebGPT image CDP online{}",
+                latest_dispatch_suffix(latest_dispatch_status)
+            )
+        } else {
+            "WebGPT image CDP offline; image lane cannot generate new CG".to_owned()
+        };
+    }
+    if online {
+        format!(
+            "Codex app-server endpoint online{}",
+            latest_dispatch_suffix(latest_dispatch_status)
+        )
+    } else {
+        "Codex image backend is idle; host-worker may start app-server on demand".to_owned()
+    }
+}
+
+fn latest_dispatch_suffix(status: Option<&str>) -> String {
+    status
+        .map(|value| format!("; latest dispatch: {value}"))
+        .unwrap_or_default()
+}
+
+fn narrative_backend_endpoint(
+    backend: &str,
+    app_server: Option<&serde_json::Value>,
+    latest_dispatch: Option<&serde_json::Value>,
+) -> Option<String> {
+    let latest_webgpt_url = latest_dispatch
+        .and_then(|value| value.get("mcp_cdp_url"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    if latest_webgpt_url.is_some() {
+        return latest_webgpt_url;
+    }
+    let latest_codex_url = latest_dispatch
+        .and_then(|value| value.get("app_server_url"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    if latest_codex_url.is_some() {
+        return latest_codex_url;
+    }
+    if backend == WorldTextBackend::Webgpt.as_str() {
+        return Some(webgpt_cdp_url(
+            WEBGPT_TEXT_CDP_PORT_ENV,
+            DEFAULT_WEBGPT_TEXT_CDP_PORT,
+        ));
+    }
+    let runtime_url = app_server
+        .and_then(|value| value.get("url"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    runtime_url.or_else(|| std::env::var(CODEX_APP_SERVER_URL_ENV).ok())
+}
+
+fn visual_backend_endpoint(
+    backend: &str,
+    latest_dispatch: Option<&serde_json::Value>,
+) -> Option<String> {
+    if let Some(url) = latest_dispatch
+        .and_then(|value| value.get("mcp_cdp_url"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+    {
+        return Some(url);
+    }
+    if let Some(url) = latest_dispatch
+        .and_then(|value| value.get("app_server_url"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+    {
+        return Some(url);
+    }
+    if backend == WorldVisualBackend::Webgpt.as_str() {
+        return Some(webgpt_cdp_url(
+            WEBGPT_IMAGE_CDP_PORT_ENV,
+            DEFAULT_WEBGPT_IMAGE_CDP_PORT,
+        ));
+    }
+    std::env::var(CODEX_APP_SERVER_URL_ENV).ok()
+}
+
+fn backend_endpoint_online(backend: &str, endpoint: Option<&str>) -> bool {
+    if backend == WorldTextBackend::Webgpt.as_str()
+        || backend == WorldVisualBackend::Webgpt.as_str()
+    {
+        return endpoint
+            .and_then(loopback_port_from_endpoint)
+            .is_some_and(loopback_port_online);
+    }
+    endpoint
+        .and_then(loopback_port_from_endpoint)
+        .is_some_and(loopback_port_online)
+}
+
+fn webgpt_cdp_url(env_name: &str, default_port: u16) -> String {
+    let port = std::env::var(env_name)
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(default_port);
+    format!("http://127.0.0.1:{port}")
+}
+
+fn loopback_port_from_endpoint(endpoint: &str) -> Option<u16> {
+    let without_scheme = endpoint
+        .split_once("://")
+        .map_or(endpoint, |(_, rest)| rest);
+    let host_port = without_scheme.split('/').next().unwrap_or(without_scheme);
+    let host_port = host_port.split('@').next_back().unwrap_or(host_port);
+    let (host, port) = host_port.rsplit_once(':')?;
+    if !matches!(host, "127.0.0.1" | "localhost") {
+        return None;
+    }
+    port.parse().ok()
+}
+
+fn loopback_port_online(port: u16) -> bool {
+    let Ok(addr) = format!("127.0.0.1:{port}").parse() else {
+        return false;
+    };
+    TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(160)).is_ok()
+}
+
+fn dispatch_status(record: Option<&serde_json::Value>) -> Option<String> {
+    record
+        .and_then(|value| value.get("status"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+}
+
+fn effective_text_dispatch_status(
+    state: &VnServerState,
+    world_id: &str,
+    record: Option<&serde_json::Value>,
+    current_turn_id: &str,
+    pending_exists: bool,
+) -> Result<Option<String>> {
+    let status = dispatch_status(record);
+    if pending_exists || status.as_deref() != Some("failed_uncommitted") {
+        return Ok(status);
+    }
+    let record_turn_id = record
+        .and_then(|value| value.get("turn_id"))
+        .and_then(serde_json::Value::as_str);
+    if record_turn_id != Some(current_turn_id) {
+        return Ok(status);
+    }
+    if committed_agent_turn_record_exists(state, world_id, current_turn_id)? {
+        return Ok(Some("committed".to_owned()));
+    }
+    Ok(status)
+}
+
+fn committed_agent_turn_record_exists(
+    state: &VnServerState,
+    world_id: &str,
+    turn_id: &str,
+) -> Result<bool> {
+    let paths = resolve_store_paths(state.store_root.as_deref())?;
+    let files = world_file_paths(&paths, world_id);
+    Ok(files
+        .dir
+        .join("agent_bridge/committed_turns")
+        .join(turn_id)
+        .join("commit_record.json")
+        .is_file())
+}
+
+fn latest_text_dispatch_record(
     state: &VnServerState,
     world_id: &str,
 ) -> Result<Option<serde_json::Value>> {
@@ -734,6 +1090,37 @@ fn latest_app_server_dispatch_record(
         .worlds_dir
         .join(world_id)
         .join("agent_bridge/dispatches");
+    latest_dispatch_record_in_dir(
+        dispatch_dir.as_path(),
+        &[
+            "singulari.codex_app_server_dispatch_record.v1",
+            "singulari.webgpt_dispatch_record.v1",
+        ],
+    )
+}
+
+fn latest_visual_dispatch_record(
+    state: &VnServerState,
+    world_id: &str,
+) -> Result<Option<serde_json::Value>> {
+    let paths = resolve_store_paths(state.store_root.as_deref())?;
+    let dispatch_dir = paths
+        .worlds_dir
+        .join(world_id)
+        .join("visual_jobs/dispatches");
+    latest_dispatch_record_in_dir(
+        dispatch_dir.as_path(),
+        &[
+            "singulari.codex_app_server_image_dispatch_record.v1",
+            "singulari.webgpt_image_dispatch_record.v1",
+        ],
+    )
+}
+
+fn latest_dispatch_record_in_dir(
+    dispatch_dir: &Path,
+    schema_versions: &[&str],
+) -> Result<Option<serde_json::Value>> {
     let Ok(entries) = fs::read_dir(dispatch_dir) else {
         return Ok(None);
     };
@@ -750,7 +1137,7 @@ fn latest_app_server_dispatch_record(
         if value
             .get("schema_version")
             .and_then(serde_json::Value::as_str)
-            != Some("singulari.codex_app_server_dispatch_record.v1")
+            .is_none_or(|schema| !schema_versions.contains(&schema))
         {
             continue;
         }
@@ -895,6 +1282,12 @@ fn select_world(state: &VnServerState, world_id: &str) -> Result<VnWorldSwitchRe
 }
 
 fn new_world(state: &VnServerState, request: VnNewWorldRequest) -> Result<VnWorldSwitchResponse> {
+    let text_backend = request
+        .text_backend
+        .unwrap_or(WorldTextBackend::CodexAppServer);
+    let visual_backend = request
+        .visual_backend
+        .unwrap_or(WorldVisualBackend::CodexAppServer);
     let started = start_world(&StartWorldOptions {
         seed_text: request.seed_text,
         world_id: None,
@@ -903,6 +1296,15 @@ fn new_world(state: &VnServerState, request: VnNewWorldRequest) -> Result<VnWorl
         session_id: None,
     })?;
     let world_id = started.initialized.world.world_id;
+    save_world_backend_selection(
+        state.store_root.as_deref(),
+        &WorldBackendSelection::new(
+            world_id.clone(),
+            text_backend,
+            visual_backend,
+            "vn_world_create",
+        ),
+    )?;
     state.set_world_id(world_id.as_str())?;
     let agent_pending = if agent_bridge_enabled(state) {
         let pending = enqueue_agent_turn(&AgentSubmitTurnOptions {
@@ -1362,6 +1764,7 @@ mod tests {
         read_world_asset, runtime_status, save_request_body, save_world_response,
         validate_vn_input, world_list,
     };
+    use crate::backend_selection::{WorldTextBackend, WorldVisualBackend};
     use crate::store::{InitWorldOptions, init_world};
     use crate::transfer::{ExportWorldOptions, export_world};
     use crate::turn::{AdvanceTurnOptions, advance_turn};
@@ -1511,12 +1914,26 @@ premise:
             VnNewWorldRequest {
                 seed_text: "판타지, 현대인 전생, 남주".to_owned(),
                 title: Some("런처 새 세계".to_owned()),
+                text_backend: Some(WorldTextBackend::CodexAppServer),
+                visual_backend: Some(WorldVisualBackend::Webgpt),
             },
         )?;
         assert_eq!(response.packet.title, "런처 새 세계");
         assert_eq!(response.packet.world_id, response.active_world_id);
         assert!(response.worlds.len() >= 2);
         assert_eq!(state.world_id()?, response.active_world_id);
+        let Some(backend_selection) = crate::backend_selection::load_world_backend_selection(
+            state.store_root.as_deref(),
+            response.active_world_id.as_str(),
+        )?
+        else {
+            anyhow::bail!("new world should lock backend selection");
+        };
+        assert_eq!(
+            backend_selection.text_backend,
+            WorldTextBackend::CodexAppServer
+        );
+        assert_eq!(backend_selection.visual_backend, WorldVisualBackend::Webgpt);
         Ok(())
     }
 
@@ -1549,6 +1966,10 @@ premise:
         let status = runtime_status(&state)?;
 
         assert_eq!(status.schema_version, "singulari.vn_runtime_status.v1");
+        assert_eq!(status.backend_selection.text_backend, "codex-app-server");
+        assert_eq!(status.backend_selection.visual_backend, "codex-app-server");
+        assert_eq!(status.narrative.backend, "codex-app-server");
+        assert_eq!(status.visual.backend, "codex-app-server");
         assert_eq!(status.visual.label, "CG 생성 대기");
         assert!(
             status

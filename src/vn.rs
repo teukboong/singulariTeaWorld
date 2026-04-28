@@ -1,3 +1,4 @@
+use crate::backend_selection::{WorldVisualBackend, load_world_backend_selection};
 use crate::models::{
     CodexView, DashboardSummary, EntityRecords, FREEFORM_CHOICE_SLOT, INITIAL_TURN_ID,
     PROTAGONIST_CHARACTER_ID, RenderPacket, ScanTarget, TurnChoice, TurnLogEntry, TurnSnapshot,
@@ -6,17 +7,22 @@ use crate::models::{
 use crate::render::{RenderPacketLoadOptions, load_render_packet, render_packet_markdown};
 use crate::store::{TURN_LOG_FILENAME, load_world_record, resolve_store_paths, world_file_paths};
 use crate::visual_assets::{
-    BuildWorldVisualAssetsOptions, CODEX_APP_IMAGE_GENERATION_TOOL, ImageGenerationJob,
-    VN_ASSETS_DIR, VisualBudgetPolicy, WorldVisualAssets, build_world_visual_assets,
-    compile_turn_visual_prompt, visual_generation_job,
+    BuildWorldVisualAssetsOptions, ImageGenerationJob, VN_ASSETS_DIR, VisualBudgetPolicy,
+    WorldVisualAssets, build_world_visual_assets, compile_turn_visual_prompt,
+    visual_generation_job,
 };
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::{env, fs};
 
 pub const VN_PACKET_SCHEMA_VERSION: &str = "singulari.vn_packet.v1";
 pub const VN_PROTAGONIST_STATUS_SCHEMA_VERSION: &str = "singulari.vn_protagonist_status.v1";
+const HOST_WORKER_VISUAL_GENERATOR: &str = "host_worker.visual.generate";
+const VISUAL_BACKEND_ENV: &str = "SINGULARI_WORLD_VISUAL_BACKEND";
+const WEBGPT_VISUAL_BACKEND: &str = "webgpt";
+const WEBGPT_TURN_CG_CADENCE_ENV: &str = "SINGULARI_WORLD_WEBGPT_TURN_CG_CADENCE_MIN";
+const DEFAULT_WEBGPT_TURN_CG_CADENCE_MIN: u32 = 2;
 const RECENT_TURN_LOG_LIMIT: usize = 24;
 const TURN_CG_DIR: &str = "turn_cg";
 const TURN_CG_JOBS_DIR: &str = "cg_jobs";
@@ -200,10 +206,15 @@ pub fn build_vn_packet(options: &BuildVnPacketOptions) -> Result<VnPacket> {
         .iter()
         .find(|place| place.id == render_packet.visible_state.dashboard.location);
     let codex_surface = vn_codex_surface(&world, &files, &render_packet, &entities)?;
-    let visual_assets = build_world_visual_assets(&BuildWorldVisualAssetsOptions {
+    let mut visual_assets = build_world_visual_assets(&BuildWorldVisualAssetsOptions {
         store_root: options.store_root.clone(),
         world_id: world.world_id.clone(),
     })?;
+    apply_host_visual_backend_budget_policy(
+        options.store_root.as_deref(),
+        world.world_id.as_str(),
+        &mut visual_assets.budget_policy,
+    )?;
     let turn_cg_path = turn_cg_path(&files.dir, render_packet.turn_id.as_str());
     let turn_cg_url = turn_cg_asset_url(world.world_id.as_str(), render_packet.turn_id.as_str());
     let turn_cg_exists = turn_cg_path.is_file();
@@ -246,7 +257,7 @@ pub fn build_vn_packet(options: &BuildVnPacketOptions) -> Result<VnPacket> {
         mode: render_packet.mode.clone(),
         scene: vn_scene(&world, &render_packet, place_record),
         image: VnSceneImage {
-            generator: CODEX_APP_IMAGE_GENERATION_TOOL.to_owned(),
+            generator: HOST_WORKER_VISUAL_GENERATOR.to_owned(),
             image_prompt: turn_visual_prompt.prompt,
             recommended_path: turn_cg_path.display().to_string(),
             asset_url: turn_cg_url,
@@ -267,6 +278,37 @@ pub fn build_vn_packet(options: &BuildVnPacketOptions) -> Result<VnPacket> {
         },
         generated_at: chrono::Utc::now().to_rfc3339(),
     })
+}
+
+fn apply_host_visual_backend_budget_policy(
+    store_root: Option<&Path>,
+    world_id: &str,
+    policy: &mut VisualBudgetPolicy,
+) -> Result<()> {
+    if world_uses_webgpt_visual_backend(store_root, world_id)? {
+        policy.turn_cg_cadence_min = configured_webgpt_turn_cg_cadence_min();
+    }
+    Ok(())
+}
+
+fn world_uses_webgpt_visual_backend(store_root: Option<&Path>, world_id: &str) -> Result<bool> {
+    let Some(selection) = load_world_backend_selection(store_root, world_id)? else {
+        return Ok(
+            env::var(VISUAL_BACKEND_ENV).is_ok_and(|value| value.trim() == WEBGPT_VISUAL_BACKEND)
+        );
+    };
+    if !selection.locked {
+        anyhow::bail!("backend selection is not locked for world_id={world_id}");
+    }
+    Ok(selection.visual_backend == WorldVisualBackend::Webgpt)
+}
+
+fn configured_webgpt_turn_cg_cadence_min() -> u32 {
+    env::var(WEBGPT_TURN_CG_CADENCE_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_WEBGPT_TURN_CG_CADENCE_MIN)
 }
 
 fn turn_cg_path(world_dir: &std::path::Path, turn_id: &str) -> std::path::PathBuf {
@@ -585,6 +627,9 @@ fn vn_scene(
         .filter(|scene| !scene.text_blocks.is_empty())
         .map_or_else(
             || {
+                if packet.turn_id == INITIAL_TURN_ID && dashboard.status == "흐름 수렴 중" {
+                    return Vec::new();
+                }
                 vec![
                     format!(
                         "`{}`의 표면에서 장면이 열린다. 지금 확정된 변화는 세계의 장부에 남았다.",
@@ -1260,10 +1305,12 @@ fn vn_choices(world: &WorldRecord, choices: &[TurnChoice]) -> Vec<VnChoice> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BuildVnPacketOptions, build_vn_packet};
+    use super::{BuildVnPacketOptions, HOST_WORKER_VISUAL_GENERATOR, build_vn_packet};
+    use crate::backend_selection::{
+        WorldBackendSelection, WorldTextBackend, WorldVisualBackend, save_world_backend_selection,
+    };
     use crate::store::{InitWorldOptions, init_world};
     use crate::turn::{AdvanceTurnOptions, advance_turn};
-    use crate::visual_assets::CODEX_APP_IMAGE_GENERATION_TOOL;
     use tempfile::tempdir;
 
     #[test]
@@ -1312,7 +1359,7 @@ premise:
                 .image_prompt
                 .contains("Use only player-visible information")
         );
-        assert_eq!(packet.image.generator, CODEX_APP_IMAGE_GENERATION_TOOL);
+        assert_eq!(packet.image.generator, HOST_WORKER_VISUAL_GENERATOR);
         assert_eq!(packet.image.budget_policy.mode, "balanced");
         assert_eq!(packet.image.auto_decision.action, "generate_scene");
         assert!(packet.image.image_generation_job.is_some());
@@ -1452,6 +1499,55 @@ premise:
                 .iter()
                 .any(|path| path.ends_with("char_anchor.png"))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn webgpt_visual_backend_uses_world_locked_cadence() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(
+            &seed_path,
+            r#"
+schema_version: singulari.world_seed.v1
+world_id: stw_vn_webgpt_visual
+title: "웹 이미지 세계"
+premise:
+  genre: "중세 판타지"
+  protagonist: "현대인의 전생, 남자 주인공"
+"#,
+        )?;
+        init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+        save_world_backend_selection(
+            Some(store.as_path()),
+            &WorldBackendSelection::new(
+                "stw_vn_webgpt_visual".to_owned(),
+                WorldTextBackend::CodexAppServer,
+                WorldVisualBackend::Webgpt,
+                "test",
+            ),
+        )?;
+        for _ in 0..2 {
+            advance_turn(&AdvanceTurnOptions {
+                store_root: Some(store.clone()),
+                world_id: "stw_vn_webgpt_visual".to_owned(),
+                input: "1".to_owned(),
+            })?;
+        }
+
+        let mut options = BuildVnPacketOptions::new("stw_vn_webgpt_visual".to_owned());
+        options.store_root = Some(store);
+        let packet = build_vn_packet(&options)?;
+
+        assert_eq!(packet.turn_id, "turn_0002");
+        assert_eq!(packet.image.budget_policy.turn_cg_cadence_min, 2);
+        assert_eq!(packet.image.auto_decision.action, "generate_scene");
+        assert!(packet.image.image_generation_job.is_some());
         Ok(())
     }
 }

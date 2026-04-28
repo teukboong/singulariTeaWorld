@@ -4,6 +4,9 @@ This is a separate Singulari World Worker deployment, not a shared Railbot
 Worker. It gives ChatGPT web a stable HTTPS MCP URL while the local
 `cloudflared` quick tunnel URL can rotate.
 
+For the full operator setup, see
+[`docs/cloudflare-free-frontdoor.md`](../../docs/cloudflare-free-frontdoor.md).
+
 ## Shape
 
 - ChatGPT custom app URL: `https://<worker>.workers.dev/mcp`
@@ -62,6 +65,12 @@ scripts/run_mcp_tunnel.sh
 
 The script keeps `.runtime/mcp_tunnel_base_url.txt` in sync with the current
 quick-tunnel URL after the Worker accepts the update.
+
+The ChatGPT connector should use the Worker URL, not the temporary tunnel URL:
+
+```text
+https://<worker>.workers.dev/mcp
+```
 
 ## Safety
 

@@ -177,7 +177,7 @@ fn initial_render_packet_for_waiting_turn(
         narrative_scene: Some(NarrativeScene {
             schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
             speaker: None,
-            text_blocks: vec!["첫 서사 턴을 생성하는 중이다. Codex App host-worker가 세계 시작 입력을 받아 장면을 확정한다.".to_owned()],
+            text_blocks: Vec::new(),
             tone_notes: vec!["initial_turn_generation_pending".to_owned()],
         }),
         visible_state: VisibleState {
@@ -186,7 +186,7 @@ fn initial_render_packet_for_waiting_turn(
                 location: snapshot.protagonist_state.location.clone(),
                 anchor_invariant: world.anchor_character.invariant.clone(),
                 current_event: "interlude".to_owned(),
-                status: "첫 서사 턴 생성 대기".to_owned(),
+                status: "흐름 수렴 중".to_owned(),
             },
             scan_targets: Vec::new(),
             choices: default_turn_choices(),

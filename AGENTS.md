@@ -5,6 +5,9 @@ VN web projection and MCP tools. Start here after cloning.
 
 ## Boundaries
 
+- Fallback and defensive-code detours are forbidden as fixes. Close the real
+  loop: identify the authoritative producer/consumer contract, fix that path,
+  and verify the same loop end to end.
 - Do not commit local world stores, generated images, DB files, or private
   narrator/world presets.
 - Runtime state belongs in `.world-store/`, `SINGULARI_WORLD_HOME`, or an
@@ -13,7 +16,7 @@ VN web projection and MCP tools. Start here after cloning.
   context is for trusted local agents and must not leak into visible prose,
   Codex View, image prompts, or logs.
 - The simulator does not call external image APIs directly. It emits redacted
-  image jobs; the embedding host owns image generation and PNG save.
+  image jobs; the selected host backend owns image generation and PNG save.
 
 ## First Setup
 
@@ -80,15 +83,57 @@ From this repository, build the binary and start one long-running worker:
 cargo build --locked --release --bin singulari-world --bin singulari-world-mcp
 
 target/release/singulari-world --store-root .world-store host-worker \
+  --text-backend codex-app-server \
   --interval-ms 750
 ```
 
 That worker starts a managed loopback `codex app-server` when no
-`--codex-app-server-url` is provided. It consumes pending text turns and visual
-jobs through Codex App app-server only. Visual jobs must close through
+`--codex-app-server-url` is provided. It consumes pending text turns through the
+selected text backend and consumes visual jobs through Codex App app-server.
+Visual jobs must close through
 `imageGeneration -> savedPath -> complete`; do not route them through this
 Codex chat's visual generation session. Keep Codex App open while playing; idle
 worker ticks spend zero model tokens and wait for browser-created work.
+
+The VN browser app is the common frontend. To replace Codex App as the narrative
+engine, keep `vn-serve` unchanged and start:
+
+```bash
+target/release/singulari-world --store-root .world-store host-worker \
+  --text-backend webgpt \
+  --visual-backend webgpt \
+  --interval-ms 750
+```
+
+The built-in WebGPT backend calls `webgpt_research` through the sibling
+`webgpt-mcp-checkout/scripts/webgpt-mcp.sh` wrapper unless `--webgpt-mcp-wrapper` or
+`WEBGPT_MCP_WRAPPER` overrides it. It extracts one `AgentTurnResponse` JSON
+from `answer_markdown`; the Rust worker owns validation and commit. Do not add
+a separate ChatGPT conversation UI as a second play client.
+Codex App uses native thread history plus a compact authoritative packet for
+cost-balanced continuity. WebGPT uses a more active memory revival packet:
+larger `resume_pack`, player-visible Archive View, query recall hits, and recent
+entity/relationship updates from world.db are surfaced before each turn.
+With `--visual-backend webgpt`, the same worker calls `webgpt_generate_image`,
+extracts the generated ChatGPT image to a PNG path, and completes the queued
+visual job through the normal store contract. Use `--visual-backend none` only
+for text-only validation so CG jobs stay queued.
+Each world has separate WebGPT URL bindings for text and image. Text uses
+`agent_bridge/webgpt_conversation_binding.json`; image uses
+`agent_bridge/webgpt_image_conversation_binding.json` and treats prior generated
+images in that same ChatGPT conversation as visual continuity references.
+WebGPT text and image lanes must run as separate browser sessions, not as one
+window that switches tools. Text defaults to CDP port `9238` and image defaults
+to CDP port `9239`; the profile dirs are separate under
+`~/.hesperides/singulari-world/webgpt/`. Starting with a shared port or shared
+profile is a contract violation.
+The VN launcher also writes a locked `agent_bridge/backend_selection.json` on
+world creation. That file owns the world's text backend and visual backend pair:
+Codex text + WebGPT image, WebGPT text + Codex image, or either matching pair.
+`host-worker` must honor this world selection before process flags, and
+`vn-serve` must use the same selection for WebGPT turn-CG cadence. Do not switch
+platforms inside an existing world; create a new world with a different backend
+pair instead.
 
 After prep, the only user-facing runtime that still needs to run is the VN app:
 
@@ -178,12 +223,32 @@ hidden pending-turn packets, direct commits, generic visual claim completion
 from local paths, DB repair, or other trusted local-agent tools. Use
 `--profile trusted-local` only behind an operator-controlled private boundary.
 
-The web profile includes a compact ChatGPT Apps SDK VN panel resource at
-`ui://singulari-world/vn-panel.html`. `worldsim_current` and
-`worldsim_submit_player_input` advertise it through Apps metadata, and the panel
-calls the same MCP tools through `window.openai.callTool`. Treat it as a
-compact ChatGPT client over the existing backend/world store, not as a second
-runtime. The local `vn-serve` UI remains the full-screen VN client.
+ChatGPT Apps SDK VN panel experiments are legacy. The supported player-facing
+UI is the shared `vn-serve` browser app; ChatGPT/WebGPT work should plug in as a
+backend/engine path behind the worker or as MCP backend calls, not as a separate
+chat-embedded client.
+
+Use [docs/webgpt-mcp-activation.md](docs/webgpt-mcp-activation.md) when enabling
+WebGPT text/image backends. It is the operator checklist for wrapper discovery,
+separate text/image CDP sessions, world-scoped conversation bindings, backend
+selection locks, and WebGPT image cadence.
+
+Turn CG and reference assets are separate visual contracts. `turn_cg:*` jobs may
+write scene PNGs under `assets/vn/turn_cg/`; character sheets, location sheets,
+menu/stage backgrounds, and other design assets are source material only and
+must stay in their asset paths. WebGPT turn CG uses
+`agent_bridge/webgpt_image_conversation_binding.json`; reference assets use
+`agent_bridge/webgpt_reference_asset_conversation_binding.json` so character
+design sheets do not slide into scene CG through shared conversation history.
+When turn CG has accepted `reference_paths`, WebGPT must receive those files as
+actual image attachments through `webgpt_generate_image.reference_paths`.
+Prompt-only local path notes are audit hints, not visual reference delivery.
+
+Narrative defaults must not inject genre priors. Compact seeds like `중세
+남자주인공` may define only title/genre/protagonist fragments; do not infer
+modern reincarnation, isekai transfer, possession, regression, system windows,
+cheat powers, hospitals, electricity, addresses, or other genre tropes unless
+they are explicit in seed premise or player-visible canon.
 
 Image direction is probe-first. `worldsim_current_cg_image` returns an existing
 stored PNG as MCP image content. `worldsim_probe_image_ingest` records only the
@@ -212,6 +277,11 @@ SINGULARI_WORLD_FRONTDOOR_UPDATE_SECRET=<same secret as Worker ORIGIN_UPDATE_SEC
 ```
 
 Do not commit Cloudflare tokens, Worker secrets, or local tunnel state.
+
+Use [docs/cloudflare-free-frontdoor.md](docs/cloudflare-free-frontdoor.md) for
+the complete Workers.dev + Workers KV + free `cloudflared` quick-tunnel setup.
+This deployment is dedicated to Singulari World; do not reuse Railbot's Worker,
+KV namespace, or secrets.
 
 ## Agent-Authored Text Turns
 
@@ -246,12 +316,13 @@ run the host worker with the realtime app-server backend:
 
 ```bash
 singulari-world host-worker \
+  --text-backend codex-app-server \
   --interval-ms 750
 ```
 
-`host-worker` is the app-facing supervisor. It uses the official Codex
-app-server websocket and spends zero model tokens while idle. If no explicit
-websocket URL is provided, it
+`host-worker` is the app-facing supervisor. It spends zero model tokens while
+idle. With `--text-backend codex-app-server`, it uses the official Codex
+app-server websocket. If no explicit websocket URL is provided, it
 starts a managed loopback `codex app-server`, records the runtime URL in the
 store-root `agent_bridge` directory, and stops the child when the worker exits.
 `host-worker` reads
@@ -275,13 +346,44 @@ should be excluded and the full pending packet reinjected every turn. If
 app-server `thread/resume` fails for a stale or missing thread, clear only that
 world's binding and let the next dispatch rebuild from the world store.
 
+With `--text-backend webgpt`, `host-worker` calls `webgpt_research` through the
+configured WebGPT MCP wrapper instead of Codex App for text. The worker stores a
+per-world `webgpt_conversation_binding.json`, extracts one `AgentTurnResponse`
+JSON from the WebGPT answer, and commits it through the same world-store
+validator, so hidden redaction and schema checks stay identical. WebGPT is not
+trusted to remember canon from opaque project memory alone; host-worker
+proactively injects DB-backed revival context every turn. Use
+`--webgpt-turn-command` only to replace the built-in MCP adapter.
+`--visual-backend webgpt` uses the separate per-world image conversation binding
+for ChatGPT image generation and closes visual jobs with the saved extracted
+PNG. The built-in WebGPT text and image lanes must use separate browser
+sessions: text defaults to CDP port `9238`, image defaults to `9239`, and each
+lane has its own profile dir under `~/.hesperides/singulari-world/webgpt/`.
+Worlds created by the VN launcher write a locked
+`agent_bridge/backend_selection.json`; that world file overrides process flags
+for text dispatch, visual dispatch, and WebGPT CG cadence. `vn-serve` may still
+use `SINGULARI_WORLD_VISUAL_BACKEND=webgpt` as a legacy cadence switch for older
+worlds without a locked backend selection. The default WebGPT cadence is
+`SINGULARI_WORLD_WEBGPT_TURN_CG_CADENCE_MIN=2`.
+`--visual-backend none` disables only visual claiming/generation; pending CG
+jobs remain in the store for a later visual worker.
+
 ## Visual Job Worker
 
 Image jobs are host-consumed jobs, not `codex exec` jobs. The same
-`host-worker` started by `싱귤러리 월드 준비해줘` owns the app-server image loop:
-claim one job, request Codex App `imageGeneration`, copy the returned
-`savedPath`, then complete the job. The Codex chat/session-level `image_gen`
-path is not an acceptable substitute.
+`host-worker` started by `싱귤러리 월드 준비해줘` owns the visual loop: claim one
+job, ask the selected visual backend for one generated image, copy/save the PNG,
+then complete the job. `--visual-backend codex-app-server` requests Codex App
+`imageGeneration` and copies the returned `savedPath`. `--visual-backend
+webgpt` requests WebGPT MCP `webgpt_generate_image`, receives the extracted PNG
+path, and completes the same store job. The Codex chat/session-level
+`image_gen` path is not an acceptable substitute.
+Turn CG prompts must not directly expose major characters before their design
+sheet exists. Until a protagonist/anchor-level character has an accepted
+`assets/vn/character_sheets/*.png`, scene CG should use POV framing,
+environment-only composition, off-screen presence, shadows, or cropped
+non-identifying body fragments rather than faces, full-body front views,
+distinctive outfits, or identifiable silhouettes.
 
 Turn CG retry is a regeneration request. If a current turn image already exists,
 the retry marker still creates a new `turn_cg:<turn_id>` job; completion

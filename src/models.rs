@@ -362,7 +362,7 @@ impl CharacterVoiceAnchor {
     pub fn protagonist_default() -> Self {
         Self {
             speech: vec![
-                "현대식 사고를 짧은 반문과 구조화된 정리로 드러낸다".to_owned(),
+                "모르는 세계 지식은 단정하지 않고 확인한 단서부터 말한다".to_owned(),
                 "모르는 세계 지식은 단정하지 않고 조건을 먼저 세운다".to_owned(),
             ],
             gestures: vec![
@@ -370,10 +370,10 @@ impl CharacterVoiceAnchor {
                 "위험한 선택 전 주변 단서와 사람의 반응을 먼저 본다".to_owned(),
             ],
             habits: vec![
-                "치트성 능력을 쓰기 전 대가와 흔적을 의식한다".to_owned(),
-                "현대적 표현은 내면에서 먼저 나오고, 말로는 점차 조절한다".to_owned(),
+                "능력이나 선택의 대가와 흔적을 먼저 의식한다".to_owned(),
+                "확신보다 관찰을 앞세우고 모르는 부분은 유보한다".to_owned(),
             ],
-            drift: vec!["생존형 분석에서 자기 이름과 선택에 책임지는 선언으로 이동한다".to_owned()],
+            drift: vec!["상황 파악에서 자기 이름과 선택에 책임지는 선언으로 이동한다".to_owned()],
         }
     }
 
@@ -1058,7 +1058,28 @@ const fn default_true() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{GUIDE_CHOICE_REDACTED_INTENT, redact_guide_choice_public_hints};
+    use super::{
+        CharacterVoiceAnchor, GUIDE_CHOICE_REDACTED_INTENT, redact_guide_choice_public_hints,
+    };
+
+    #[test]
+    fn protagonist_default_voice_anchor_does_not_imply_modern_reincarnation() {
+        let anchor = CharacterVoiceAnchor::protagonist_default();
+        let joined = [
+            anchor.speech.join(" "),
+            anchor.gestures.join(" "),
+            anchor.habits.join(" "),
+            anchor.drift.join(" "),
+        ]
+        .join(" ");
+
+        for forbidden in ["현대", "전생", "환생", "빙의", "회귀", "치트"] {
+            assert!(
+                !joined.contains(forbidden),
+                "default protagonist anchor should not inject {forbidden}: {joined}"
+            );
+        }
+    }
 
     #[test]
     fn redacts_deprecated_guide_choice_hints_from_player_text() {

@@ -1,7 +1,7 @@
 use crate::models::{
     AdjudicationGate, CharacterVoiceAnchor, FREEFORM_CHOICE_SLOT, HiddenState,
     NARRATIVE_SCENE_SCHEMA_VERSION, NarrativeScene, TurnChoice, TurnSnapshot,
-    default_freeform_choice, normalize_turn_choices,
+    default_freeform_choice, default_turn_choices, normalize_turn_choices,
 };
 use crate::store::{WorldFilePaths, read_json, resolve_store_paths, world_file_paths, write_json};
 use crate::turn::{AdvanceTurnOptions, advance_turn};
@@ -10,6 +10,7 @@ use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -446,14 +447,12 @@ pub fn commit_agent_turn(options: &AgentCommitTurnOptions) -> Result<CommittedAg
     apply_agent_response_to_render_packet(&mut render_packet, &options.response);
     write_json(&advanced.render_packet_path, &render_packet)?;
 
-    if !options.response.next_choices.is_empty() {
-        persist_agent_next_choices(
-            &files,
-            &advanced.snapshot_path,
-            &advanced.snapshot,
-            &options.response.next_choices,
-        )?;
-    }
+    persist_agent_next_choices(
+        &files,
+        &advanced.snapshot_path,
+        &advanced.snapshot,
+        &options.response.next_choices,
+    )?;
 
     let committed_at = Utc::now().to_rfc3339();
     let turn_dir = committed_agent_turn_dir(&files, pending.turn_id.as_str());
@@ -517,7 +516,62 @@ fn validate_agent_response(pending: &PendingAgentTurn, response: &AgentTurnRespo
     {
         bail!("agent response visible_scene.text_blocks must contain visible narrative text");
     }
+    validate_agent_next_choices(response)?;
     ensure_no_hidden_leak(pending, response)
+}
+
+fn validate_agent_next_choices(response: &AgentTurnResponse) -> Result<()> {
+    if response.next_choices.len() != 7 {
+        bail!(
+            "agent response next_choices must contain exactly slots 1..7: actual_len={}",
+            response.next_choices.len()
+        );
+    }
+    let slots = response
+        .next_choices
+        .iter()
+        .map(|choice| choice.slot)
+        .collect::<BTreeSet<_>>();
+    if slots != BTreeSet::from([1, 2, 3, 4, 5, 6, 7]) {
+        bail!("agent response next_choices must contain slots 1..7 exactly: actual={slots:?}");
+    }
+    let guide_choice = response
+        .next_choices
+        .iter()
+        .find(|choice| choice.slot == 4)
+        .context("agent response next_choices missing slot 4")?;
+    if guide_choice.tag != "안내자의 선택"
+        || guide_choice.intent != "맡긴다. 세부 내용은 선택 후 드러난다."
+    {
+        bail!("agent response slot 4 must keep hidden guide-choice wording");
+    }
+    let freeform_choice = response
+        .next_choices
+        .iter()
+        .find(|choice| choice.slot == FREEFORM_CHOICE_SLOT)
+        .context("agent response next_choices missing slot 7")?;
+    if freeform_choice.tag != "자유서술" || !freeform_choice.intent.contains("직접") {
+        bail!("agent response slot 7 must remain inline freeform");
+    }
+    if choices_keep_default_template(&response.next_choices) {
+        bail!(
+            "agent response next_choices must be scene-specific; default template choices leaked"
+        );
+    }
+    Ok(())
+}
+
+fn choices_keep_default_template(choices: &[TurnChoice]) -> bool {
+    let defaults = default_turn_choices();
+    [1, 2, 3, 5, 6].iter().all(|slot| {
+        let Some(choice) = choices.iter().find(|choice| choice.slot == *slot) else {
+            return false;
+        };
+        let Some(default_choice) = defaults.iter().find(|choice| choice.slot == *slot) else {
+            return false;
+        };
+        choice.tag == default_choice.tag && choice.intent == default_choice.intent
+    })
 }
 
 fn ensure_no_hidden_leak(pending: &PendingAgentTurn, response: &AgentTurnResponse) -> Result<()> {
@@ -584,9 +638,7 @@ fn apply_agent_response_to_render_packet(
             .status
             .clone_from(&canon_event.summary);
     }
-    if !response.next_choices.is_empty() {
-        packet.visible_state.choices = normalize_turn_choices(&response.next_choices);
-    }
+    packet.visible_state.choices = normalize_turn_choices(&response.next_choices);
 }
 
 fn persist_agent_next_choices(
@@ -808,7 +860,9 @@ mod tests {
         normalize_narrative_level, save_codex_thread_binding,
     };
     use crate::agent_bridge::commit_agent_turn;
-    use crate::models::{NARRATIVE_SCENE_SCHEMA_VERSION, NarrativeScene};
+    use crate::models::{
+        NARRATIVE_SCENE_SCHEMA_VERSION, NarrativeScene, TurnChoice, default_turn_choices,
+    };
     use crate::store::{InitWorldOptions, init_world};
     use crate::vn::{BuildVnPacketOptions, build_vn_packet};
     use tempfile::tempdir;
@@ -824,6 +878,48 @@ premise:
   protagonist: "modern reincarnated protagonist"
 "#
         )
+    }
+
+    fn scene_specific_choices() -> Vec<TurnChoice> {
+        vec![
+            TurnChoice {
+                slot: 1,
+                tag: "발소리".to_owned(),
+                intent: "젖은 흙 위에 새로 찍힌 발자국을 따라 조심스럽게 움직인다".to_owned(),
+            },
+            TurnChoice {
+                slot: 2,
+                tag: "몸 상태".to_owned(),
+                intent: "손목의 통증과 낯선 장비가 지금 가능한 행동을 얼마나 제한하는지 살핀다"
+                    .to_owned(),
+            },
+            TurnChoice {
+                slot: 3,
+                tag: "낮은 부름".to_owned(),
+                intent: "가까운 수풀 뒤쪽에 사람이 있는지 낮은 목소리로 확인한다".to_owned(),
+            },
+            TurnChoice {
+                slot: 4,
+                tag: "안내자의 선택".to_owned(),
+                intent: "맡긴다. 세부 내용은 선택 후 드러난다.".to_owned(),
+            },
+            TurnChoice {
+                slot: 5,
+                tag: "기록".to_owned(),
+                intent: "방금 본 이끼 낀 문장과 발자국의 의미를 세계 기록에서 대조한다".to_owned(),
+            },
+            TurnChoice {
+                slot: 6,
+                tag: "먼 시야".to_owned(),
+                intent: "이 장소를 둘러싼 숲길과 사람들의 이동 흐름을 한 박자 멀리서 본다"
+                    .to_owned(),
+            },
+            TurnChoice {
+                slot: 7,
+                tag: "자유서술".to_owned(),
+                intent: "7 뒤에 직접 행동, 말, 내면 독백을 서술한다".to_owned(),
+            },
+        ]
     }
 
     #[test]
@@ -863,7 +959,7 @@ premise:
                 entity_updates: Vec::new(),
                 relationship_updates: Vec::new(),
                 hidden_state_delta: Vec::new(),
-                next_choices: Vec::new(),
+                next_choices: scene_specific_choices(),
             },
         })?;
         assert_eq!(committed.turn_id, "turn_0001");
@@ -877,6 +973,104 @@ premise:
         assert_eq!(
             packet.scene.text_blocks,
             vec!["agent-authored visible scene"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_agent_response_without_complete_next_choices() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(&seed_path, seed_body("stw_agent_missing_choices"))?;
+        init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+
+        let pending = enqueue_agent_turn(&AgentSubmitTurnOptions {
+            store_root: Some(store.clone()),
+            world_id: "stw_agent_missing_choices".to_owned(),
+            input: "1".to_owned(),
+            narrative_level: None,
+        })?;
+        let Err(error) = commit_agent_turn(&AgentCommitTurnOptions {
+            store_root: Some(store),
+            world_id: "stw_agent_missing_choices".to_owned(),
+            response: AgentTurnResponse {
+                schema_version: AGENT_TURN_RESPONSE_SCHEMA_VERSION.to_owned(),
+                world_id: pending.world_id,
+                turn_id: pending.turn_id,
+                visible_scene: NarrativeScene {
+                    schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
+                    speaker: None,
+                    text_blocks: vec!["agent-authored visible scene".to_owned()],
+                    tone_notes: Vec::new(),
+                },
+                adjudication: None,
+                canon_event: None,
+                entity_updates: Vec::new(),
+                relationship_updates: Vec::new(),
+                hidden_state_delta: Vec::new(),
+                next_choices: Vec::new(),
+            },
+        }) else {
+            anyhow::bail!("empty next_choices reached VN instead of failing");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("next_choices must contain exactly slots 1..7")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_agent_response_that_keeps_default_next_choices() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(&seed_path, seed_body("stw_agent_default_choices"))?;
+        init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+
+        let pending = enqueue_agent_turn(&AgentSubmitTurnOptions {
+            store_root: Some(store.clone()),
+            world_id: "stw_agent_default_choices".to_owned(),
+            input: "1".to_owned(),
+            narrative_level: None,
+        })?;
+        let Err(error) = commit_agent_turn(&AgentCommitTurnOptions {
+            store_root: Some(store),
+            world_id: "stw_agent_default_choices".to_owned(),
+            response: AgentTurnResponse {
+                schema_version: AGENT_TURN_RESPONSE_SCHEMA_VERSION.to_owned(),
+                world_id: pending.world_id,
+                turn_id: pending.turn_id,
+                visible_scene: NarrativeScene {
+                    schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
+                    speaker: None,
+                    text_blocks: vec!["agent-authored visible scene".to_owned()],
+                    tone_notes: Vec::new(),
+                },
+                adjudication: None,
+                canon_event: None,
+                entity_updates: Vec::new(),
+                relationship_updates: Vec::new(),
+                hidden_state_delta: Vec::new(),
+                next_choices: default_turn_choices(),
+            },
+        }) else {
+            anyhow::bail!("default next_choices survived as agent-authored choices");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("default template choices leaked")
         );
         Ok(())
     }

@@ -25,6 +25,8 @@ memory lives in world records, manifests, and asset metadata.
    - Includes silhouette, hair, clothing, color anchors, expression notes, and
      negative traits.
    - Created when a character is major, repeated, or explicitly requested.
+   - For protagonist and anchor-level characters, the accepted sheet is the
+     permission boundary for direct scene CG exposure.
 
 3. Location sheet
    - Used for repeated locations or first major location reveal.
@@ -73,6 +75,9 @@ Default balanced behavior:
 - Initial turn uses world menu/stage backgrounds.
 - Veiled characters do not get reference sheet jobs until the story makes them
   player-visible.
+- Protagonist and anchor-level characters do not appear directly in scene CG
+  until their accepted character sheet exists. Before that, use POV,
+  environment-only, off-screen, shadow, or cropped non-identifying framing.
 - Existing turn CG is reused until the user explicitly requests regeneration.
 - User retry creates one background retry job even when an image already exists;
   completion overwrites the turn PNG and clears the retry marker.
@@ -92,6 +97,32 @@ in this order and never exceed `max_reference_images`:
 
 Prompt-only generation remains acceptable for menu backgrounds, base stage
 backgrounds, abstract interludes, and one-off scenery.
+
+## Major Character Design Gate
+
+Direct depiction of major characters is gated by accepted design assets, not by
+the text scene alone. If a turn includes an unresolved protagonist or
+anchor-level character, the scene CG prompt must avoid identifiable direct
+exposure: faces, full-body front views, distinctive outfits, and clear
+silhouettes are blocked until the accepted character sheet exists.
+
+Allowed pre-sheet framing:
+
+- player POV with the character off-camera
+- environment or prop-focused composition
+- shadow or reflection that cannot identify the final design
+- cropped hands, back-of-head, or non-identifying fragments
+
+Character sheet jobs are the correct way to reveal and stabilize major designs.
+Once the sheet is saved under `assets/vn/character_sheets/`, scene CG jobs may
+attach it as the first-priority reference and depict the character directly.
+The sheet itself remains source material. It must not be copied into
+`assets/vn/turn_cg/` or displayed as the turn scene image. WebGPT preserves that
+boundary by using a separate reference-asset conversation for character/location
+design jobs and reserving the turn-CG conversation for scene images only. When
+scene CG generation needs accepted reference assets, those files must be
+attached to the WebGPT image request as images, not merely mentioned by local
+path in the prompt.
 
 ## Codex App Worker Contract
 

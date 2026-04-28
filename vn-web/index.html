@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Singulari World VN</title>
     <link rel="icon" href="data:," />
-    <link rel="stylesheet" href="./styles.css?v=20260428-gallery1" />
-    <script defer src="./app.js?v=20260428-gallery1"></script>
+    <link rel="stylesheet" href="./styles.css?v=20260428-runtime1" />
+    <script defer src="./app.js?v=20260428-runtime1"></script>
   </head>
   <body>
     <main class="vn-shell" data-world-theme="default">
@@ -35,6 +35,40 @@
                 placeholder="장르, 주인공, 핵심 긴장, 원하는 톤을 자유롭게 적어줘"
               ></textarea>
             </label>
+            <fieldset class="backend-picker">
+              <legend>백엔드 고정</legend>
+              <div class="backend-grid">
+                <label class="backend-option">
+                  <input id="newWorldTextCodex" type="checkbox" data-backend-lane="text" value="codex-app-server" />
+                  <span>
+                    <strong>Codex 텍스트</strong>
+                    <small>앱 스레드 기반</small>
+                  </span>
+                </label>
+                <label class="backend-option">
+                  <input id="newWorldTextWebgpt" type="checkbox" data-backend-lane="text" value="webgpt" checked />
+                  <span>
+                    <strong>WebGPT 텍스트</strong>
+                    <small>기억 회생 강화</small>
+                  </span>
+                </label>
+                <label class="backend-option">
+                  <input id="newWorldVisualCodex" type="checkbox" data-backend-lane="visual" value="codex-app-server" />
+                  <span>
+                    <strong>Codex 이미지</strong>
+                    <small>앱 이미지 생성</small>
+                  </span>
+                </label>
+                <label class="backend-option">
+                  <input id="newWorldVisualWebgpt" type="checkbox" data-backend-lane="visual" value="webgpt" checked />
+                  <span>
+                    <strong>WebGPT 이미지</strong>
+                    <small>전용 URL 연속성</small>
+                  </span>
+                </label>
+              </div>
+              <p>세계 생성 후에는 이 조합을 바꾸지 않는다.</p>
+            </fieldset>
             <button id="startNewWorldButton" type="button">이 시드로 시작</button>
           </section>
           <section id="previousWorldPanel" class="launch-subpanel">
@@ -62,6 +96,10 @@
             <div class="view-toggle" aria-label="view mode">
               <button id="textModeButton" type="button" data-view-mode="text" class="is-active">Text</button>
               <button id="cgModeButton" type="button" data-view-mode="cg">CG</button>
+            </div>
+            <div id="runtimeLights" class="runtime-lights" aria-label="backend runtime status">
+              <span data-runtime-light="text">TXT</span>
+              <span data-runtime-light="visual">IMG</span>
             </div>
           </div>
         </div>

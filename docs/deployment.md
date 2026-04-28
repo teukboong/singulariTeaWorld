@@ -81,12 +81,10 @@ direct commit, repair, and generic visual-job completion from local paths.
 `--profile read-only` removes player input submission and image completion.
 `--profile trusted-local` is for private operator-controlled surfaces only.
 
-The web profile also declares a compact ChatGPT Apps SDK component:
-`ui://singulari-world/vn-panel.html`. `worldsim_current` and
-`worldsim_submit_player_input` point at that template with Apps metadata, and
-the component calls the same MCP tools through `window.openai.callTool`. This
-keeps one backend and one world store while giving ChatGPT a compact VN client;
-the local `vn-serve` browser UI remains the full-screen client.
+ChatGPT Apps SDK VN component experiments are legacy. The supported play UI is
+the shared `vn-serve` browser app. ChatGPT/WebGPT integration should attach as
+a backend engine path or MCP backend contract, not as a second chat-embedded VN
+client.
 
 Image generation remains host-owned. `worldsim_current_cg_image` can return an
 already saved PNG as MCP image content. `worldsim_probe_image_ingest` is the
@@ -98,6 +96,9 @@ image payload. If the host can pass PNG bytes, use
 `worldsim_complete_visual_job_from_url`; the server accepts only HTTPS
 `image/png`, rejects local/private hosts, private DNS resolution targets, and
 credentials, follows at most three redirects, and caps the body at 16 MiB.
+
+For WebGPT text/image backend activation behind the shared VN frontend, use
+[webgpt-mcp-activation.md](webgpt-mcp-activation.md).
 
 ### Stable Cloudflare Front Door
 
@@ -146,6 +147,9 @@ from `.runtime/mcp_tunnel_origin_pending.txt`.
 This is a separate Singulari deployment. Reuse the Railbot pattern, not the
 Railbot Worker, KV namespace, or secrets.
 
+For the full setup and troubleshooting guide, use
+[cloudflare-free-frontdoor.md](cloudflare-free-frontdoor.md).
+
 ## Local VN Runtime
 
 Create a world:
@@ -188,6 +192,7 @@ Codex App prep flow:
 
 ```bash
 target/release/singulari-world --store-root .world-store host-worker \
+  --text-backend codex-app-server \
   --interval-ms 750
 ```
 
@@ -206,14 +211,48 @@ thread history carries narrative rhythm, and each dispatch injects only a
 compact authoritative world packet for current state. Use `bounded-packet` for
 the older full-packet reinjection mode.
 
+To keep the same browser frontend and replace the engine with WebGPT, start:
+
+```bash
+target/release/singulari-world --store-root .world-store host-worker \
+  --text-backend webgpt \
+  --visual-backend webgpt \
+  --interval-ms 750
+```
+
+The worker calls `webgpt_research` through `webgpt-mcp.sh` by default; set
+`--webgpt-mcp-wrapper` if the wrapper is not discoverable from a sibling
+`webgpt-mcp-checkout/` checkout. It extracts one `AgentTurnResponse` JSON, then validates
+and commits it through the same world-store path, so the UI, DB, CG queue, and
+redaction rules stay shared. With `--visual-backend webgpt`, it also calls
+`webgpt_generate_image`, receives an extracted PNG path, and completes the same
+visual jobs the browser queued. WebGPT text and image use separate world-scoped
+ChatGPT conversation URLs: `agent_bridge/webgpt_conversation_binding.json` for
+text and `agent_bridge/webgpt_image_conversation_binding.json` for images.
+They also use separate WebGPT browser sessions from process start: text owns CDP
+port `9238` and its profile dir, image owns CDP port `9239` and its profile dir.
+Configure the `SINGULARI_WORLD_WEBGPT_*_CDP_PORT` and
+`SINGULARI_WORLD_WEBGPT_*_PROFILE_DIR` variables only if those defaults collide
+with another local service.
+Worlds created through the VN launcher also store a locked backend pair at
+`agent_bridge/backend_selection.json`; that world file overrides worker flags
+for text and visual dispatch, and `vn-serve` uses it for WebGPT CG cadence.
+Worlds without that file keep using the process defaults and
+`SINGULARI_WORLD_VISUAL_BACKEND=webgpt` as the legacy WebGPT cadence switch. The
+WebGPT cadence defaults to 2 turns and can be overridden with
+`SINGULARI_WORLD_WEBGPT_TURN_CG_CADENCE_MIN`. Use `--visual-backend none` only
+for text-only smoke tests.
+
 For macOS `launchctl` supervision, use absolute paths. If `codex` comes from npm,
 the launcher uses `/usr/bin/env node`; set PATH in the LaunchAgent so `node` is
 visible, or managed app-server startup will fail before listening.
 
-Automatic image jobs go through the installed `singulari-world-mcp` server.
-`worldsim_claim_visual_job` returns structured content containing
+Automatic image jobs can also go through the installed `singulari-world-mcp`
+server. `worldsim_claim_visual_job` returns structured content containing
 `job.codex_app_call`; Codex App consumes that call with its built-in image
-generation capability and then calls `worldsim_complete_visual_job`.
+generation capability and then calls `worldsim_complete_visual_job`. The
+long-lived host worker uses the same claim/complete contract for both
+`codex-app-server` and `webgpt` visual backends.
 
 ## Current Alpha Boundary
 
@@ -230,9 +269,10 @@ The standalone simulator owns:
 
 The embedding host still owns:
 
-- keeping Codex App open and authenticated
+- keeping Codex App open and authenticated when using Codex App backends
+- keeping WebGPT browser sessions authenticated when using WebGPT backends
 - starting/stopping `host-worker`
 - optionally passing `--codex-app-server-url` when it owns app-server itself
 - starting/stopping the VN server
-- consuming visual jobs through the standalone MCP `codex_app_call` contract,
-  then completing or releasing the claim
+- consuming or supervising visual jobs through the selected backend, then
+  completing or releasing the claim

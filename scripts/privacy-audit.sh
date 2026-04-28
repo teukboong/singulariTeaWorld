@@ -12,6 +12,7 @@ DEFAULT_REGEX_PATTERNS=(
 
 SAFE_REGEX_PLACEHOLDERS=(
   "/Users/<user>"
+  "/Users/you"
 )
 
 FIXED_PATTERNS=()

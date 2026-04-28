@@ -881,6 +881,8 @@ pub fn compile_turn_visual_prompt(
     manifest: &WorldVisualAssets,
 ) -> CompiledVisualPrompt {
     let references = select_reference_assets(packet, manifest);
+    let unresolved_major_character_directive =
+        unresolved_major_character_design_directive(manifest);
     let reference_hint = if references.is_empty() {
         "No accepted reference sheets are available yet.".to_owned()
     } else {
@@ -896,7 +898,13 @@ pub fn compile_turn_visual_prompt(
             .join("; ")
     };
     CompiledVisualPrompt {
-        prompt: turn_scene_prompt(world, packet, manifest, reference_hint.as_str()),
+        prompt: turn_scene_prompt(
+            world,
+            packet,
+            manifest,
+            reference_hint.as_str(),
+            unresolved_major_character_directive.as_deref(),
+        ),
         reference_asset_urls: references
             .iter()
             .map(|asset| asset.asset_url.clone())
@@ -906,7 +914,7 @@ pub fn compile_turn_visual_prompt(
             .map(|asset| asset.recommended_path.clone())
             .collect(),
         prompt_policy:
-            "compiled from player-visible render packet, world style profile, and accepted visual entity sheets only"
+            "compiled from player-visible render packet, world style profile, and accepted visual entity sheets only; unresolved major character designs cannot be directly depicted in turn CG"
                 .to_owned(),
     }
 }
@@ -949,6 +957,7 @@ fn turn_scene_prompt(
     packet: &RenderPacket,
     manifest: &WorldVisualAssets,
     reference_hint: &str,
+    unresolved_major_character_directive: Option<&str>,
 ) -> String {
     let dashboard = &packet.visible_state.dashboard;
     let scene_text = turn_cg_scene_hint(packet).unwrap_or_else(|| dashboard.status.clone());
@@ -960,8 +969,11 @@ fn turn_scene_prompt(
         .map(player_visible_focus_label)
         .collect::<Vec<_>>()
         .join(", ");
+    let major_character_policy = unresolved_major_character_directive.unwrap_or(
+        "All major character designs needed for this scene have accepted reference sheets; keep direct character depictions faithful to those references.",
+    );
     format!(
-        "Visualize one full-screen visual novel scene CG for the current turn. Use only player-visible information. World: {}. Turn: {}. Location: {}. Current event: {}. Scene narrative: {}. Visible focus: {}. World style: {} Palette: {} Camera/material language: {} Reference assets, if attached by the runtime, have priority over prose: {}. No rendered text. Do not include spoilers or unrevealed symbols.",
+        "Visualize one full-screen visual novel scene CG for the current turn. Use only player-visible information. World: {}. Turn: {}. Location: {}. Current event: {}. Scene narrative: {}. Visible focus: {}. World style: {} Palette: {} Camera/material language: {} Major character design gate: {} Reference assets, if attached by the runtime, have priority over prose: {}. No rendered text. Do not include spoilers or unrevealed symbols.",
         world.title,
         packet.turn_id,
         dashboard.location,
@@ -971,8 +983,33 @@ fn turn_scene_prompt(
         manifest.style_profile.style_prompt,
         manifest.style_profile.palette_prompt,
         manifest.style_profile.camera_language,
+        major_character_policy,
         reference_hint
     )
+}
+
+fn unresolved_major_character_design_directive(manifest: &WorldVisualAssets) -> Option<String> {
+    let unresolved = manifest
+        .visual_entities
+        .iter()
+        .filter(|asset| unresolved_major_character_design(asset))
+        .map(|asset| asset.display_name.clone())
+        .collect::<Vec<_>>();
+    if unresolved.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "Do not directly depict unresolved major characters before their character-sheet design is accepted: {}. Avoid faces, full-body front views, distinctive outfits, clear silhouettes, and identifiable close-ups for those characters. Use POV framing, environment-only composition, off-screen presence, shadows cast on scenery, cropped non-identifying hands/feet, or over-the-shoulder ambiguity instead.",
+        unresolved.join(", ")
+    ))
+}
+
+fn unresolved_major_character_design(asset: &VisualEntityAsset) -> bool {
+    asset.entity_type == "character" && !asset.exists && major_character_asset(asset)
+}
+
+fn major_character_asset(asset: &VisualEntityAsset) -> bool {
+    asset.entity_id == PROTAGONIST_CHARACTER_ID || asset.entity_id == ANCHOR_CHARACTER_ID
 }
 
 fn turn_cg_scene_hint(packet: &RenderPacket) -> Option<String> {
@@ -1085,10 +1122,11 @@ fn asset_file_stem(entity_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        BuildWorldVisualAssetsOptions, CODEX_APP_IMAGE_GENERATION_TOOL, ClaimVisualJobOptions,
-        CompleteVisualJobOptions, ReleaseVisualJobClaimOptions, VN_ASSETS_DIR,
-        VisualJobClaimOutcome, build_world_visual_assets, claim_visual_job, complete_visual_job,
-        release_visual_job_claim, turn_cg_scene_hint, visual_generation_job,
+        BuildWorldVisualAssetsOptions, CHARACTER_SHEETS_DIR, CODEX_APP_IMAGE_GENERATION_TOOL,
+        ClaimVisualJobOptions, CompleteVisualJobOptions, ReleaseVisualJobClaimOptions,
+        VN_ASSETS_DIR, VisualJobClaimOutcome, build_world_visual_assets, claim_visual_job,
+        compile_turn_visual_prompt, complete_visual_job, release_visual_job_claim,
+        turn_cg_scene_hint, visual_generation_job,
     };
     use crate::models::{
         DashboardSummary, NarrativeScene, RenderPacket, ScanTarget, TurnChoice, VisibleState,
@@ -1352,5 +1390,96 @@ premise:
         assert!(hint.contains("middle-block"));
         assert!(hint.ends_with(" ..."));
         assert!(hint.chars().count() < 1_900);
+    }
+
+    #[test]
+    fn turn_cg_hides_major_character_until_design_sheet_exists() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(
+            &seed_path,
+            r#"
+schema_version: singulari.world_seed.v1
+world_id: stw_major_design_gate
+title: "디자인 게이트"
+premise:
+  genre: "중세 판타지"
+  protagonist: "현대인의 전생, 남자 주인공"
+"#,
+        )?;
+        let initialized = init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+        let packet = RenderPacket {
+            schema_version: "singulari.render_packet.v1".to_owned(),
+            world_id: "stw_major_design_gate".to_owned(),
+            turn_id: "turn_0001".to_owned(),
+            mode: "normal".to_owned(),
+            narrative_contract: "agent_authored".to_owned(),
+            narrative_scene: Some(NarrativeScene {
+                schema_version: "singulari.narrative_scene.v1".to_owned(),
+                speaker: None,
+                text_blocks: vec!["주인공은 무너진 문 앞에서 손을 뻗었다.".to_owned()],
+                tone_notes: Vec::new(),
+            }),
+            visible_state: VisibleState {
+                dashboard: DashboardSummary {
+                    phase: "opening".to_owned(),
+                    location: "place:opening".to_owned(),
+                    anchor_invariant: "player-visible".to_owned(),
+                    current_event: "첫 문".to_owned(),
+                    status: "문 앞에 섰다".to_owned(),
+                },
+                scan_targets: Vec::<ScanTarget>::new(),
+                choices: Vec::<TurnChoice>::new(),
+            },
+            adjudication: None,
+            codex_view: None,
+            canon_delta_refs: Vec::new(),
+            forbidden_reveals: Vec::new(),
+            style_notes: Vec::new(),
+        };
+
+        let manifest = build_world_visual_assets(&BuildWorldVisualAssetsOptions {
+            store_root: Some(store.clone()),
+            world_id: "stw_major_design_gate".to_owned(),
+        })?;
+        let gated_prompt = compile_turn_visual_prompt(&initialized.world, &packet, &manifest);
+
+        assert!(gated_prompt.reference_paths.is_empty());
+        assert!(
+            gated_prompt
+                .prompt
+                .contains("Do not directly depict unresolved major characters")
+        );
+        assert!(gated_prompt.prompt.contains("주인공"));
+        assert!(gated_prompt.prompt.contains("POV framing"));
+
+        let character_sheet_dir = initialized
+            .world_dir
+            .join(VN_ASSETS_DIR)
+            .join(CHARACTER_SHEETS_DIR);
+        std::fs::create_dir_all(&character_sheet_dir)?;
+        std::fs::write(
+            character_sheet_dir.join("char_protagonist.png"),
+            MINIMAL_PNG,
+        )?;
+        let manifest = build_world_visual_assets(&BuildWorldVisualAssetsOptions {
+            store_root: Some(store),
+            world_id: "stw_major_design_gate".to_owned(),
+        })?;
+        let ungated_prompt = compile_turn_visual_prompt(&initialized.world, &packet, &manifest);
+
+        assert_eq!(ungated_prompt.reference_paths.len(), 1);
+        assert!(
+            !ungated_prompt
+                .prompt
+                .contains("Do not directly depict unresolved major characters")
+        );
+        assert!(ungated_prompt.prompt.contains("accepted reference sheets"));
+        Ok(())
     }
 }

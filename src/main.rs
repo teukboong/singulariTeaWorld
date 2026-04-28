@@ -5,9 +5,10 @@ use serde::Serialize;
 use singulari_world::{
     ACTIVE_WORLD_FILENAME, AdvanceTurnOptions, AgentCommitTurnOptions, AgentSubmitTurnOptions,
     AgentTurnResponse, ApplyCharacterAnchorOptions, InitWorldOptions, RenderPacketLoadOptions,
-    ValidationStatus, advance_turn, apply_character_anchor, build_codex_view, build_resume_pack,
-    commit_agent_turn, enqueue_agent_turn, force_chapter_summary, init_world, load_active_world,
-    load_latest_snapshot, load_pending_agent_turn, load_render_packet, load_world_record,
+    ValidationStatus, WorldTextBackend, WorldVisualBackend, advance_turn, apply_character_anchor,
+    build_codex_view, build_resume_pack, commit_agent_turn, enqueue_agent_turn,
+    force_chapter_summary, init_world, load_active_world, load_latest_snapshot,
+    load_pending_agent_turn, load_render_packet, load_world_backend_selection, load_world_record,
     recent_entity_updates, recent_relationship_updates, refresh_world_docs,
     render_advanced_turn_report, render_chat_route, render_codex_view_section_markdown,
     render_packet_markdown, render_resume_pack_markdown, render_started_world_report,
@@ -67,6 +68,73 @@ impl CodexThreadContextMode {
 impl fmt::Display for CodexThreadContextMode {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum HostWorkerTextBackend {
+    /// Use Codex App app-server as the narrative engine.
+    CodexAppServer,
+    /// Use an external `WebGPT` adapter command as the narrative engine.
+    Webgpt,
+}
+
+impl HostWorkerTextBackend {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::CodexAppServer => "codex-app-server",
+            Self::Webgpt => "webgpt",
+        }
+    }
+}
+
+impl fmt::Display for HostWorkerTextBackend {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl From<WorldTextBackend> for HostWorkerTextBackend {
+    fn from(value: WorldTextBackend) -> Self {
+        match value {
+            WorldTextBackend::CodexAppServer => Self::CodexAppServer,
+            WorldTextBackend::Webgpt => Self::Webgpt,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum HostWorkerVisualBackend {
+    /// Use Codex App app-server imageGeneration for visual jobs.
+    CodexAppServer,
+    /// Use `ChatGPT` Web image generation through `WebGPT` MCP.
+    Webgpt,
+    /// Do not claim or generate visual jobs from this worker.
+    None,
+}
+
+impl HostWorkerVisualBackend {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::CodexAppServer => "codex-app-server",
+            Self::Webgpt => "webgpt",
+            Self::None => "none",
+        }
+    }
+}
+
+impl fmt::Display for HostWorkerVisualBackend {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl From<WorldVisualBackend> for HostWorkerVisualBackend {
+    fn from(value: WorldVisualBackend) -> Self {
+        match value {
+            WorldVisualBackend::CodexAppServer => Self::CodexAppServer,
+            WorldVisualBackend::Webgpt => Self::Webgpt,
+        }
     }
 }
 
@@ -433,6 +501,24 @@ enum Commands {
         #[arg(long, env = "SINGULARI_WORLD_CODEX_THREAD_ID")]
         codex_thread_id: Option<String>,
 
+        /// Narrative engine used by the common VN web frontend.
+        #[arg(
+            long,
+            env = "SINGULARI_WORLD_TEXT_BACKEND",
+            value_enum,
+            default_value_t = HostWorkerTextBackend::CodexAppServer
+        )]
+        text_backend: HostWorkerTextBackend,
+
+        /// Visual job backend used by the common VN web frontend.
+        #[arg(
+            long,
+            env = "SINGULARI_WORLD_VISUAL_BACKEND",
+            value_enum,
+            default_value_t = HostWorkerVisualBackend::CodexAppServer
+        )]
+        visual_backend: HostWorkerVisualBackend,
+
         /// Codex CLI path used by managed app-server spawn.
         #[arg(long, env = "SINGULARI_WORLD_CODEX_BIN")]
         codex_bin: Option<PathBuf>,
@@ -453,6 +539,54 @@ enum Commands {
         /// Node.js binary used only by the codex-app-server backend helper.
         #[arg(long, env = "SINGULARI_WORLD_NODE_BIN")]
         node_bin: Option<PathBuf>,
+
+        /// Executable adapter used only by the webgpt text backend.
+        #[arg(long, env = "SINGULARI_WORLD_WEBGPT_TURN_COMMAND")]
+        webgpt_turn_command: Option<PathBuf>,
+
+        /// `WebGPT` MCP wrapper used by the built-in webgpt text backend.
+        #[arg(long, env = "SINGULARI_WORLD_WEBGPT_MCP_WRAPPER")]
+        webgpt_mcp_wrapper: Option<PathBuf>,
+
+        /// Optional `WebGPT` model override for narrative turns.
+        #[arg(long, env = "SINGULARI_WORLD_WEBGPT_MODEL")]
+        webgpt_model: Option<String>,
+
+        /// Optional `WebGPT` reasoning-level override for narrative turns.
+        #[arg(long, env = "SINGULARI_WORLD_WEBGPT_REASONING_LEVEL")]
+        webgpt_reasoning_level: Option<String>,
+
+        /// Dedicated `WebGPT` text-lane browser profile.
+        #[arg(long, env = "SINGULARI_WORLD_WEBGPT_TEXT_PROFILE_DIR")]
+        webgpt_text_profile_dir: Option<PathBuf>,
+
+        /// Dedicated `WebGPT` image-lane browser profile.
+        #[arg(long, env = "SINGULARI_WORLD_WEBGPT_IMAGE_PROFILE_DIR")]
+        webgpt_image_profile_dir: Option<PathBuf>,
+
+        /// Dedicated `WebGPT` text-lane CDP port.
+        #[arg(
+            long,
+            env = "SINGULARI_WORLD_WEBGPT_TEXT_CDP_PORT",
+            default_value_t = DEFAULT_WEBGPT_TEXT_CDP_PORT
+        )]
+        webgpt_text_cdp_port: u16,
+
+        /// Dedicated `WebGPT` image-lane CDP port.
+        #[arg(
+            long,
+            env = "SINGULARI_WORLD_WEBGPT_IMAGE_CDP_PORT",
+            default_value_t = DEFAULT_WEBGPT_IMAGE_CDP_PORT
+        )]
+        webgpt_image_cdp_port: u16,
+
+        /// Timeout in seconds for one `WebGPT` narrative turn.
+        #[arg(
+            long,
+            env = "SINGULARI_WORLD_WEBGPT_TIMEOUT_SECS",
+            default_value_t = 900
+        )]
+        webgpt_timeout_secs: u64,
     },
 
     /// Bind a world to the Codex thread that should receive realtime turns.
@@ -731,10 +865,21 @@ fn dispatch(cli: Cli) -> Result<()> {
             interval_ms,
             once,
             codex_thread_id,
+            text_backend,
+            visual_backend,
             codex_bin,
             codex_app_server_url,
             codex_thread_context_mode,
             node_bin,
+            webgpt_turn_command,
+            webgpt_mcp_wrapper,
+            webgpt_model,
+            webgpt_reasoning_level,
+            webgpt_text_profile_dir,
+            webgpt_image_profile_dir,
+            webgpt_text_cdp_port,
+            webgpt_image_cdp_port,
+            webgpt_timeout_secs,
         } => handle_host_worker(
             store_root.as_deref(),
             world_id.as_deref(),
@@ -742,10 +887,21 @@ fn dispatch(cli: Cli) -> Result<()> {
                 interval_ms,
                 once,
                 codex_thread_id,
+                text_backend,
+                visual_backend,
                 codex_bin,
                 codex_app_server_url,
                 codex_thread_context_mode,
                 node_bin,
+                webgpt_turn_command,
+                webgpt_mcp_wrapper,
+                webgpt_model,
+                webgpt_reasoning_level,
+                webgpt_text_profile_dir,
+                webgpt_image_profile_dir,
+                webgpt_text_cdp_port,
+                webgpt_image_cdp_port,
+                webgpt_timeout_secs,
             },
         )?,
         Commands::CodexThreadBind {
@@ -1497,16 +1653,29 @@ const HOST_WORKER_EVENT_SCHEMA_VERSION: &str = "singulari.host_worker_event.v1";
 const HOST_WORKER_CONSUMER: &str = "codex_app_host_worker";
 const CODEX_APP_SERVER_TURN_HELPER: &str = include_str!("codex_app_server_turn.mjs");
 const CODEX_APP_SERVER_IMAGE_HELPER: &str = include_str!("codex_app_server_image.mjs");
+const DEFAULT_WEBGPT_TEXT_CDP_PORT: u16 = 9238;
+const DEFAULT_WEBGPT_IMAGE_CDP_PORT: u16 = 9239;
 
 #[derive(Debug, Clone)]
 struct HostWorkerOptions {
     interval_ms: u64,
     once: bool,
     codex_thread_id: Option<String>,
+    text_backend: HostWorkerTextBackend,
+    visual_backend: HostWorkerVisualBackend,
     codex_bin: Option<PathBuf>,
     codex_app_server_url: Option<String>,
     codex_thread_context_mode: CodexThreadContextMode,
     node_bin: Option<PathBuf>,
+    webgpt_turn_command: Option<PathBuf>,
+    webgpt_mcp_wrapper: Option<PathBuf>,
+    webgpt_model: Option<String>,
+    webgpt_reasoning_level: Option<String>,
+    webgpt_text_profile_dir: Option<PathBuf>,
+    webgpt_image_profile_dir: Option<PathBuf>,
+    webgpt_text_cdp_port: u16,
+    webgpt_image_cdp_port: u16,
+    webgpt_timeout_secs: u64,
 }
 
 #[allow(
@@ -1519,6 +1688,7 @@ fn handle_host_worker(
     options: &HostWorkerOptions,
 ) -> Result<()> {
     let interval = Duration::from_millis(options.interval_ms.max(250));
+    ensure_webgpt_lane_runtime_isolated(options)?;
     let mut emitted = HashSet::new();
     let mut app_server_dispatch_config = CodexAppServerDispatchConfig::from_cli(
         options.codex_app_server_url.clone(),
@@ -1532,9 +1702,9 @@ fn handle_host_worker(
         "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
         "event": "worker_started",
         "world_id": initial_world_id.as_deref(),
-        "text_backend": "codex-app-server",
-        "visual_backend": "codex-app-server",
-        "visual_jobs": "claim_and_generate",
+        "text_backend": options.text_backend.as_str(),
+        "visual_backend": options.visual_backend.as_str(),
+        "visual_jobs": host_worker_visual_jobs_label(options.visual_backend),
         "consumer": HOST_WORKER_CONSUMER,
     }))?;
 
@@ -1545,8 +1715,8 @@ fn handle_host_worker(
                     "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
                     "event": "worker_waiting_for_active_world",
                     "world_id": null,
-                    "text_backend": "codex-app-server",
-                    "visual_backend": "codex-app-server",
+                    "text_backend": options.text_backend.as_str(),
+                    "visual_backend": options.visual_backend.as_str(),
                     "consumer": HOST_WORKER_CONSUMER,
                 }))?;
             }
@@ -1555,8 +1725,8 @@ fn handle_host_worker(
                     "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
                     "event": "worker_idle",
                     "world_id": null,
-                    "text_backend": "codex-app-server",
-                    "visual_backend": "codex-app-server",
+                    "text_backend": options.text_backend.as_str(),
+                    "visual_backend": options.visual_backend.as_str(),
                     "consumer": HOST_WORKER_CONSUMER,
                 }))?;
                 break;
@@ -1564,33 +1734,39 @@ fn handle_host_worker(
             thread::sleep(interval);
             continue;
         };
-        let app_server_dispatch = app_server_dispatch_config
-            .resolve(store_root, world_id.as_str())?
-            .context("host-worker requires Codex App app-server dispatch")?;
+        let (text_backend, visual_backend) =
+            effective_host_worker_backends(store_root, world_id.as_str(), options)?;
         let mut emitted_this_tick = false;
-        if emit_host_pending_agent_turn_event(
+        if visual_backend == HostWorkerVisualBackend::None {
+            if emit_host_pending_agent_turn_event(
+                store_root,
+                world_id.as_str(),
+                &mut emitted,
+                text_backend,
+                options,
+                &mut app_server_dispatch_config,
+            )? {
+                emitted_this_tick = true;
+            }
+        } else if emit_host_text_and_visual_events_parallel(
             store_root,
             world_id.as_str(),
             &mut emitted,
-            &app_server_dispatch,
+            text_backend,
+            visual_backend,
+            options,
+            &mut app_server_dispatch_config,
         )? {
-            emitted_this_tick = true;
-        }
-        let pending_turn_still_open =
-            load_pending_agent_turn(store_root, world_id.as_str()).is_ok();
-        if !pending_turn_still_open
-            && emit_host_visual_job_events(store_root, world_id.as_str(), &app_server_dispatch)?
-        {
             emitted_this_tick = true;
         }
         if options.once {
             if !emitted_this_tick {
                 emit_host_event(&serde_json::json!({
-                    "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
+                        "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
                     "event": "worker_idle",
                     "world_id": world_id,
-                    "text_backend": "codex-app-server",
-                    "visual_backend": "codex-app-server",
+                        "text_backend": text_backend.as_str(),
+                        "visual_backend": visual_backend.as_str(),
                     "consumer": HOST_WORKER_CONSUMER,
                 }))?;
             }
@@ -1599,6 +1775,31 @@ fn handle_host_worker(
         thread::sleep(interval);
     }
     Ok(())
+}
+
+fn effective_host_worker_backends(
+    store_root: Option<&Path>,
+    world_id: &str,
+    options: &HostWorkerOptions,
+) -> Result<(HostWorkerTextBackend, HostWorkerVisualBackend)> {
+    let Some(selection) = load_world_backend_selection(store_root, world_id)? else {
+        return Ok((options.text_backend, options.visual_backend));
+    };
+    if !selection.locked {
+        anyhow::bail!("backend selection is not locked for world_id={world_id}");
+    }
+    Ok((
+        HostWorkerTextBackend::from(selection.text_backend),
+        HostWorkerVisualBackend::from(selection.visual_backend),
+    ))
+}
+
+const fn host_worker_visual_jobs_label(backend: HostWorkerVisualBackend) -> &'static str {
+    match backend {
+        HostWorkerVisualBackend::CodexAppServer => "claim_and_generate",
+        HostWorkerVisualBackend::Webgpt => "claim_and_generate_webgpt",
+        HostWorkerVisualBackend::None => "disabled",
+    }
 }
 
 fn resolve_host_worker_world_id(
@@ -1620,12 +1821,33 @@ fn emit_host_pending_agent_turn_event(
     store_root: Option<&Path>,
     world_id: &str,
     emitted: &mut HashSet<String>,
-    dispatch: &CodexAppServerDispatch,
+    text_backend: HostWorkerTextBackend,
+    options: &HostWorkerOptions,
+    app_server_dispatch_config: &mut CodexAppServerDispatchConfig,
 ) -> Result<bool> {
     let Ok(pending) = load_pending_agent_turn(store_root, world_id) else {
         return Ok(false);
     };
-    match dispatch_pending_agent_turn_via_app_server(store_root, &pending, dispatch)? {
+    match text_backend {
+        HostWorkerTextBackend::CodexAppServer => {
+            let dispatch = app_server_dispatch_config
+                .resolve(store_root, world_id)?
+                .context("host-worker requires Codex App app-server dispatch")?;
+            emit_codex_app_server_pending_agent_turn_event(store_root, emitted, &pending, &dispatch)
+        }
+        HostWorkerTextBackend::Webgpt => {
+            emit_webgpt_pending_agent_turn_event(store_root, emitted, &pending, options)
+        }
+    }
+}
+
+fn emit_codex_app_server_pending_agent_turn_event(
+    store_root: Option<&Path>,
+    emitted: &mut HashSet<String>,
+    pending: &singulari_world::PendingAgentTurn,
+    dispatch: &CodexAppServerDispatch,
+) -> Result<bool> {
+    match dispatch_pending_agent_turn_via_app_server(store_root, pending, dispatch)? {
         AppServerDispatchOutcome::Started(record) => {
             let event_key = format!(
                 "codex-app-server-started:{}:{}:{}",
@@ -1689,15 +1911,373 @@ fn emit_host_pending_agent_turn_event(
     }
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "Visual job emission owns the full Codex App imageGeneration loop from claim to completion"
-)]
-fn emit_host_visual_job_events(
+fn emit_webgpt_pending_agent_turn_event(
+    store_root: Option<&Path>,
+    emitted: &mut HashSet<String>,
+    pending: &singulari_world::PendingAgentTurn,
+    options: &HostWorkerOptions,
+) -> Result<bool> {
+    match dispatch_pending_agent_turn_via_webgpt(store_root, pending, options)? {
+        WebGptDispatchOutcome::Started(record) => {
+            let event_key = format!("webgpt-started:{}:{}", pending.world_id, pending.turn_id);
+            if !emitted.insert(event_key) {
+                return Ok(false);
+            }
+            emit_host_event(&webgpt_dispatch_started_event(pending, &record))?;
+            Ok(true)
+        }
+        WebGptDispatchOutcome::AlreadyDispatched(record_path) => {
+            let event_key = format!("webgpt-skipped:{}:{}", pending.world_id, pending.turn_id);
+            if !emitted.insert(event_key) {
+                return Ok(false);
+            }
+            emit_host_event(&serde_json::json!({
+                "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
+                "event": "webgpt_dispatch_skipped",
+                "reason": "already_dispatched",
+                "world_id": pending.world_id,
+                "turn_id": pending.turn_id,
+                "record_path": record_path,
+                "consumer": HOST_WORKER_CONSUMER,
+            }))?;
+            Ok(true)
+        }
+    }
+}
+
+enum HostTextDispatchResult {
+    Codex {
+        dispatch: CodexAppServerDispatch,
+        outcome: AppServerDispatchOutcome,
+    },
+    Webgpt {
+        outcome: WebGptDispatchOutcome,
+    },
+}
+
+enum HostVisualDispatchResult {
+    Codex(CodexAppServerImageDispatchRecord),
+    Webgpt(WebGptImageDispatchRecord),
+}
+
+fn emit_host_text_and_visual_events_parallel(
     store_root: Option<&Path>,
     world_id: &str,
-    app_server_dispatch: &CodexAppServerDispatch,
+    emitted: &mut HashSet<String>,
+    text_backend: HostWorkerTextBackend,
+    visual_backend: HostWorkerVisualBackend,
+    options: &HostWorkerOptions,
+    app_server_dispatch_config: &mut CodexAppServerDispatchConfig,
 ) -> Result<bool> {
+    let pending = load_pending_agent_turn(store_root, world_id).ok();
+    let app_server_dispatch = if text_backend == HostWorkerTextBackend::CodexAppServer
+        || visual_backend == HostWorkerVisualBackend::CodexAppServer
+    {
+        Some(
+            app_server_dispatch_config
+                .resolve(store_root, world_id)?
+                .context("host-worker requires Codex App app-server dispatch")?,
+        )
+    } else {
+        None
+    };
+    let visual_claim = match visual_backend {
+        HostWorkerVisualBackend::CodexAppServer => {
+            claim_next_host_visual_job(store_root, world_id, "singulari_host_worker")?
+        }
+        HostWorkerVisualBackend::Webgpt => {
+            claim_next_host_visual_job(store_root, world_id, "singulari_webgpt_image_worker")?
+        }
+        HostWorkerVisualBackend::None => None,
+    };
+    if pending.is_none() && visual_claim.is_none() {
+        return Ok(false);
+    }
+
+    let text_app_server_dispatch = app_server_dispatch.clone();
+    let image_app_server_dispatch = app_server_dispatch.clone();
+    let (text_result, image_result) = thread::scope(|scope| {
+        let text_handle = pending.as_ref().map(|pending| {
+            scope.spawn(move || match text_backend {
+                HostWorkerTextBackend::CodexAppServer => {
+                    let dispatch = text_app_server_dispatch
+                        .as_ref()
+                        .context("host-worker requires Codex App app-server dispatch")?
+                        .clone();
+                    let outcome =
+                        dispatch_pending_agent_turn_via_app_server(store_root, pending, &dispatch)?;
+                    Ok(HostTextDispatchResult::Codex { dispatch, outcome })
+                }
+                HostWorkerTextBackend::Webgpt => {
+                    let outcome =
+                        dispatch_pending_agent_turn_via_webgpt(store_root, pending, options)?;
+                    Ok(HostTextDispatchResult::Webgpt { outcome })
+                }
+            })
+        });
+        let image_handle = visual_claim.as_ref().map(|claim| {
+            scope.spawn(move || match visual_backend {
+                HostWorkerVisualBackend::CodexAppServer => {
+                    let dispatch = image_app_server_dispatch
+                        .as_ref()
+                        .context("host-worker requires Codex App app-server dispatch")?;
+                    dispatch_visual_job_via_app_server(store_root, claim, dispatch)
+                        .map(HostVisualDispatchResult::Codex)
+                }
+                HostWorkerVisualBackend::Webgpt => {
+                    dispatch_visual_job_via_webgpt(store_root, claim, options)
+                        .map(HostVisualDispatchResult::Webgpt)
+                }
+                HostWorkerVisualBackend::None => {
+                    anyhow::bail!("visual backend none cannot dispatch visual claim")
+                }
+            })
+        });
+
+        let text_result = text_handle.map(|handle| {
+            handle
+                .join()
+                .unwrap_or_else(|panic| Err(thread_panic_error("text dispatch", panic.as_ref())))
+        });
+        let image_result = image_handle.map(|handle| {
+            handle
+                .join()
+                .unwrap_or_else(|panic| Err(thread_panic_error("image dispatch", panic.as_ref())))
+        });
+        (text_result, image_result)
+    });
+
+    let mut emitted_any = false;
+    if let Some((pending, result)) = pending.as_ref().zip(text_result)
+        && emit_text_dispatch_result(pending, result?, emitted)?
+    {
+        emitted_any = true;
+    }
+
+    if let Some(result) = image_result
+        && emit_visual_dispatch_result(result?)?
+    {
+        emitted_any = true;
+    }
+    Ok(emitted_any)
+}
+
+fn emit_text_dispatch_result(
+    pending: &singulari_world::PendingAgentTurn,
+    result: HostTextDispatchResult,
+    emitted: &mut HashSet<String>,
+) -> Result<bool> {
+    match result {
+        HostTextDispatchResult::Codex { dispatch, outcome } => {
+            emit_codex_text_dispatch_result(pending, outcome, &dispatch, emitted)
+        }
+        HostTextDispatchResult::Webgpt { outcome } => {
+            emit_webgpt_text_dispatch_result(pending, outcome, emitted)
+        }
+    }
+}
+
+fn emit_codex_text_dispatch_result(
+    pending: &singulari_world::PendingAgentTurn,
+    outcome: AppServerDispatchOutcome,
+    dispatch: &CodexAppServerDispatch,
+    emitted: &mut HashSet<String>,
+) -> Result<bool> {
+    match outcome {
+        AppServerDispatchOutcome::Started(record) => {
+            let event_key = format!(
+                "codex-app-server-started:{}:{}:{}",
+                pending.world_id,
+                pending.turn_id,
+                record.thread_id.as_deref().unwrap_or("new-thread")
+            );
+            if !emitted.insert(event_key) {
+                return Ok(false);
+            }
+            emit_host_event(&codex_app_server_dispatch_started_event(
+                pending, &record, dispatch,
+            ))?;
+        }
+        AppServerDispatchOutcome::AlreadyDispatched(record_path) => {
+            let event_key = format!(
+                "codex-app-server-skipped:{}:{}:{}",
+                pending.world_id,
+                pending.turn_id,
+                dispatch.thread_id.as_deref().unwrap_or("new-thread")
+            );
+            if !emitted.insert(event_key) {
+                return Ok(false);
+            }
+            emit_host_event(&codex_app_server_dispatch_skipped_event(
+                pending,
+                record_path.as_str(),
+                dispatch,
+            ))?;
+        }
+    }
+    Ok(true)
+}
+
+fn emit_webgpt_text_dispatch_result(
+    pending: &singulari_world::PendingAgentTurn,
+    outcome: WebGptDispatchOutcome,
+    emitted: &mut HashSet<String>,
+) -> Result<bool> {
+    match outcome {
+        WebGptDispatchOutcome::Started(record) => {
+            let event_key = format!("webgpt-started:{}:{}", pending.world_id, pending.turn_id);
+            if !emitted.insert(event_key) {
+                return Ok(false);
+            }
+            emit_host_event(&webgpt_dispatch_started_event(pending, &record))?;
+        }
+        WebGptDispatchOutcome::AlreadyDispatched(record_path) => {
+            let event_key = format!("webgpt-skipped:{}:{}", pending.world_id, pending.turn_id);
+            if !emitted.insert(event_key) {
+                return Ok(false);
+            }
+            emit_host_event(&webgpt_dispatch_skipped_event(
+                pending,
+                record_path.as_str(),
+            ))?;
+        }
+    }
+    Ok(true)
+}
+
+fn emit_visual_dispatch_result(result: HostVisualDispatchResult) -> Result<bool> {
+    match result {
+        HostVisualDispatchResult::Codex(record) => {
+            emit_host_event(&codex_app_image_completed_event(&record))?;
+        }
+        HostVisualDispatchResult::Webgpt(record) => {
+            emit_host_event(&webgpt_image_completed_event(&record))?;
+        }
+    }
+    Ok(true)
+}
+
+fn thread_panic_error(context: &str, panic: &(dyn std::any::Any + Send)) -> anyhow::Error {
+    let reason = panic
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("unknown panic payload");
+    anyhow::anyhow!("{context} panicked: {reason}")
+}
+
+fn codex_app_server_dispatch_started_event(
+    pending: &singulari_world::PendingAgentTurn,
+    record: &CodexAppServerDispatchRecord,
+    dispatch: &CodexAppServerDispatch,
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
+        "event": "codex_app_server_dispatch_started",
+        "world_id": pending.world_id,
+        "turn_id": pending.turn_id,
+        "thread_id": record.thread_id,
+        "turn_status": record.status,
+        "app_server_url": dispatch.app_server_url.as_str(),
+        "app_server_managed": dispatch.app_server_managed,
+        "app_server_runtime_path": dispatch
+            .app_server_runtime_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        "pid": record.pid,
+        "record_path": record.record_path,
+        "prompt_path": record.prompt_path,
+        "result_path": record.result_path,
+        "stdout_path": record.stdout_path,
+        "stderr_path": record.stderr_path,
+        "consumer": HOST_WORKER_CONSUMER,
+    })
+}
+
+fn codex_app_server_dispatch_skipped_event(
+    pending: &singulari_world::PendingAgentTurn,
+    record_path: &str,
+    dispatch: &CodexAppServerDispatch,
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
+        "event": "codex_app_server_dispatch_skipped",
+        "reason": "already_dispatched",
+        "world_id": pending.world_id,
+        "turn_id": pending.turn_id,
+        "thread_id": dispatch.thread_id.as_deref(),
+        "app_server_managed": dispatch.app_server_managed,
+        "app_server_runtime_path": dispatch
+            .app_server_runtime_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        "record_path": record_path,
+        "consumer": HOST_WORKER_CONSUMER,
+    })
+}
+
+fn webgpt_dispatch_started_event(
+    pending: &singulari_world::PendingAgentTurn,
+    record: &WebGptDispatchRecord,
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
+        "event": "webgpt_dispatch_started",
+        "world_id": pending.world_id,
+        "turn_id": pending.turn_id,
+        "turn_status": record.status,
+        "adapter_command": record.adapter_command,
+        "mcp_wrapper": record.mcp_wrapper,
+        "conversation_id": record.raw_conversation_id,
+        "pid": record.pid,
+        "record_path": record.record_path,
+        "prompt_path": record.prompt_path,
+        "response_path": record.response_path,
+        "result_path": record.result_path,
+        "stdout_path": record.stdout_path,
+        "stderr_path": record.stderr_path,
+        "committed_turn_id": record.committed_turn_id,
+        "consumer": HOST_WORKER_CONSUMER,
+    })
+}
+
+fn webgpt_dispatch_skipped_event(
+    pending: &singulari_world::PendingAgentTurn,
+    record_path: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
+        "event": "webgpt_dispatch_skipped",
+        "reason": "already_dispatched",
+        "world_id": pending.world_id,
+        "turn_id": pending.turn_id,
+        "record_path": record_path,
+        "consumer": HOST_WORKER_CONSUMER,
+    })
+}
+
+fn codex_app_image_completed_event(
+    record: &CodexAppServerImageDispatchRecord,
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
+        "event": "codex_app_image_generate_completed",
+        "world_id": record.world_id.as_str(),
+        "slot": record.slot.as_str(),
+        "claim_id": record.claim_id.as_deref(),
+        "saved_path": record.saved_path.as_deref(),
+        "destination_path": record.destination_path.as_str(),
+        "record_path": record.record_path.as_str(),
+        "status": record.status.as_str(),
+        "consumer": HOST_WORKER_CONSUMER,
+    })
+}
+
+fn claim_next_host_visual_job(
+    store_root: Option<&Path>,
+    world_id: &str,
+    claimed_by: &str,
+) -> Result<Option<singulari_world::VisualJobClaim>> {
     let jobs = current_host_visual_jobs(store_root, world_id)?;
     for job in jobs {
         if load_visual_job_claim(store_root, world_id, job.slot.as_str())?.is_some() {
@@ -1707,7 +2287,7 @@ fn emit_host_visual_job_events(
             store_root: store_root.map(Path::to_path_buf),
             world_id: world_id.to_owned(),
             slot: Some(job.slot.clone()),
-            claimed_by: "singulari_host_worker".to_owned(),
+            claimed_by: claimed_by.to_owned(),
             force: false,
             extra_jobs: current_turn_visual_jobs(store_root, world_id)?,
         })?;
@@ -1717,22 +2297,24 @@ fn emit_host_visual_job_events(
                 job.slot
             );
         };
-        let record = dispatch_visual_job_via_app_server(store_root, &claim, app_server_dispatch)?;
-        emit_host_event(&serde_json::json!({
-            "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
-            "event": "codex_app_image_generate_completed",
-            "world_id": record.world_id.as_str(),
-            "slot": record.slot.as_str(),
-            "claim_id": record.claim_id.as_deref(),
-            "saved_path": record.saved_path.as_deref(),
-            "destination_path": record.destination_path.as_str(),
-            "record_path": record.record_path.as_str(),
-            "status": record.status.as_str(),
-            "consumer": HOST_WORKER_CONSUMER,
-        }))?;
-        return Ok(true);
+        return Ok(Some(*claim));
     }
-    Ok(false)
+    Ok(None)
+}
+
+fn webgpt_image_completed_event(record: &WebGptImageDispatchRecord) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
+        "event": "webgpt_image_generate_completed",
+        "world_id": record.world_id.as_str(),
+        "slot": record.slot.as_str(),
+        "claim_id": record.claim_id.as_deref(),
+        "generated_path": record.generated_path.as_deref(),
+        "destination_path": record.destination_path.as_str(),
+        "record_path": record.record_path.as_str(),
+        "status": record.status.as_str(),
+        "consumer": HOST_WORKER_CONSUMER,
+    })
 }
 
 fn current_host_visual_jobs(
@@ -2074,8 +2656,96 @@ fn ensure_control_safe_runtime_value(field: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone)]
+struct WebGptLaneRuntime {
+    lane: WebGptConversationLane,
+    profile_dir: PathBuf,
+    cdp_port: u16,
+}
+
+impl WebGptLaneRuntime {
+    fn new(lane: WebGptConversationLane, options: &HostWorkerOptions) -> Result<Self> {
+        Ok(Self {
+            lane,
+            profile_dir: webgpt_lane_profile_dir(lane, options)?,
+            cdp_port: match lane {
+                WebGptConversationLane::Text => options.webgpt_text_cdp_port,
+                WebGptConversationLane::Image => options.webgpt_image_cdp_port,
+            },
+        })
+    }
+
+    fn cdp_url(&self) -> String {
+        format!("http://127.0.0.1:{}", self.cdp_port)
+    }
+
+    fn apply_to_command(&self, command: &mut Command) {
+        command
+            .env("WEBGPT_MCP_CDP_PORT", self.cdp_port.to_string())
+            .env("WEBGPT_MCP_PROFILE_DIR", self.profile_dir.as_os_str())
+            .env(
+                "WEBGPT_MCP_MANUAL_PROFILE_DIR",
+                self.profile_dir.as_os_str(),
+            )
+            .env(
+                "WEBGPT_MCP_BOOTSTRAP_SNAPSHOT_DIR",
+                self.profile_dir.with_extension("snapshot").as_os_str(),
+            );
+    }
+}
+
+fn ensure_webgpt_lane_runtime_isolated(options: &HostWorkerOptions) -> Result<()> {
+    let text = WebGptLaneRuntime::new(WebGptConversationLane::Text, options)?;
+    let image = WebGptLaneRuntime::new(WebGptConversationLane::Image, options)?;
+    if text.cdp_port == image.cdp_port {
+        anyhow::bail!(
+            "webgpt text/image lanes must use distinct CDP ports: port={}",
+            text.cdp_port
+        );
+    }
+    if text.profile_dir == image.profile_dir {
+        anyhow::bail!(
+            "webgpt text/image lanes must use distinct profile dirs: profile_dir={}",
+            text.profile_dir.display()
+        );
+    }
+    Ok(())
+}
+
+fn webgpt_lane_profile_dir(
+    lane: WebGptConversationLane,
+    options: &HostWorkerOptions,
+) -> Result<PathBuf> {
+    let configured = match lane {
+        WebGptConversationLane::Text => options.webgpt_text_profile_dir.clone(),
+        WebGptConversationLane::Image => options.webgpt_image_profile_dir.clone(),
+    };
+    if let Some(path) = configured {
+        return Ok(path);
+    }
+    let root = if let Some(path) = std::env::var_os("SINGULARI_WORLD_WEBGPT_PROFILE_ROOT") {
+        PathBuf::from(path)
+    } else {
+        webgpt_default_profile_root()?
+    };
+    Ok(root.join(lane.profile_dir_name()))
+}
+
+fn webgpt_default_profile_root() -> Result<PathBuf> {
+    let home = std::env::var_os("HOME").context("HOME is required for WebGPT profile defaults")?;
+    Ok(PathBuf::from(home)
+        .join(".hesperides")
+        .join("singulari-world")
+        .join("webgpt"))
+}
+
 enum AppServerDispatchOutcome {
     Started(Box<CodexAppServerDispatchRecord>),
+    AlreadyDispatched(String),
+}
+
+enum WebGptDispatchOutcome {
+    Started(Box<WebGptDispatchRecord>),
     AlreadyDispatched(String),
 }
 
@@ -2109,6 +2779,37 @@ struct CodexAppServerDispatchRecord {
 }
 
 #[derive(Debug, Serialize)]
+struct WebGptDispatchRecord {
+    schema_version: &'static str,
+    status: String,
+    world_id: String,
+    turn_id: String,
+    adapter_command: Option<String>,
+    mcp_wrapper: Option<String>,
+    mcp_profile_dir: Option<String>,
+    mcp_cdp_port: Option<u16>,
+    mcp_cdp_url: Option<String>,
+    conversation_id: Option<String>,
+    raw_conversation_id: Option<String>,
+    current_model: Option<String>,
+    current_reasoning_level: Option<String>,
+    pid: u32,
+    record_path: String,
+    prompt_path: String,
+    response_path: String,
+    result_path: Option<String>,
+    stdout_path: String,
+    stderr_path: String,
+    dispatched_at: String,
+    exit_code: Option<i32>,
+    committed_turn_id: Option<String>,
+    render_packet_path: Option<String>,
+    commit_record_path: Option<String>,
+    error: Option<String>,
+    completed_at: String,
+}
+
+#[derive(Debug, Serialize)]
 struct CodexAppServerImageDispatchRecord {
     schema_version: &'static str,
     status: String,
@@ -2127,6 +2828,38 @@ struct CodexAppServerImageDispatchRecord {
     stdout_path: String,
     stderr_path: String,
     saved_path: Option<String>,
+    destination_path: String,
+    completion_path: Option<String>,
+    dispatched_at: String,
+    exit_code: Option<i32>,
+    error: Option<String>,
+    completed_at: String,
+}
+
+#[derive(Debug, Serialize)]
+struct WebGptImageDispatchRecord {
+    schema_version: &'static str,
+    status: String,
+    world_id: String,
+    slot: String,
+    claim_id: Option<String>,
+    mcp_wrapper: String,
+    mcp_profile_dir: String,
+    mcp_cdp_port: u16,
+    mcp_cdp_url: String,
+    image_session_kind: String,
+    reference_paths: Vec<String>,
+    conversation_id: Option<String>,
+    raw_conversation_id: Option<String>,
+    pid: u32,
+    record_path: String,
+    prompt_path: String,
+    result_path: String,
+    stdout_path: String,
+    stderr_path: String,
+    generated_path: Option<String>,
+    generated_sha256: Option<String>,
+    generated_bytes: Option<usize>,
     destination_path: String,
     completion_path: Option<String>,
     dispatched_at: String,
@@ -2328,6 +3061,791 @@ fn dispatch_pending_agent_turn_via_app_server(
     Ok(AppServerDispatchOutcome::Started(Box::new(record)))
 }
 
+fn dispatch_pending_agent_turn_via_webgpt(
+    store_root: Option<&Path>,
+    pending: &singulari_world::PendingAgentTurn,
+    options: &HostWorkerOptions,
+) -> Result<WebGptDispatchOutcome> {
+    let dispatch_dir = dispatch_dir_for_pending(pending)?;
+    fs::create_dir_all(&dispatch_dir)
+        .with_context(|| format!("failed to create {}", dispatch_dir.display()))?;
+    let record_path = dispatch_dir.join(format!("{}-webgpt.json", pending.turn_id));
+    if record_path.exists() {
+        return Ok(WebGptDispatchOutcome::AlreadyDispatched(
+            record_path.display().to_string(),
+        ));
+    }
+
+    let prompt_path = dispatch_dir.join(format!("{}-webgpt-prompt.md", pending.turn_id));
+    let response_path =
+        dispatch_dir.join(format!("{}-webgpt-agent-response.json", pending.turn_id));
+    let result_path = dispatch_dir.join(format!("{}-webgpt-result.json", pending.turn_id));
+    let stdout_path = dispatch_dir.join(format!("{}-webgpt-stdout.log", pending.turn_id));
+    let stderr_path = dispatch_dir.join(format!("{}-webgpt-stderr.log", pending.turn_id));
+    let prompt = build_webgpt_turn_prompt(store_root, pending)?;
+    fs::write(&prompt_path, prompt.as_bytes())
+        .with_context(|| format!("failed to write {}", prompt_path.display()))?;
+    let dispatcher = resolve_webgpt_dispatcher(store_root, pending, options)?;
+
+    let paths = WebGptTurnPaths {
+        world_id: pending.world_id.as_str(),
+        turn_id: pending.turn_id.as_str(),
+        prompt_path: prompt_path.as_path(),
+        response_path: response_path.as_path(),
+        result_path: result_path.as_path(),
+        stdout_path: stdout_path.as_path(),
+        stderr_path: stderr_path.as_path(),
+    };
+    let claim = webgpt_dispatch_claim(pending, &dispatcher, paths);
+    if !write_dispatch_claim(record_path.as_path(), &claim)? {
+        return Ok(WebGptDispatchOutcome::AlreadyDispatched(
+            record_path.display().to_string(),
+        ));
+    }
+
+    let dispatch_result = dispatcher.run(paths)?;
+    if let Some(raw_conversation_id) = dispatch_result.raw_conversation_id.as_deref() {
+        save_webgpt_conversation_binding(
+            store_root,
+            pending.world_id.as_str(),
+            WebGptConversationLane::Text,
+            raw_conversation_id,
+        )?;
+    }
+
+    let commit_result = commit_webgpt_dispatch_if_success(
+        store_root,
+        pending,
+        response_path.as_path(),
+        &dispatch_result,
+    );
+
+    let record = WebGptDispatchRecord {
+        schema_version: "singulari.webgpt_dispatch_record.v1",
+        status: commit_result.status,
+        world_id: pending.world_id.clone(),
+        turn_id: pending.turn_id.clone(),
+        adapter_command: dispatcher.adapter_command_display(),
+        mcp_wrapper: dispatcher.mcp_wrapper_display(),
+        mcp_profile_dir: dispatcher.mcp_profile_dir_display(),
+        mcp_cdp_port: dispatcher.mcp_cdp_port(),
+        mcp_cdp_url: dispatcher.mcp_cdp_url(),
+        conversation_id: dispatcher.conversation_id().map(str::to_owned),
+        raw_conversation_id: dispatch_result.raw_conversation_id,
+        current_model: dispatch_result.current_model,
+        current_reasoning_level: dispatch_result.current_reasoning_level,
+        pid: dispatch_result.pid,
+        record_path: record_path.display().to_string(),
+        prompt_path: prompt_path.display().to_string(),
+        response_path: response_path.display().to_string(),
+        result_path: Some(result_path.display().to_string()),
+        stdout_path: stdout_path.display().to_string(),
+        stderr_path: stderr_path.display().to_string(),
+        dispatched_at: Utc::now().to_rfc3339(),
+        exit_code: dispatch_result.exit_code,
+        committed_turn_id: commit_result
+            .committed
+            .as_ref()
+            .map(|value| value.turn_id.clone()),
+        render_packet_path: commit_result
+            .committed
+            .as_ref()
+            .map(|value| value.render_packet_path.clone()),
+        commit_record_path: commit_result
+            .committed
+            .as_ref()
+            .map(|value| value.commit_record_path.clone()),
+        error: dispatch_result.error.or(commit_result.error),
+        completed_at: Utc::now().to_rfc3339(),
+    };
+    fs::write(&record_path, serde_json::to_vec_pretty(&record)?)
+        .with_context(|| format!("failed to update {}", record_path.display()))?;
+    Ok(WebGptDispatchOutcome::Started(Box::new(record)))
+}
+
+fn webgpt_dispatch_claim(
+    pending: &singulari_world::PendingAgentTurn,
+    dispatcher: &WebGptDispatcher,
+    paths: WebGptTurnPaths<'_>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": "singulari.webgpt_dispatch_record.v1",
+        "status": "dispatching",
+        "world_id": pending.world_id,
+        "turn_id": pending.turn_id,
+        "adapter_command": dispatcher.adapter_command_display(),
+        "mcp_wrapper": dispatcher.mcp_wrapper_display(),
+        "mcp_profile_dir": dispatcher.mcp_profile_dir_display(),
+        "mcp_cdp_port": dispatcher.mcp_cdp_port(),
+        "mcp_cdp_url": dispatcher.mcp_cdp_url(),
+        "conversation_id": dispatcher.conversation_id(),
+        "prompt_path": paths.prompt_path.display().to_string(),
+        "response_path": paths.response_path.display().to_string(),
+        "result_path": paths.result_path.display().to_string(),
+        "stdout_path": paths.stdout_path.display().to_string(),
+        "stderr_path": paths.stderr_path.display().to_string(),
+        "dispatched_at": Utc::now().to_rfc3339(),
+    })
+}
+
+struct WebGptCommitResult {
+    status: String,
+    committed: Option<singulari_world::CommittedAgentTurn>,
+    error: Option<String>,
+}
+
+fn commit_webgpt_dispatch_if_success(
+    store_root: Option<&Path>,
+    pending: &singulari_world::PendingAgentTurn,
+    response_path: &Path,
+    dispatch_result: &WebGptDispatchResult,
+) -> WebGptCommitResult {
+    if !dispatch_result.success {
+        return WebGptCommitResult {
+            status: "failed".to_owned(),
+            committed: None,
+            error: None,
+        };
+    }
+    match commit_webgpt_agent_response(store_root, pending, response_path) {
+        Ok(committed) => WebGptCommitResult {
+            status: "completed".to_owned(),
+            committed: Some(committed),
+            error: None,
+        },
+        Err(error) => WebGptCommitResult {
+            status: "failed_uncommitted".to_owned(),
+            committed: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+#[derive(Clone, Copy)]
+struct WebGptTurnPaths<'a> {
+    world_id: &'a str,
+    turn_id: &'a str,
+    prompt_path: &'a Path,
+    response_path: &'a Path,
+    result_path: &'a Path,
+    stdout_path: &'a Path,
+    stderr_path: &'a Path,
+}
+
+struct WebGptDispatchResult {
+    success: bool,
+    pid: u32,
+    exit_code: Option<i32>,
+    raw_conversation_id: Option<String>,
+    current_model: Option<String>,
+    current_reasoning_level: Option<String>,
+    error: Option<String>,
+}
+
+enum WebGptDispatcher {
+    ExternalCommand {
+        command: PathBuf,
+    },
+    McpResearch {
+        wrapper: PathBuf,
+        runtime: WebGptLaneRuntime,
+        conversation_id: Option<String>,
+        model: Option<String>,
+        reasoning_level: Option<String>,
+        timeout_secs: u64,
+    },
+}
+
+impl WebGptDispatcher {
+    fn adapter_command_display(&self) -> Option<String> {
+        match self {
+            Self::ExternalCommand { command } => Some(command.display().to_string()),
+            Self::McpResearch { .. } => None,
+        }
+    }
+
+    fn mcp_wrapper_display(&self) -> Option<String> {
+        match self {
+            Self::ExternalCommand { .. } => None,
+            Self::McpResearch { wrapper, .. } => Some(wrapper.display().to_string()),
+        }
+    }
+
+    fn mcp_profile_dir_display(&self) -> Option<String> {
+        match self {
+            Self::ExternalCommand { .. } => None,
+            Self::McpResearch { runtime, .. } => Some(runtime.profile_dir.display().to_string()),
+        }
+    }
+
+    fn mcp_cdp_port(&self) -> Option<u16> {
+        match self {
+            Self::ExternalCommand { .. } => None,
+            Self::McpResearch { runtime, .. } => Some(runtime.cdp_port),
+        }
+    }
+
+    fn mcp_cdp_url(&self) -> Option<String> {
+        match self {
+            Self::ExternalCommand { .. } => None,
+            Self::McpResearch { runtime, .. } => Some(runtime.cdp_url()),
+        }
+    }
+
+    fn conversation_id(&self) -> Option<&str> {
+        match self {
+            Self::ExternalCommand { .. } => None,
+            Self::McpResearch {
+                conversation_id, ..
+            } => conversation_id.as_deref(),
+        }
+    }
+
+    fn run(&self, paths: WebGptTurnPaths<'_>) -> Result<WebGptDispatchResult> {
+        match self {
+            Self::ExternalCommand { command } => run_external_webgpt_turn_command(command, paths),
+            Self::McpResearch {
+                wrapper,
+                runtime,
+                conversation_id,
+                model,
+                reasoning_level,
+                timeout_secs,
+            } => run_webgpt_mcp_research_turn(
+                wrapper,
+                conversation_id.as_deref(),
+                model.as_deref(),
+                reasoning_level.as_deref(),
+                *timeout_secs,
+                runtime,
+                paths,
+            ),
+        }
+    }
+}
+
+fn resolve_webgpt_dispatcher(
+    store_root: Option<&Path>,
+    pending: &singulari_world::PendingAgentTurn,
+    options: &HostWorkerOptions,
+) -> Result<WebGptDispatcher> {
+    if let Some(command) = &options.webgpt_turn_command {
+        return Ok(WebGptDispatcher::ExternalCommand {
+            command: command.clone(),
+        });
+    }
+    Ok(WebGptDispatcher::McpResearch {
+        wrapper: resolve_webgpt_mcp_wrapper(options)?,
+        runtime: WebGptLaneRuntime::new(WebGptConversationLane::Text, options)?,
+        conversation_id: load_webgpt_conversation_binding(
+            store_root,
+            pending.world_id.as_str(),
+            WebGptConversationLane::Text,
+        )?,
+        model: options.webgpt_model.clone(),
+        reasoning_level: options.webgpt_reasoning_level.clone(),
+        timeout_secs: options.webgpt_timeout_secs,
+    })
+}
+
+fn run_external_webgpt_turn_command(
+    command: &Path,
+    paths: WebGptTurnPaths<'_>,
+) -> Result<WebGptDispatchResult> {
+    let child = Command::new(command)
+        .arg("--prompt-path")
+        .arg(paths.prompt_path)
+        .arg("--response-path")
+        .arg(paths.response_path)
+        .arg("--world-id")
+        .arg(paths.world_id)
+        .arg("--turn-id")
+        .arg(paths.turn_id)
+        .env("SINGULARI_WORLD_ENGINE", "webgpt")
+        .env("SINGULARI_WORLD_PROMPT_PATH", paths.prompt_path)
+        .env("SINGULARI_WORLD_RESPONSE_PATH", paths.response_path)
+        .env("SINGULARI_WORLD_WORLD_ID", paths.world_id)
+        .env("SINGULARI_WORLD_TURN_ID", paths.turn_id)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| {
+            format!(
+                "failed to spawn webgpt turn adapter: command={}",
+                command.display()
+            )
+        })?;
+    let pid = child.id();
+    let output = child
+        .wait_with_output()
+        .context("failed to wait for webgpt turn adapter")?;
+    fs::write(paths.stdout_path, &output.stdout)
+        .with_context(|| format!("failed to write {}", paths.stdout_path.display()))?;
+    fs::write(paths.stderr_path, &output.stderr)
+        .with_context(|| format!("failed to write {}", paths.stderr_path.display()))?;
+    Ok(WebGptDispatchResult {
+        success: output.status.success(),
+        pid,
+        exit_code: output.status.code(),
+        raw_conversation_id: None,
+        current_model: None,
+        current_reasoning_level: None,
+        error: if output.status.success() {
+            None
+        } else {
+            Some(String::from_utf8_lossy(&output.stderr).trim().to_owned())
+                .filter(|value| !value.is_empty())
+        },
+    })
+}
+
+fn run_webgpt_mcp_research_turn(
+    wrapper: &Path,
+    conversation_id: Option<&str>,
+    model: Option<&str>,
+    reasoning_level: Option<&str>,
+    timeout_secs: u64,
+    runtime: &WebGptLaneRuntime,
+    paths: WebGptTurnPaths<'_>,
+) -> Result<WebGptDispatchResult> {
+    let prompt = fs::read_to_string(paths.prompt_path)
+        .with_context(|| format!("failed to read {}", paths.prompt_path.display()))?;
+    let arguments = build_webgpt_research_arguments(
+        prompt.as_str(),
+        conversation_id,
+        model,
+        reasoning_level,
+        timeout_secs,
+    );
+    let arguments_raw = serde_json::to_string(&arguments)?;
+    let mut command = Command::new(wrapper);
+    runtime.apply_to_command(&mut command);
+    let child = command
+            .arg("client-call")
+            .arg("--wrapper")
+            .arg(wrapper)
+            .arg("--client-name")
+            .arg("singulari-world-webgpt-turn")
+            .arg("--require-tool")
+            .arg("--tool")
+            .arg("webgpt_research")
+            .arg("--arguments")
+            .arg(arguments_raw)
+            .arg("--output")
+            .arg("first-text")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| {
+                format!(
+                    "failed to spawn webgpt-mcp client-call: wrapper={}, lane={}, cdp_url={}, profile_dir={}",
+                    wrapper.display(),
+                    runtime.lane.as_str(),
+                    runtime.cdp_url(),
+                    runtime.profile_dir.display()
+                )
+            })?;
+    let pid = child.id();
+    let output = child
+        .wait_with_output()
+        .context("failed to wait for webgpt-mcp client-call")?;
+    fs::write(paths.stdout_path, &output.stdout)
+        .with_context(|| format!("failed to write {}", paths.stdout_path.display()))?;
+    fs::write(paths.stderr_path, &output.stderr)
+        .with_context(|| format!("failed to write {}", paths.stderr_path.display()))?;
+    if !output.status.success() {
+        return Ok(WebGptDispatchResult {
+            success: false,
+            pid,
+            exit_code: output.status.code(),
+            raw_conversation_id: None,
+            current_model: None,
+            current_reasoning_level: None,
+            error: Some(String::from_utf8_lossy(&output.stderr).trim().to_owned())
+                .filter(|value| !value.is_empty()),
+        });
+    }
+    let raw_result = String::from_utf8(output.stdout)
+        .context("webgpt-mcp client-call stdout was not valid UTF-8")?;
+    fs::write(paths.result_path, raw_result.as_bytes())
+        .with_context(|| format!("failed to write {}", paths.result_path.display()))?;
+    let result = serde_json::from_str::<serde_json::Value>(&raw_result)
+        .context("failed to parse webgpt_research result JSON")?;
+    let answer_markdown = result
+        .get("answer_markdown")
+        .and_then(serde_json::Value::as_str)
+        .context("webgpt_research result missing answer_markdown")?;
+    let agent_response_json = extract_json_object_text(answer_markdown)
+        .context("webgpt answer did not contain an AgentTurnResponse JSON object")?;
+    fs::write(paths.response_path, agent_response_json.as_bytes())
+        .with_context(|| format!("failed to write {}", paths.response_path.display()))?;
+    Ok(WebGptDispatchResult {
+        success: true,
+        pid,
+        exit_code: output.status.code(),
+        raw_conversation_id: result
+            .get("raw_conversation_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        current_model: result
+            .get("current_model")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        current_reasoning_level: result
+            .get("current_reasoning_level")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        error: None,
+    })
+}
+
+fn build_webgpt_research_arguments(
+    prompt: &str,
+    conversation_id: Option<&str>,
+    model: Option<&str>,
+    reasoning_level: Option<&str>,
+    timeout_secs: u64,
+) -> serde_json::Value {
+    let mut arguments = serde_json::json!({
+        "prompt": prompt,
+        "timeout_secs": timeout_secs.max(60),
+        "auto_recover": true,
+        "recovery_attempts": 1,
+    });
+    if let Some(object) = arguments.as_object_mut() {
+        if let Some(conversation_id) = conversation_id.filter(|value| !value.trim().is_empty()) {
+            object.insert(
+                "conversation_id".to_owned(),
+                serde_json::json!(conversation_id),
+            );
+        } else {
+            object.insert("new_conversation".to_owned(), serde_json::json!(true));
+        }
+        if let Some(model) = model.filter(|value| !value.trim().is_empty()) {
+            object.insert("model".to_owned(), serde_json::json!(model));
+        }
+        if let Some(reasoning_level) = reasoning_level.filter(|value| !value.trim().is_empty()) {
+            object.insert(
+                "reasoning_level".to_owned(),
+                serde_json::json!(reasoning_level),
+            );
+        }
+    }
+    arguments
+}
+
+fn resolve_webgpt_mcp_wrapper(options: &HostWorkerOptions) -> Result<PathBuf> {
+    if let Some(wrapper) = &options.webgpt_mcp_wrapper {
+        return Ok(wrapper.clone());
+    }
+    if let Some(wrapper) = std::env::var_os("WEBGPT_MCP_WRAPPER").map(PathBuf::from) {
+        return Ok(wrapper);
+    }
+    if let Some(wrapper) = find_webgpt_mcp_wrapper_from_current_dir()? {
+        return Ok(wrapper);
+    }
+    anyhow::bail!(
+        "webgpt text backend requires --webgpt-mcp-wrapper, WEBGPT_MCP_WRAPPER, or a sibling webgpt-mcp-checkout/scripts/webgpt-mcp.sh"
+    );
+}
+
+fn find_webgpt_mcp_wrapper_from_current_dir() -> Result<Option<PathBuf>> {
+    let mut dir = std::env::current_dir().context("failed to resolve current working directory")?;
+    loop {
+        let direct = dir.join("webgpt-mcp-checkout/scripts/webgpt-mcp.sh");
+        if direct.is_file() {
+            return Ok(Some(direct));
+        }
+        let sibling = dir.join("../webgpt-mcp-checkout/scripts/webgpt-mcp.sh");
+        if sibling.is_file() {
+            return Ok(Some(normalize_prompt_path(sibling.as_path())));
+        }
+        if !dir.pop() {
+            return Ok(None);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum WebGptConversationLane {
+    Text,
+    Image,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum WebGptImageSessionKind {
+    TurnCg,
+    ReferenceAsset,
+}
+
+impl WebGptImageSessionKind {
+    fn from_slot(slot: &str) -> Self {
+        if slot.starts_with("turn_cg:") {
+            Self::TurnCg
+        } else {
+            Self::ReferenceAsset
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::TurnCg => "turn_cg",
+            Self::ReferenceAsset => "reference_asset",
+        }
+    }
+
+    const fn binding_filename(self) -> &'static str {
+        match self {
+            Self::TurnCg => "webgpt_image_conversation_binding.json",
+            Self::ReferenceAsset => "webgpt_reference_asset_conversation_binding.json",
+        }
+    }
+
+    const fn source(self) -> &'static str {
+        match self {
+            Self::TurnCg => "webgpt_mcp_image_generation_turn_cg",
+            Self::ReferenceAsset => "webgpt_mcp_image_generation_reference_asset",
+        }
+    }
+}
+
+impl WebGptConversationLane {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Image => "image",
+        }
+    }
+
+    const fn binding_filename(self) -> &'static str {
+        match self {
+            Self::Text => "webgpt_conversation_binding.json",
+            Self::Image => "webgpt_image_conversation_binding.json",
+        }
+    }
+
+    const fn source(self) -> &'static str {
+        match self {
+            Self::Text => "webgpt_mcp_research",
+            Self::Image => "webgpt_mcp_image_generation",
+        }
+    }
+
+    const fn profile_dir_name(self) -> &'static str {
+        match self {
+            Self::Text => "text-profile",
+            Self::Image => "image-profile",
+        }
+    }
+}
+
+fn webgpt_conversation_url(conversation_id: &str) -> String {
+    format!("https://chatgpt.com/c/{conversation_id}")
+}
+
+fn webgpt_conversation_binding_path(
+    store_root: Option<&Path>,
+    world_id: &str,
+    lane: WebGptConversationLane,
+) -> Result<PathBuf> {
+    let paths = resolve_store_paths(store_root)?;
+    Ok(paths
+        .root
+        .join("worlds")
+        .join(world_id)
+        .join("agent_bridge")
+        .join(lane.binding_filename()))
+}
+
+fn load_webgpt_conversation_binding(
+    store_root: Option<&Path>,
+    world_id: &str,
+    lane: WebGptConversationLane,
+) -> Result<Option<String>> {
+    let path = webgpt_conversation_binding_path(store_root, world_id, lane)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let value = read_json_value_if_present(path.as_path())?
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    Ok(value
+        .get("conversation_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .filter(|value| !value.trim().is_empty()))
+}
+
+fn webgpt_image_conversation_binding_path(
+    store_root: Option<&Path>,
+    world_id: &str,
+    session_kind: WebGptImageSessionKind,
+) -> Result<PathBuf> {
+    let paths = resolve_store_paths(store_root)?;
+    Ok(paths
+        .root
+        .join("worlds")
+        .join(world_id)
+        .join("agent_bridge")
+        .join(session_kind.binding_filename()))
+}
+
+fn load_webgpt_image_conversation_binding(
+    store_root: Option<&Path>,
+    world_id: &str,
+    session_kind: WebGptImageSessionKind,
+) -> Result<Option<String>> {
+    let path = webgpt_image_conversation_binding_path(store_root, world_id, session_kind)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let value = read_json_value_if_present(path.as_path())?
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    Ok(value
+        .get("conversation_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .filter(|value| !value.trim().is_empty()))
+}
+
+fn save_webgpt_image_conversation_binding(
+    store_root: Option<&Path>,
+    world_id: &str,
+    session_kind: WebGptImageSessionKind,
+    conversation_id: &str,
+) -> Result<()> {
+    let path = webgpt_image_conversation_binding_path(store_root, world_id, session_kind)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::write(
+        &path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": "singulari.webgpt_image_conversation_binding.v1",
+            "world_id": world_id,
+            "lane": WebGptConversationLane::Image.as_str(),
+            "image_session_kind": session_kind.as_str(),
+            "conversation_id": conversation_id,
+            "conversation_url": webgpt_conversation_url(conversation_id),
+            "source": session_kind.source(),
+            "updated_at": Utc::now().to_rfc3339(),
+        }))?,
+    )
+    .with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn save_webgpt_conversation_binding(
+    store_root: Option<&Path>,
+    world_id: &str,
+    lane: WebGptConversationLane,
+    conversation_id: &str,
+) -> Result<()> {
+    let path = webgpt_conversation_binding_path(store_root, world_id, lane)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::write(
+        &path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": "singulari.webgpt_conversation_binding.v1",
+            "world_id": world_id,
+            "lane": lane.as_str(),
+            "conversation_id": conversation_id,
+            "conversation_url": webgpt_conversation_url(conversation_id),
+            "source": lane.source(),
+            "updated_at": Utc::now().to_rfc3339(),
+        }))?,
+    )
+    .with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn extract_json_object_text(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if serde_json::from_str::<serde_json::Value>(trimmed).is_ok_and(|value| value.is_object()) {
+        return Some(trimmed.to_owned());
+    }
+    if let Some(fenced) = extract_fenced_json_text(trimmed) {
+        return Some(fenced);
+    }
+    extract_first_balanced_json_object(trimmed)
+}
+
+fn extract_fenced_json_text(raw: &str) -> Option<String> {
+    let fence_start = raw.find("```")?;
+    let after_start = &raw[fence_start + 3..];
+    let after_header = after_start
+        .find('\n')
+        .map_or(after_start, |index| &after_start[index + 1..]);
+    let fence_end = after_header.find("```")?;
+    let candidate = after_header[..fence_end].trim();
+    if serde_json::from_str::<serde_json::Value>(candidate).is_ok_and(|value| value.is_object()) {
+        Some(candidate.to_owned())
+    } else {
+        None
+    }
+}
+
+fn extract_first_balanced_json_object(raw: &str) -> Option<String> {
+    let mut start = None;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (index, ch) in raw.char_indices() {
+        if start.is_none() {
+            if ch == '{' {
+                start = Some(index);
+                depth = 1;
+            }
+            continue;
+        }
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    let candidate = raw[start?..=index].trim();
+                    if serde_json::from_str::<serde_json::Value>(candidate)
+                        .is_ok_and(|value| value.is_object())
+                    {
+                        return Some(candidate.to_owned());
+                    }
+                    start = None;
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn commit_webgpt_agent_response(
+    store_root: Option<&Path>,
+    pending: &singulari_world::PendingAgentTurn,
+    response_path: &Path,
+) -> Result<singulari_world::CommittedAgentTurn> {
+    let raw_body = fs::read_to_string(response_path)
+        .with_context(|| format!("failed to read {}", response_path.display()))?;
+    let response = serde_json::from_str::<AgentTurnResponse>(&raw_body)
+        .with_context(|| format!("failed to parse {}", response_path.display()))?;
+    commit_agent_turn(&AgentCommitTurnOptions {
+        store_root: store_root.map(Path::to_path_buf),
+        world_id: pending.world_id.clone(),
+        response,
+    })
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "Image dispatch keeps the host imageGeneration call and visual-job completion in one process-boundary record"
@@ -2500,6 +4018,372 @@ fn dispatch_visual_job_via_app_server(
         anyhow::bail!("{error}");
     }
     Ok(record)
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "WebGPT image dispatch keeps MCP image generation, extraction, and visual-job completion in one durable record"
+)]
+fn dispatch_visual_job_via_webgpt(
+    store_root: Option<&Path>,
+    claim: &singulari_world::VisualJobClaim,
+    options: &HostWorkerOptions,
+) -> Result<WebGptImageDispatchRecord> {
+    let dispatch_dir = visual_dispatch_dir_for_world(store_root, claim.world_id.as_str())?;
+    fs::create_dir_all(&dispatch_dir)
+        .with_context(|| format!("failed to create {}", dispatch_dir.display()))?;
+    let slot_component = safe_file_component(claim.slot.as_str());
+    let claim_component = safe_file_component(claim.claim_id.as_str());
+    let record_path = dispatch_dir.join(format!(
+        "{slot_component}-{claim_component}-webgpt-image.json"
+    ));
+    let prompt_path = dispatch_dir.join(format!(
+        "{slot_component}-{claim_component}-webgpt-image-prompt.md"
+    ));
+    let result_path = dispatch_dir.join(format!(
+        "{slot_component}-{claim_component}-webgpt-image-result.json"
+    ));
+    let stdout_path = dispatch_dir.join(format!(
+        "{slot_component}-{claim_component}-webgpt-image-stdout.log"
+    ));
+    let stderr_path = dispatch_dir.join(format!(
+        "{slot_component}-{claim_component}-webgpt-image-stderr.log"
+    ));
+    let image_session_kind = WebGptImageSessionKind::from_slot(claim.slot.as_str());
+    let conversation_id = load_webgpt_image_conversation_binding(
+        store_root,
+        claim.world_id.as_str(),
+        image_session_kind,
+    )?;
+    let prompt = build_webgpt_image_generation_prompt(
+        claim.world_id.as_str(),
+        &claim.job,
+        conversation_id.as_deref(),
+        image_session_kind,
+    );
+    let reference_paths = webgpt_image_reference_paths(&claim.job)?;
+    fs::write(&prompt_path, prompt.as_bytes())
+        .with_context(|| format!("failed to write {}", prompt_path.display()))?;
+    let wrapper = resolve_webgpt_mcp_wrapper(options)?;
+    let runtime = WebGptLaneRuntime::new(WebGptConversationLane::Image, options)?;
+
+    let dispatched_at = Utc::now().to_rfc3339();
+    let claim_record = serde_json::json!({
+        "schema_version": "singulari.webgpt_image_dispatch_record.v1",
+        "status": "dispatching",
+        "world_id": claim.world_id.as_str(),
+        "slot": claim.slot.as_str(),
+        "claim_id": claim.claim_id.as_str(),
+        "mcp_wrapper": wrapper.display().to_string(),
+        "mcp_profile_dir": runtime.profile_dir.display().to_string(),
+        "mcp_cdp_port": runtime.cdp_port,
+        "mcp_cdp_url": runtime.cdp_url(),
+        "image_session_kind": image_session_kind.as_str(),
+        "reference_paths": reference_paths.as_slice(),
+        "conversation_id": conversation_id.as_deref(),
+        "prompt_path": prompt_path.display().to_string(),
+        "result_path": result_path.display().to_string(),
+        "stdout_path": stdout_path.display().to_string(),
+        "stderr_path": stderr_path.display().to_string(),
+        "destination_path": claim.job.destination_path.as_str(),
+        "dispatched_at": dispatched_at.as_str(),
+    });
+    if !write_dispatch_claim(record_path.as_path(), &claim_record)? {
+        anyhow::bail!(
+            "webgpt image dispatch already exists: record_path={}",
+            record_path.display()
+        );
+    }
+
+    let child = spawn_webgpt_image_generation(
+        wrapper.as_path(),
+        &runtime,
+        conversation_id.as_deref(),
+        reference_paths.as_slice(),
+        prompt.as_str(),
+        options.webgpt_timeout_secs,
+    )?;
+    let pid = child.id();
+    let output = child
+        .wait_with_output()
+        .context("failed to wait for webgpt image generation")?;
+    fs::write(stdout_path.as_path(), &output.stdout)
+        .with_context(|| format!("failed to write {}", stdout_path.display()))?;
+    fs::write(stderr_path.as_path(), &output.stderr)
+        .with_context(|| format!("failed to write {}", stderr_path.display()))?;
+    let mut destination_path = claim.job.destination_path.clone();
+    let mut completion_path = None;
+    let mut generated_path = None;
+    let mut generated_sha256 = None;
+    let mut generated_bytes = None;
+    let mut raw_conversation_id = None;
+    let mut error = if output.status.success() {
+        None
+    } else {
+        Some(String::from_utf8_lossy(&output.stderr).trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                Some(format!(
+                    "webgpt image generation exited with {}",
+                    output.status
+                ))
+            })
+    };
+
+    if error.is_none() {
+        let raw_result = String::from_utf8(output.stdout.clone())
+            .context("webgpt image generation stdout was not valid UTF-8")?;
+        fs::write(result_path.as_path(), raw_result.as_bytes())
+            .with_context(|| format!("failed to write {}", result_path.display()))?;
+        let result = serde_json::from_str::<serde_json::Value>(&raw_result)
+            .context("failed to parse webgpt_generate_image result JSON")?;
+        raw_conversation_id = result
+            .get("conversation_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        if let Some(raw_conversation_id) = raw_conversation_id.as_deref() {
+            save_webgpt_image_conversation_binding(
+                store_root,
+                claim.world_id.as_str(),
+                image_session_kind,
+                raw_conversation_id,
+            )?;
+        }
+        match first_webgpt_generated_image(&result) {
+            Some(image) => {
+                generated_path = image
+                    .get("path")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned);
+                generated_sha256 = image
+                    .get("sha256")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned);
+                generated_bytes = image
+                    .get("byte_len")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|value| usize::try_from(value).ok());
+            }
+            None => {
+                error = Some("webgpt_generate_image returned no images".to_owned());
+            }
+        }
+    }
+
+    if error.is_none() {
+        match generated_path.as_deref().map(PathBuf::from) {
+            Some(path) => match complete_visual_job(&CompleteVisualJobOptions {
+                store_root: store_root.map(Path::to_path_buf),
+                world_id: claim.world_id.clone(),
+                slot: claim.slot.clone(),
+                claim_id: Some(claim.claim_id.clone()),
+                generated_path: Some(path),
+            }) {
+                Ok(completion) => {
+                    destination_path = completion.destination_path;
+                    completion_path = Some(completion.completion_path);
+                }
+                Err(complete_error) => {
+                    error = Some(complete_error.to_string());
+                }
+            },
+            None => {
+                error = Some("webgpt_generate_image returned image without path".to_owned());
+            }
+        }
+    }
+
+    let status = if error.is_none() {
+        "completed"
+    } else {
+        "failed"
+    }
+    .to_owned();
+    let record = WebGptImageDispatchRecord {
+        schema_version: "singulari.webgpt_image_dispatch_record.v1",
+        status,
+        world_id: claim.world_id.clone(),
+        slot: claim.slot.clone(),
+        claim_id: Some(claim.claim_id.clone()),
+        mcp_wrapper: wrapper.display().to_string(),
+        mcp_profile_dir: runtime.profile_dir.display().to_string(),
+        mcp_cdp_port: runtime.cdp_port,
+        mcp_cdp_url: runtime.cdp_url(),
+        image_session_kind: image_session_kind.as_str().to_owned(),
+        reference_paths,
+        conversation_id,
+        raw_conversation_id,
+        pid,
+        record_path: record_path.display().to_string(),
+        prompt_path: prompt_path.display().to_string(),
+        result_path: result_path.display().to_string(),
+        stdout_path: stdout_path.display().to_string(),
+        stderr_path: stderr_path.display().to_string(),
+        generated_path,
+        generated_sha256,
+        generated_bytes,
+        destination_path,
+        completion_path,
+        dispatched_at,
+        exit_code: output.status.code(),
+        error,
+        completed_at: Utc::now().to_rfc3339(),
+    };
+    fs::write(record_path.as_path(), serde_json::to_vec_pretty(&record)?)
+        .with_context(|| format!("failed to update {}", record_path.display()))?;
+    if let Some(error) = &record.error {
+        anyhow::bail!("{error}");
+    }
+    Ok(record)
+}
+
+fn webgpt_image_reference_paths(job: &ImageGenerationJob) -> Result<Vec<String>> {
+    job.reference_paths
+        .iter()
+        .map(|raw_path| {
+            let path = PathBuf::from(raw_path);
+            if !path.is_file() {
+                anyhow::bail!(
+                    "webgpt image reference asset missing: slot={}, path={}",
+                    job.slot,
+                    path.display()
+                );
+            }
+            path.canonicalize()
+                .with_context(|| {
+                    format!(
+                        "failed to canonicalize webgpt image reference asset: slot={}, path={}",
+                        job.slot,
+                        path.display()
+                    )
+                })
+                .map(|path| path.display().to_string())
+        })
+        .collect()
+}
+
+fn spawn_webgpt_image_generation(
+    wrapper: &Path,
+    runtime: &WebGptLaneRuntime,
+    conversation_id: Option<&str>,
+    reference_paths: &[String],
+    prompt: &str,
+    timeout_secs: u64,
+) -> Result<Child> {
+    let mut arguments = serde_json::json!({
+        "prompt": prompt,
+        "max_images": 1,
+        "timeout_secs": timeout_secs.max(60),
+        "auto_recover": true,
+        "recovery_attempts": 1,
+    });
+    if let Some(object) = arguments.as_object_mut()
+        && let Some(conversation_id) = conversation_id.filter(|value| !value.trim().is_empty())
+    {
+        object.insert(
+            "conversation_id".to_owned(),
+            serde_json::json!(conversation_id),
+        );
+    }
+    if let Some(object) = arguments.as_object_mut()
+        && !reference_paths.is_empty()
+    {
+        object.insert(
+            "reference_paths".to_owned(),
+            serde_json::json!(reference_paths),
+        );
+    }
+    let mut command = Command::new(wrapper);
+    runtime.apply_to_command(&mut command);
+    command
+        .arg("client-call")
+        .arg("--wrapper")
+        .arg(wrapper)
+        .arg("--client-name")
+        .arg("singulari-world-webgpt-image")
+        .arg("--require-tool")
+        .arg("--tool")
+        .arg("webgpt_generate_image")
+        .arg("--arguments")
+        .arg(serde_json::to_string(&arguments)?)
+        .arg("--output")
+        .arg("first-text")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| {
+            format!(
+                "failed to spawn webgpt image generation: wrapper={}, lane={}, cdp_url={}, profile_dir={}",
+                wrapper.display(),
+                runtime.lane.as_str(),
+                runtime.cdp_url(),
+                runtime.profile_dir.display()
+            )
+        })
+}
+
+fn first_webgpt_generated_image(result: &serde_json::Value) -> Option<&serde_json::Value> {
+    result
+        .get("images")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|images| images.first())
+}
+
+fn build_webgpt_image_generation_prompt(
+    world_id: &str,
+    job: &ImageGenerationJob,
+    conversation_id: Option<&str>,
+    session_kind: WebGptImageSessionKind,
+) -> String {
+    let mut prompt = String::new();
+    match session_kind {
+        WebGptImageSessionKind::TurnCg => {
+            prompt.push_str(
+                "Generate exactly one full-screen visual novel scene CG for Singulari World.\n",
+            );
+            prompt.push_str(
+                "This ChatGPT conversation is the dedicated world-scoped turn-CG session for ",
+            );
+            prompt.push_str(world_id);
+            prompt.push_str(
+                ". Reuse this same session URL only for scene-CG continuity across this world.\n",
+            );
+        }
+        WebGptImageSessionKind::ReferenceAsset => {
+            prompt.push_str("Generate exactly one reference asset image for Singulari World.\n");
+            prompt.push_str("This ChatGPT conversation is the dedicated world-scoped reference-asset session for ");
+            prompt.push_str(world_id);
+            prompt.push_str(". Reuse this same session URL only for source-material continuity, not scene-CG continuity.\n");
+        }
+    }
+    if let Some(conversation_id) = conversation_id {
+        prompt.push_str("Current image session URL: ");
+        prompt.push_str(webgpt_conversation_url(conversation_id).as_str());
+        prompt.push('\n');
+    }
+    match session_kind {
+        WebGptImageSessionKind::TurnCg => {
+            prompt.push_str("Treat previous turn-CG images in this same conversation as continuity references for palette, line quality, camera language, and recurring setting motifs.\n");
+            prompt.push_str("Reference assets named below are source material only; use them as continuity references, but never render a character design sheet, contact sheet, asset board, or UI resource as the scene itself.\n");
+        }
+        WebGptImageSessionKind::ReferenceAsset => {
+            prompt.push_str("Reference assets are source material only. The resulting image must be saved to its requested asset path and must never be treated as or displayed as a turn scene CG.\n");
+            prompt.push_str("Do not use turn-CG conversation history or previous scene CGs as source instructions unless they are explicitly listed below.\n");
+        }
+    }
+    prompt.push_str("Return no prose unless ChatGPT requires a short title. Do not make a collage, grid, contact sheet, or variants.\n");
+    prompt.push_str("Image job slot: ");
+    prompt.push_str(job.slot.as_str());
+    prompt.push_str("\nDestination path: ");
+    prompt.push_str(job.destination_path.as_str());
+    prompt.push('\n');
+    prompt.push_str("Use the image prompt below as the sole visual brief.\n\n");
+    prompt.push_str(job.prompt.as_str());
+    if !job.reference_paths.is_empty() {
+        prompt.push_str("\n\nReference continuity notes: ");
+        prompt.push_str(job.reference_paths.join(", ").as_str());
+    }
+    prompt
 }
 
 fn visual_dispatch_dir_for_world(store_root: Option<&Path>, world_id: &str) -> Result<PathBuf> {
@@ -2719,15 +4603,20 @@ const AGENT_TURN_RESPONSE_SCHEMA_GUIDE: &str = r#"AgentTurnResponse 스키마:
   "relationship_updates": [],
   "hidden_state_delta": [],
   "next_choices": [
-    {"slot":1,"tag":"정로","intent":"..."},
-    {"slot":2,"tag":"관찰","intent":"..."},
-    {"slot":3,"tag":"관계","intent":"..."},
+    {"slot":1,"tag":"현재 장면에 맞춘 짧은 선택명","intent":"현재 장면 단서와 player_input에서 이어지는 구체 행동"},
+    {"slot":2,"tag":"현재 장면에 맞춘 짧은 선택명","intent":"몸, 장소, 물건, 흔적 중 이번 장면에 실제로 나온 단서를 살핀다"},
+    {"slot":3,"tag":"현재 장면에 맞춘 짧은 선택명","intent":"이번 장면에 실제로 있는 인물, 기척, 관계 신호에 반응한다"},
     {"slot":4,"tag":"안내자의 선택","intent":"맡긴다. 세부 내용은 선택 후 드러난다."},
-    {"slot":5,"tag":"기록","intent":"현재 알려진 세계 기록을 연다"},
-    {"slot":6,"tag":"흐름","intent":"..."}
+    {"slot":5,"tag":"현재 장면에 맞춘 기록 선택명","intent":"이번 장면에서 드러난 기록/단서/세계 지식을 확인한다"},
+    {"slot":6,"tag":"현재 장면에 맞춘 흐름 선택명","intent":"이번 사건의 시간 흐름이나 주변 움직임을 한 박자 멀리서 본다"},
+    {"slot":7,"tag":"자유서술","intent":"플레이어가 원하는 행동과 말, 내면 독백을 직접 서술한다"}
   ]
 }
-```"#;
+```
+- next_choices는 서사 생성과 같은 응답에서 반드시 함께 작성한다. 별도 선택지 재생성 턴을 만들지 않는다.
+- slot 1,2,3,5,6의 tag/intent는 템플릿 문구가 아니라 이번 visible_scene에서 바로 이어지는 구체 선택지여야 한다.
+- next_choices 안에는 label/preview/choices 필드를 쓰지 않는다. 오직 slot/tag/intent만 쓴다.
+- slot 번호가 기능 계약이다. tag는 UI 문구이므로 장면에 맞게 짧게 바꿔도 된다."#;
 
 fn build_codex_realtime_prompt(
     store_root: Option<&Path>,
@@ -2777,6 +4666,176 @@ fn build_codex_realtime_prompt(
     Ok(prompt)
 }
 
+const AGENT_REVIVAL_PACKET_SCHEMA_VERSION: &str = "singulari.agent_revival_packet.v1";
+const WEBGPT_REVIVAL_RECENT_EVENTS: usize = 24;
+const WEBGPT_REVIVAL_RECENT_MEMORIES: usize = 24;
+const WEBGPT_REVIVAL_CHAPTER_LIMIT: usize = 6;
+const WEBGPT_REVIVAL_ARCHIVE_LIMIT: usize = 24;
+const WEBGPT_REVIVAL_UPDATE_LIMIT: usize = 16;
+const WEBGPT_REVIVAL_SEARCH_LIMIT: usize = 8;
+
+fn build_agent_revival_packet(
+    store_root: Option<&Path>,
+    pending: &singulari_world::PendingAgentTurn,
+    engine_session_kind: &str,
+) -> Result<serde_json::Value> {
+    let store_paths = resolve_store_paths(store_root)?;
+    let world_dir = store_paths.worlds_dir.join(pending.world_id.as_str());
+    let mut resume_options = BuildResumePackOptions::new(pending.world_id.clone());
+    resume_options.store_root = store_root.map(Path::to_path_buf);
+    resume_options.recent_events = WEBGPT_REVIVAL_RECENT_EVENTS;
+    resume_options.recent_memories = WEBGPT_REVIVAL_RECENT_MEMORIES;
+    resume_options.chapter_limit = WEBGPT_REVIVAL_CHAPTER_LIMIT;
+    let resume_pack = build_resume_pack(&resume_options).with_context(|| {
+        format!(
+            "failed to build revival resume pack: world_id={}",
+            pending.world_id
+        )
+    })?;
+    let mut codex_view_options = BuildCodexViewOptions::new(pending.world_id.clone());
+    codex_view_options.store_root = store_root.map(Path::to_path_buf);
+    codex_view_options.query = Some(pending.player_input.clone());
+    codex_view_options.limit = WEBGPT_REVIVAL_ARCHIVE_LIMIT;
+    let archive_view = build_codex_view(&codex_view_options).with_context(|| {
+        format!(
+            "failed to build webgpt archive revival view: world_id={}",
+            pending.world_id
+        )
+    })?;
+    let query_recall_hits = search_world_db(
+        &world_dir,
+        pending.world_id.as_str(),
+        pending.player_input.as_str(),
+        WEBGPT_REVIVAL_SEARCH_LIMIT,
+    )
+    .with_context(|| {
+        format!(
+            "failed to build webgpt query recall hits: world_id={}, turn_id={}",
+            pending.world_id, pending.turn_id
+        )
+    })?;
+    let entity_updates = recent_entity_updates(
+        &world_dir,
+        pending.world_id.as_str(),
+        WEBGPT_REVIVAL_UPDATE_LIMIT,
+    )?;
+    let relationship_updates = recent_relationship_updates(
+        &world_dir,
+        pending.world_id.as_str(),
+        WEBGPT_REVIVAL_UPDATE_LIMIT,
+    )?;
+    Ok(serde_json::json!({
+        "schema_version": AGENT_REVIVAL_PACKET_SCHEMA_VERSION,
+        "world_id": pending.world_id,
+        "turn_id": pending.turn_id,
+        "engine_session_kind": engine_session_kind,
+        "retrieval_profile": {
+            "name": "webgpt_active_memory",
+            "purpose": "WebGPT has less transparent context-window and compaction behavior than Codex App, so host-worker proactively surfaces more player-visible continuity from world.db before each turn.",
+            "recent_events": WEBGPT_REVIVAL_RECENT_EVENTS,
+            "recent_character_memories": WEBGPT_REVIVAL_RECENT_MEMORIES,
+            "chapter_summaries": WEBGPT_REVIVAL_CHAPTER_LIMIT,
+            "archive_limit": WEBGPT_REVIVAL_ARCHIVE_LIMIT,
+            "update_limit": WEBGPT_REVIVAL_UPDATE_LIMIT,
+            "query_recall_limit": WEBGPT_REVIVAL_SEARCH_LIMIT
+        },
+        "current_turn": {
+            "schema_version": pending.schema_version,
+            "world_id": pending.world_id,
+            "turn_id": pending.turn_id,
+            "status": pending.status,
+            "player_input": pending.player_input,
+            "selected_choice": pending.selected_choice,
+            "created_at": pending.created_at,
+            "pending_ref": pending.pending_ref,
+        },
+        "memory_revival": {
+            "resume_pack": resume_pack,
+            "recent_scene_window": pending.visible_context.recent_scene,
+            "known_facts": pending.visible_context.known_facts,
+            "voice_anchors": pending.visible_context.voice_anchors,
+            "active_memory_revival": {
+                "player_visible_archive_view": archive_view,
+                "query_recall": {
+                    "query": pending.player_input,
+                    "hits": query_recall_hits
+                },
+                "recent_entity_updates": entity_updates,
+                "recent_relationship_updates": relationship_updates
+            }
+        },
+        "private_adjudication_context": pending.private_adjudication_context,
+        "output_contract": pending.output_contract,
+        "source_of_truth_policy": {
+            "world_state_source": "world_store",
+            "turn_source": "current_turn",
+            "continuity_source": "memory_revival.resume_pack + memory_revival.active_memory_revival",
+            "session_context_use": ["prose rhythm", "immediate emotional continuity", "recent dialogue cadence"],
+            "session_context_must_not_supply": ["world facts", "current player input", "hidden adjudication", "output contract"],
+            "conflict_rule": "revival_packet_wins"
+        }
+    }))
+}
+
+fn build_webgpt_turn_prompt(
+    store_root: Option<&Path>,
+    pending: &singulari_world::PendingAgentTurn,
+) -> Result<String> {
+    let revival_packet = build_agent_revival_packet(store_root, pending, "webgpt_project_session")?;
+    let revival_packet = serde_json::to_string_pretty(&revival_packet)
+        .context("failed to serialize webgpt revival packet")?;
+    let narrative_budget = &pending.output_contract.narrative_budget;
+    Ok(format!(
+        r#"Singulari World web frontend에서 pending turn 하나가 들어왔어. 너는 WebGPT narrative engine adapter다.
+
+서사 출력 지시:
+- 이번 턴 서사 목표: {level_label}. 기본 선택 턴이면 {standard_blocks}문단 / 약 {target_chars}자까지 충분히 써라. 큰 사건이면 {major_blocks}문단 / 약 {major_target_chars}자까지 확장해라.
+- text_blocks는 한 항목을 너무 길게 뭉치지 말고, 장면 박자마다 별도 문단으로 나눠라.
+- 짧은 로그나 요약이 아니라 한국어 VN prose로 써라. 장면, 감각, 행동, 반응, 여운을 각각 분리해서 쌓아라.
+
+역할:
+- 너는 Singulari World의 trusted narrative agent다.
+- 플레이어에게 다시 묻지 말고, 아래 revival packet만 보고 바로 서사 턴을 작성한다.
+- hidden/private context는 판정에만 쓰고, visible_scene/canon_event/choice text에는 절대 누출하지 않는다.
+- 출력 서사는 한국어 VN prose다. 대화, 제스처, 말버릇을 살리고, 게임식 수치 계산처럼 보이게 쓰지 않는다.
+- 출력량은 revival packet의 output_contract.narrative_level과 narrative_budget을 따른다. 레벨 간 차이는 확연해야 한다.
+- 레벨 1은 표준 VN 밀도, 레벨 2는 장면 확장 밀도, 레벨 3은 장편 연재 밀도다. 레벨 2/3에서는 같은 사건도 감각, 행동, 반응, 여운, 압박을 더 길게 쌓는다.
+- player_input이 "세계 개막"이면 그것은 선택지가 아니라 시드에서 첫 서사를 여는 bootstrap turn이다.
+- 시드나 visible facts에 명시되지 않은 장르 문법을 추론해서 주입하지 마라. 특히 현대인 전생, 환생, 빙의, 회귀, 이세계 전이, 시스템/치트/상태창은 seed premise나 player-visible canon에 명시된 경우에만 쓴다.
+- protagonist가 낯선 환경을 모른다는 사실만으로 현대 기억, 병원/전기/주소 같은 현대 대비, 전생물 독백, 이름 상실 클리셰를 만들지 마라.
+- slot 4는 항상 안내자의 선택이고 preview는 숨긴다: "맡긴다. 세부 내용은 선택 후 드러난다."
+- slot 7은 항상 자유서술이며 inline prose를 요구하는 선택지로 둔다.
+- 이 WebGPT conversation의 이전 turn들은 말맛, 직전 감정선, 장면 리듬을 잇는 working context다.
+- ChatGPT Project의 새 세션이나 기존 conversation history는 기억 저장소가 아니다. 세계 연속성은 revival packet으로만 회생한다.
+- WebGPT는 기억 회생을 더 적극적으로 한다. memory_revival.active_memory_revival의 Archive View, query recall, recent entity/relationship updates를 먼저 훑고 이번 player_input과 이어지는 장면 압력을 반영한다.
+- 세계의 사실/상태/source of truth는 아래 revival packet과 world store다. 웹 채팅 UI나 이전 MCP tool 결과를 source of truth로 쓰지 마라.
+- conversation/project context가 compact 되었거나 revival packet과 충돌하면 revival packet을 우선한다.
+- 웹 검색, 외부 사이트 탐색, repo 탐색, 소스 파일 읽기를 하지 마라. 필요한 스키마와 revival packet은 이 프롬프트 안에 있다.
+
+{agent_schema}
+
+revival packet JSON:
+```json
+{revival_packet}
+```
+
+출력:
+- AgentTurnResponse JSON 하나만 반환한다.
+- Markdown fence, 설명문, 도입문 없이 JSON 본문만 반환한다.
+- world_id는 "{world_id}", turn_id는 "{turn_id}"와 정확히 같아야 한다.
+"#,
+        level_label = narrative_budget.level_label,
+        standard_blocks = narrative_budget.standard_choice_turn_blocks,
+        target_chars = narrative_budget.target_chars,
+        major_blocks = narrative_budget.major_turn_blocks,
+        major_target_chars = narrative_budget.major_target_chars,
+        agent_schema = AGENT_TURN_RESPONSE_SCHEMA_GUIDE,
+        revival_packet = revival_packet,
+        world_id = pending.world_id,
+        turn_id = pending.turn_id,
+    ))
+}
+
 fn build_bounded_packet_realtime_prompt(
     pending: &singulari_world::PendingAgentTurn,
     response_path: &Path,
@@ -2806,7 +4865,7 @@ fn build_bounded_packet_realtime_prompt(
 - slot 4는 항상 안내자의 선택이고 preview는 숨긴다: "맡긴다. 세부 내용은 선택 후 드러난다."
 - slot 7은 항상 자유서술이며 inline prose를 요구하는 선택지로 둔다.
 - 소스 파일을 읽거나 repo를 탐색하지 마라. 필요한 스키마와 pending packet은 이 프롬프트 안에 있다.
-- 허용된 외부 명령은 마지막 commit 명령뿐이다. commit이 스키마 에러를 내면 그 에러만 보고 JSON을 고쳐 한 번 더 commit한다.
+- 허용된 외부 명령은 마지막 commit 명령뿐이다. commit이 next_choices 스키마 에러를 내면 visible_scene을 다시 쓰지 말고 기존 JSON의 next_choices만 고쳐 한 번 더 commit한다.
 
 {agent_schema}
 
@@ -2865,14 +4924,18 @@ fn build_native_thread_realtime_prompt(
 - slot 4는 항상 안내자의 선택이고 preview는 숨긴다: "맡긴다. 세부 내용은 선택 후 드러난다."
 - slot 7은 항상 자유서술이며 inline prose를 요구하는 선택지로 둔다.
 - 소스 파일을 읽거나 repo를 탐색하지 마라. 필요한 상태와 응답 계약은 이 프롬프트 안에 있다.
-- 허용된 외부 명령은 마지막 commit 명령뿐이다. commit이 스키마 에러를 내면 그 에러만 보고 JSON을 고쳐 한 번 더 commit한다.
+- 허용된 외부 명령은 마지막 commit 명령뿐이다. commit이 next_choices 스키마 에러를 내면 visible_scene을 다시 쓰지 말고 기존 JSON의 next_choices만 고쳐 한 번 더 commit한다.
 
 응답 JSON 계약:
 - schema_version은 "singulari.agent_turn_response.v1"이다.
 - world_id와 turn_id는 아래 고정값과 정확히 같아야 한다.
-- visible_scene은 NarrativeScene이며, 최소한 text_blocks와 choices를 포함한다.
-- choices는 1..7 슬롯을 유지한다. slot 4 preview는 숨김 문구, slot 7은 자유서술 안내다.
-- hidden_truth는 visible_scene, canon_event, choices, final chat text에 쓰지 않는다.
+- visible_scene은 NarrativeScene이며, text_blocks를 포함한다.
+- next_choices는 반드시 1..7 슬롯을 모두 포함한다. 이 필드가 비면 commit이 실패한다.
+- next_choices의 1,2,3,5,6번은 현재 장면 단서와 player_input에 맞춰 새로 써라. 템플릿 기본 선택지를 그대로 쓰면 commit이 실패한다.
+- next_choices는 visible_scene과 같은 응답에서 함께 만든다. 별도 선택지 생성 턴을 기다리지 않는다.
+- visible_scene 안에 choices를 넣지 말고, top-level next_choices에 slot/tag/intent만 넣는다. label/preview 필드는 commit 스키마가 아니다.
+- slot 4 preview는 숨김 문구, slot 7은 자유서술 안내다.
+- hidden_truth는 visible_scene, canon_event, next_choices, final chat text에 쓰지 않는다.
 - adjudication, canon_event, entity_updates, relationship_updates는 필요한 경우에만 넣는다.
 - 최종 채팅 답변에는 JSON 본문을 붙이지 않는다.
 
@@ -3133,5 +5196,399 @@ mod tests {
         assert_eq!(hint[0], "middle");
         assert!(hint[1].chars().count() < recent_scene[2].chars().count());
         assert!(hint[1].ends_with(" ..."));
+    }
+
+    #[test]
+    fn webgpt_answer_json_extractor_accepts_fenced_response() -> anyhow::Result<()> {
+        let raw = r#"좋아.
+
+```json
+{"schema_version":"singulari.agent_turn_response.v1","world_id":"stw","turn_id":"turn_0001"}
+```
+"#;
+        let Some(extracted) = extract_json_object_text(raw) else {
+            anyhow::bail!("json should be extracted");
+        };
+        let value: serde_json::Value = serde_json::from_str(extracted.as_str())?;
+        assert_eq!(value["world_id"], serde_json::json!("stw"));
+        Ok(())
+    }
+
+    #[test]
+    fn webgpt_research_arguments_reuse_bound_conversation() {
+        let arguments = build_webgpt_research_arguments(
+            "prompt",
+            Some("conv-123"),
+            Some("gpt-5.5"),
+            Some("high"),
+            12,
+        );
+        assert_eq!(arguments["conversation_id"], serde_json::json!("conv-123"));
+        assert!(arguments.get("new_conversation").is_none());
+        assert_eq!(arguments["model"], serde_json::json!("gpt-5.5"));
+        assert_eq!(arguments["reasoning_level"], serde_json::json!("high"));
+        assert_eq!(arguments["timeout_secs"], serde_json::json!(60));
+    }
+
+    #[test]
+    fn webgpt_conversation_bindings_are_world_scoped_per_lane() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = temp.path().join("store");
+        save_webgpt_conversation_binding(
+            Some(store.as_path()),
+            "stw_lane",
+            WebGptConversationLane::Text,
+            "text-conv",
+        )?;
+        save_webgpt_conversation_binding(
+            Some(store.as_path()),
+            "stw_lane",
+            WebGptConversationLane::Image,
+            "image-conv",
+        )?;
+
+        assert_eq!(
+            load_webgpt_conversation_binding(
+                Some(store.as_path()),
+                "stw_lane",
+                WebGptConversationLane::Text
+            )?,
+            Some("text-conv".to_owned())
+        );
+        assert_eq!(
+            load_webgpt_conversation_binding(
+                Some(store.as_path()),
+                "stw_lane",
+                WebGptConversationLane::Image
+            )?,
+            Some("image-conv".to_owned())
+        );
+
+        let text_binding = std::fs::read_to_string(
+            store
+                .join("worlds/stw_lane/agent_bridge")
+                .join(WebGptConversationLane::Text.binding_filename()),
+        )?;
+        let image_binding = std::fs::read_to_string(
+            store
+                .join("worlds/stw_lane/agent_bridge")
+                .join(WebGptConversationLane::Image.binding_filename()),
+        )?;
+        assert!(text_binding.contains("\"lane\": \"text\""));
+        assert!(text_binding.contains("https://chatgpt.com/c/text-conv"));
+        assert!(image_binding.contains("\"lane\": \"image\""));
+        assert!(image_binding.contains("https://chatgpt.com/c/image-conv"));
+        Ok(())
+    }
+
+    #[test]
+    fn webgpt_image_conversation_bindings_separate_turn_cg_from_reference_assets()
+    -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = temp.path().join("store");
+        save_webgpt_image_conversation_binding(
+            Some(store.as_path()),
+            "stw_visual_sessions",
+            WebGptImageSessionKind::TurnCg,
+            "turn-cg-conv",
+        )?;
+        save_webgpt_image_conversation_binding(
+            Some(store.as_path()),
+            "stw_visual_sessions",
+            WebGptImageSessionKind::ReferenceAsset,
+            "asset-conv",
+        )?;
+
+        assert_eq!(
+            load_webgpt_image_conversation_binding(
+                Some(store.as_path()),
+                "stw_visual_sessions",
+                WebGptImageSessionKind::TurnCg
+            )?,
+            Some("turn-cg-conv".to_owned())
+        );
+        assert_eq!(
+            load_webgpt_image_conversation_binding(
+                Some(store.as_path()),
+                "stw_visual_sessions",
+                WebGptImageSessionKind::ReferenceAsset
+            )?,
+            Some("asset-conv".to_owned())
+        );
+
+        let bridge_dir = store.join("worlds/stw_visual_sessions/agent_bridge");
+        let turn_cg_binding =
+            std::fs::read_to_string(bridge_dir.join("webgpt_image_conversation_binding.json"))?;
+        let asset_binding = std::fs::read_to_string(
+            bridge_dir.join("webgpt_reference_asset_conversation_binding.json"),
+        )?;
+        assert!(turn_cg_binding.contains("\"image_session_kind\": \"turn_cg\""));
+        assert!(turn_cg_binding.contains("https://chatgpt.com/c/turn-cg-conv"));
+        assert!(asset_binding.contains("\"image_session_kind\": \"reference_asset\""));
+        assert!(asset_binding.contains("https://chatgpt.com/c/asset-conv"));
+        Ok(())
+    }
+
+    #[test]
+    fn webgpt_lane_runtime_defaults_are_isolated() -> anyhow::Result<()> {
+        let options = HostWorkerOptions {
+            interval_ms: 750,
+            once: true,
+            codex_thread_id: None,
+            text_backend: HostWorkerTextBackend::Webgpt,
+            visual_backend: HostWorkerVisualBackend::Webgpt,
+            codex_bin: None,
+            codex_app_server_url: None,
+            codex_thread_context_mode: CodexThreadContextMode::NativeThread,
+            node_bin: None,
+            webgpt_turn_command: None,
+            webgpt_mcp_wrapper: None,
+            webgpt_model: None,
+            webgpt_reasoning_level: None,
+            webgpt_text_profile_dir: Some("/tmp/singulari-webgpt-text".into()),
+            webgpt_image_profile_dir: Some("/tmp/singulari-webgpt-image".into()),
+            webgpt_text_cdp_port: DEFAULT_WEBGPT_TEXT_CDP_PORT,
+            webgpt_image_cdp_port: DEFAULT_WEBGPT_IMAGE_CDP_PORT,
+            webgpt_timeout_secs: 900,
+        };
+
+        let text = WebGptLaneRuntime::new(WebGptConversationLane::Text, &options)?;
+        let image = WebGptLaneRuntime::new(WebGptConversationLane::Image, &options)?;
+
+        assert_eq!(text.cdp_port, 9238);
+        assert_eq!(image.cdp_port, 9239);
+        assert_ne!(text.cdp_url(), image.cdp_url());
+        assert_ne!(text.profile_dir, image.profile_dir);
+        ensure_webgpt_lane_runtime_isolated(&options)?;
+        Ok(())
+    }
+
+    #[test]
+    fn webgpt_lane_runtime_rejects_shared_port() -> anyhow::Result<()> {
+        let options = HostWorkerOptions {
+            interval_ms: 750,
+            once: true,
+            codex_thread_id: None,
+            text_backend: HostWorkerTextBackend::Webgpt,
+            visual_backend: HostWorkerVisualBackend::Webgpt,
+            codex_bin: None,
+            codex_app_server_url: None,
+            codex_thread_context_mode: CodexThreadContextMode::NativeThread,
+            node_bin: None,
+            webgpt_turn_command: None,
+            webgpt_mcp_wrapper: None,
+            webgpt_model: None,
+            webgpt_reasoning_level: None,
+            webgpt_text_profile_dir: Some("/tmp/singulari-webgpt-text".into()),
+            webgpt_image_profile_dir: Some("/tmp/singulari-webgpt-image".into()),
+            webgpt_text_cdp_port: 9238,
+            webgpt_image_cdp_port: 9238,
+            webgpt_timeout_secs: 900,
+        };
+
+        let Err(error) = ensure_webgpt_lane_runtime_isolated(&options) else {
+            anyhow::bail!("shared WebGPT CDP ports reached dispatch");
+        };
+        assert!(error.to_string().contains("distinct CDP ports"));
+        Ok(())
+    }
+
+    #[test]
+    fn webgpt_turn_cg_prompt_reuses_turn_cg_session_url() {
+        let job = ImageGenerationJob {
+            tool: "codex_app.image.generate".to_owned(),
+            codex_app_call: singulari_world::CodexAppImageGenerationCall {
+                capability: "image_generation".to_owned(),
+                slot: "turn_cg:turn_0002".to_owned(),
+                prompt: "draw the scene".to_owned(),
+                destination_path: "/tmp/turn_0002.png".to_owned(),
+                reference_paths: vec!["/tmp/char.png".to_owned()],
+                overwrite: false,
+            },
+            slot: "turn_cg:turn_0002".to_owned(),
+            prompt: "draw the scene".to_owned(),
+            destination_path: "/tmp/turn_0002.png".to_owned(),
+            reference_asset_urls: Vec::new(),
+            reference_paths: vec!["/tmp/char.png".to_owned()],
+            overwrite: false,
+            register_policy: "test".to_owned(),
+        };
+        let prompt = build_webgpt_image_generation_prompt(
+            "stw_visual",
+            &job,
+            Some("image-conv"),
+            WebGptImageSessionKind::TurnCg,
+        );
+
+        assert!(prompt.contains("dedicated world-scoped turn-CG session for stw_visual"));
+        assert!(prompt.contains("https://chatgpt.com/c/image-conv"));
+        assert!(prompt.contains("previous turn-CG images in this same conversation"));
+        assert!(prompt.contains("never render a character design sheet"));
+        assert!(prompt.contains("Image job slot: turn_cg:turn_0002"));
+        assert!(prompt.contains("Reference continuity notes: /tmp/char.png"));
+    }
+
+    #[test]
+    fn webgpt_reference_asset_prompt_is_not_a_scene_cg_prompt() {
+        let job = ImageGenerationJob {
+            tool: "codex_app.image.generate".to_owned(),
+            codex_app_call: singulari_world::CodexAppImageGenerationCall {
+                capability: "image_generation".to_owned(),
+                slot: "character_sheet:char:protagonist".to_owned(),
+                prompt: "draw the character sheet".to_owned(),
+                destination_path: "/tmp/char_protagonist.png".to_owned(),
+                reference_paths: Vec::new(),
+                overwrite: false,
+            },
+            slot: "character_sheet:char:protagonist".to_owned(),
+            prompt: "draw the character sheet".to_owned(),
+            destination_path: "/tmp/char_protagonist.png".to_owned(),
+            reference_asset_urls: Vec::new(),
+            reference_paths: Vec::new(),
+            overwrite: false,
+            register_policy: "test".to_owned(),
+        };
+        let prompt = build_webgpt_image_generation_prompt(
+            "stw_visual",
+            &job,
+            Some("asset-conv"),
+            WebGptImageSessionKind::ReferenceAsset,
+        );
+
+        assert!(prompt.contains("reference asset image"));
+        assert!(prompt.contains("dedicated world-scoped reference-asset session"));
+        assert!(prompt.contains("must never be treated as or displayed as a turn scene CG"));
+        assert!(prompt.contains("Do not use turn-CG conversation history"));
+        assert!(prompt.contains("Image job slot: character_sheet:char:protagonist"));
+        assert!(!prompt.contains("full-screen visual novel scene CG"));
+    }
+
+    #[test]
+    fn webgpt_image_reference_paths_canonicalize_assets() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let reference = temp.path().join("char.png");
+        std::fs::write(&reference, b"png fixture")?;
+        let job = ImageGenerationJob {
+            tool: "codex_app.image.generate".to_owned(),
+            codex_app_call: singulari_world::CodexAppImageGenerationCall {
+                capability: "image_generation".to_owned(),
+                slot: "turn_cg:turn_0002".to_owned(),
+                prompt: "draw the scene".to_owned(),
+                destination_path: "/tmp/turn_0002.png".to_owned(),
+                reference_paths: vec![reference.display().to_string()],
+                overwrite: false,
+            },
+            slot: "turn_cg:turn_0002".to_owned(),
+            prompt: "draw the scene".to_owned(),
+            destination_path: "/tmp/turn_0002.png".to_owned(),
+            reference_asset_urls: Vec::new(),
+            reference_paths: vec![reference.display().to_string()],
+            overwrite: false,
+            register_policy: "test".to_owned(),
+        };
+
+        assert_eq!(
+            webgpt_image_reference_paths(&job)?,
+            vec![reference.canonicalize()?.display().to_string()]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn webgpt_image_reference_paths_fail_loud_when_asset_is_missing() -> anyhow::Result<()> {
+        let job = ImageGenerationJob {
+            tool: "codex_app.image.generate".to_owned(),
+            codex_app_call: singulari_world::CodexAppImageGenerationCall {
+                capability: "image_generation".to_owned(),
+                slot: "turn_cg:turn_0002".to_owned(),
+                prompt: "draw the scene".to_owned(),
+                destination_path: "/tmp/turn_0002.png".to_owned(),
+                reference_paths: vec!["/tmp/singulari-missing-reference.png".to_owned()],
+                overwrite: false,
+            },
+            slot: "turn_cg:turn_0002".to_owned(),
+            prompt: "draw the scene".to_owned(),
+            destination_path: "/tmp/turn_0002.png".to_owned(),
+            reference_asset_urls: Vec::new(),
+            reference_paths: vec!["/tmp/singulari-missing-reference.png".to_owned()],
+            overwrite: false,
+            register_policy: "test".to_owned(),
+        };
+
+        let Err(error) = webgpt_image_reference_paths(&job) else {
+            anyhow::bail!("missing reference asset reached image dispatch");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("webgpt image reference asset missing")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn webgpt_prompt_carries_realtime_agent_contract() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(
+            &seed_path,
+            r#"
+schema_version: singulari.world_seed.v1
+world_id: stw_contract
+title: "webgpt contract test"
+premise:
+  genre: "fantasy"
+  protagonist: "modern reincarnated protagonist"
+"#,
+        )?;
+        init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+        let pending = enqueue_agent_turn(&AgentSubmitTurnOptions {
+            store_root: Some(store.clone()),
+            world_id: "stw_contract".to_owned(),
+            input: "2".to_owned(),
+            narrative_level: None,
+        })?;
+        let prompt = build_webgpt_turn_prompt(Some(store.as_path()), &pending)?;
+
+        for required in [
+            "너는 Singulari World의 trusted narrative agent다.",
+            "출력 서사는 한국어 VN prose다. 대화, 제스처, 말버릇을 살리고",
+            "레벨 1은 표준 VN 밀도, 레벨 2는 장면 확장 밀도, 레벨 3은 장편 연재 밀도다.",
+            "시드나 visible facts에 명시되지 않은 장르 문법을 추론해서 주입하지 마라.",
+            "현대인 전생, 환생, 빙의, 회귀, 이세계 전이, 시스템/치트/상태창은 seed premise나 player-visible canon에 명시된 경우에만 쓴다.",
+            "병원/전기/주소 같은 현대 대비",
+            "이 WebGPT conversation의 이전 turn들은 말맛, 직전 감정선, 장면 리듬을 잇는 working context다.",
+            "conversation/project context가 compact 되었거나 revival packet과 충돌하면 revival packet을 우선한다.",
+            "WebGPT는 기억 회생을 더 적극적으로 한다.",
+            "웹 검색, 외부 사이트 탐색, repo 탐색, 소스 파일 읽기를 하지 마라.",
+            "\"schema_version\": \"singulari.agent_revival_packet.v1\"",
+            "\"retrieval_profile\"",
+            "\"name\": \"webgpt_active_memory\"",
+            "\"memory_revival\"",
+            "\"resume_pack\"",
+            "\"active_memory_revival\"",
+            "\"player_visible_archive_view\"",
+            "\"query_recall\"",
+            "\"recent_entity_updates\"",
+            "\"recent_relationship_updates\"",
+            "\"source_of_truth_policy\"",
+            "\"continuity_source\": \"memory_revival.resume_pack + memory_revival.active_memory_revival\"",
+            "\"conflict_rule\": \"revival_packet_wins\"",
+            "AgentTurnResponse 스키마:",
+            "\"schema_version\": \"singulari.agent_turn_response.v1\"",
+            "{\"slot\":7,\"tag\":\"자유서술\"",
+            "world_id는 \"stw_contract\", turn_id는 \"turn_0001\"와 정확히 같아야 한다.",
+        ] {
+            assert!(
+                prompt.contains(required),
+                "webgpt prompt missing realtime contract: {required}"
+            );
+        }
+        Ok(())
     }
 }

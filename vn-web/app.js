@@ -75,6 +75,7 @@ const els = {
   previousWorldPanel: document.getElementById("previousWorldPanel"),
   newWorldTitle: document.getElementById("newWorldTitle"),
   newWorldSeed: document.getElementById("newWorldSeed"),
+  newWorldBackendOptions: Array.from(document.querySelectorAll("[data-backend-lane]")),
   startNewWorldButton: document.getElementById("startNewWorldButton"),
   worldList: document.getElementById("worldList"),
   launchStatus: document.getElementById("launchStatus"),
@@ -86,6 +87,9 @@ const els = {
   turnId: document.getElementById("turnId"),
   generateTurnCgButton: document.getElementById("generateTurnCgButton"),
   turnCgStatus: document.getElementById("turnCgStatus"),
+  runtimeLights: document.getElementById("runtimeLights"),
+  runtimeLightText: document.querySelector("[data-runtime-light='text']"),
+  runtimeLightVisual: document.querySelector("[data-runtime-light='visual']"),
   locationId: document.getElementById("locationId"),
   eventId: document.getElementById("eventId"),
   outcomeBadge: document.getElementById("outcomeBadge"),
@@ -216,17 +220,28 @@ function renderPacket(packet) {
   applyPacketVisualState(packet);
   els.shell.classList.remove("is-loading", "is-awaiting-agent");
 
-  state.storyLines = buildStoryLines(packet);
-  state.visibleLineCount = state.storyLines.length ? 1 : 0;
+  const initialWaiting = isInitialAgentWaitingPacket(packet);
+  state.awaitingAgent = initialWaiting;
+  state.storyLines = initialWaiting ? AGENT_WAITING_COPY.initial : buildStoryLines(packet);
+  state.visibleLineCount = initialWaiting ? state.storyLines.length : state.storyLines.length ? 1 : 0;
   state.choicesRevealed = false;
+  if (initialWaiting) {
+    els.outcomeBadge.textContent = AGENT_WAITING_BADGE;
+    els.shell.classList.add("is-loading", "is-awaiting-agent");
+  }
   renderStoryProgress();
 
-  renderChoices(packet);
+  if (initialWaiting) {
+    els.choices.replaceChildren();
+    els.choicePanel.hidden = true;
+  } else {
+    renderChoices(packet);
+  }
   renderCurrentTextLog();
   state.logPage = 0;
 
   const firstChoice = packet.choices?.find((choice) => !choice.requires_inline_text);
-  if (firstChoice) {
+  if (!initialWaiting && firstChoice) {
     selectCommand(firstChoice.command_template);
   }
   renderCodexSurface(packet);
@@ -237,6 +252,11 @@ function renderPacket(packet) {
   refreshCgGallery();
   scheduleRuntimeStatusPoll();
   startVisualJobPolling();
+}
+
+function isInitialAgentWaitingPacket(packet) {
+  return packet?.turn_id === "turn_0000"
+    && packet?.scene?.status === AGENT_WAITING_BADGE;
 }
 
 async function hydrateWorldLauncher() {
@@ -270,6 +290,9 @@ function bindLauncher() {
   els.newWorldModeButton.addEventListener("click", () => showLaunchMode("new"));
   els.previousWorldModeButton.addEventListener("click", () => showLaunchMode("previous"));
   els.startNewWorldButton.addEventListener("click", startNewWorld);
+  for (const option of els.newWorldBackendOptions) {
+    option.addEventListener("change", () => selectBackendOption(option));
+  }
 }
 
 function showLaunchOverlay(mode) {
@@ -367,10 +390,16 @@ async function startNewWorld() {
   setLaunchStatus("세계의 흐름에서 첫 장면을 건져올리는 중...");
   try {
     const title = els.newWorldTitle.value.trim();
+    const backendSelection = selectedNewWorldBackends();
     const response = await fetchJson(newWorldApiUrl, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ seed_text: seedText, title: title || null }),
+      body: JSON.stringify({
+        seed_text: seedText,
+        title: title || null,
+        text_backend: backendSelection.text,
+        visual_backend: backendSelection.visual,
+      }),
     });
     await applyWorldSwitchResponse(response);
   } catch (error) {
@@ -378,6 +407,39 @@ async function startNewWorld() {
   } finally {
     state.busy = false;
   }
+}
+
+function selectBackendOption(option) {
+  const lane = option.dataset.backendLane;
+  if (!lane) {
+    return;
+  }
+  const laneOptions = els.newWorldBackendOptions.filter(
+    (candidate) => candidate.dataset.backendLane === lane,
+  );
+  if (option.checked) {
+    for (const candidate of laneOptions) {
+      candidate.checked = candidate === option;
+    }
+    return;
+  }
+  option.checked = true;
+}
+
+function selectedNewWorldBackends() {
+  const text = selectedBackendForLane("text");
+  const visual = selectedBackendForLane("visual");
+  return { text, visual };
+}
+
+function selectedBackendForLane(lane) {
+  const selected = els.newWorldBackendOptions.find(
+    (option) => option.dataset.backendLane === lane && option.checked,
+  );
+  if (!selected) {
+    throw new Error(`missing selected backend for lane=${lane}`);
+  }
+  return selected.value;
 }
 
 async function saveCurrentWorld() {
@@ -1034,30 +1096,65 @@ function renderRuntimeStatus(status) {
   if (!els.runtimeStatusPanel) {
     return;
   }
+  renderRuntimeLights(status);
   els.runtimeStatusPanel.replaceChildren();
+  const selection = status?.backend_selection || {};
   const narrative = status?.narrative || {};
   const visual = status?.visual || {};
   els.runtimeStatusPanel.append(
-    runtimeStatusPill("서사", narrative.label || "Codex 연결 필요", narrative.status),
-    runtimeStatusPill("CG", visual.label || "Codex 이미지 연결 필요", visual.status),
+    runtimeStatusPill("서사", narrative, selection.text_backend),
+    runtimeStatusPill("CG", visual, selection.visual_backend),
   );
   if (els.runtimeDetails) {
     els.runtimeDetails.textContent = JSON.stringify(status?.details || {}, null, 2);
   }
 }
 
-function runtimeStatusPill(label, value, status) {
+function renderRuntimeLights(status) {
+  renderRuntimeLight(els.runtimeLightText, "TXT", status?.narrative);
+  renderRuntimeLight(els.runtimeLightVisual, "IMG", status?.visual);
+}
+
+function renderRuntimeLight(element, label, lane) {
+  if (!element) {
+    return;
+  }
+  const backend = lane?.backend || "unassigned";
+  const online = Boolean(lane?.online);
+  const status = lane?.status || "unknown";
+  element.dataset.status = online ? "online" : status;
+  element.textContent = label;
+  element.title = `${label} · ${backend} · ${online ? "online" : status}`;
+}
+
+function runtimeStatusPill(label, lane, selectedBackend) {
   const pill = document.createElement("article");
   pill.className = "runtime-status-pill";
+  const status = lane?.status || "unknown";
   if (status) {
     pill.dataset.status = status;
+  }
+  if (lane?.online) {
+    pill.dataset.online = "true";
   }
   const key = document.createElement("span");
   key.textContent = label;
   const text = document.createElement("strong");
-  text.textContent = value;
-  pill.append(key, text);
+  text.textContent = lane?.label || "상태 없음";
+  const meta = document.createElement("small");
+  meta.textContent = backendRuntimeSummary(lane, selectedBackend);
+  const detail = document.createElement("em");
+  detail.textContent = lane?.detail || "세부 상태 없음";
+  pill.append(key, text, meta, detail);
   return pill;
+}
+
+function backendRuntimeSummary(lane, selectedBackend) {
+  const backend = lane?.backend || selectedBackend || "unassigned";
+  const online = lane?.online ? "online" : "offline";
+  const endpoint = lane?.endpoint ? ` · ${lane.endpoint}` : "";
+  const latest = lane?.latest_dispatch_status ? ` · latest ${lane.latest_dispatch_status}` : "";
+  return `${backend} · ${online}${endpoint}${latest}`;
 }
 
 function renderScan(scanTargets) {
