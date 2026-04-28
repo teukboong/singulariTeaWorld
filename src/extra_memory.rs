@@ -11,8 +11,11 @@ use std::path::{Path, PathBuf};
 pub const EXTRA_TRACE_SCHEMA_VERSION: &str = "singulari.extra_trace.v1";
 pub const REMEMBERED_EXTRAS_SCHEMA_VERSION: &str = "singulari.remembered_extras.v1";
 pub const REMEMBERED_EXTRA_SCHEMA_VERSION: &str = "singulari.remembered_extra.v1";
+pub const EXTRA_MEMORY_PROJECTION_RECORD_SCHEMA_VERSION: &str =
+    "singulari.extra_memory_projection.v1";
 pub const EXTRA_TRACES_FILENAME: &str = "extra_traces.jsonl";
 pub const REMEMBERED_EXTRAS_FILENAME: &str = "remembered_extras.json";
+pub const EXTRA_MEMORY_PROJECTIONS_FILENAME: &str = "extra_memory_projections.jsonl";
 
 const REMEMBERED_EXTRA_LIMIT: usize = 7;
 const RECENT_TRACE_LIMIT: usize = 5;
@@ -126,10 +129,34 @@ pub struct LocalFaceEntry {
 
 #[derive(Debug, Clone)]
 pub struct ExtraMemoryProjectionPlan {
+    world_id: String,
+    turn_id: String,
     traces_path: PathBuf,
     remembered_extras_path: PathBuf,
+    projection_records_path: PathBuf,
     traces_to_append: Vec<ExtraTrace>,
     remembered_store: RememberedExtrasStore,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtraMemoryProjectionStatus {
+    Committed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtraMemoryProjectionRecord {
+    pub schema_version: String,
+    pub world_id: String,
+    pub turn_id: String,
+    pub status: ExtraMemoryProjectionStatus,
+    pub traces_planned: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remembered_extras_planned: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub recorded_at: String,
 }
 
 /// Preflight agent-authored extra contact records before the turn state advances.
@@ -164,8 +191,11 @@ pub fn compile_extra_memory_projection(
 
     store.updated_at = Utc::now().to_rfc3339();
     Ok(ExtraMemoryProjectionPlan {
+        world_id: world_id.to_owned(),
+        turn_id: turn_id.to_owned(),
         traces_path: extra_traces_path(world_dir),
         remembered_extras_path: remembered_extras_path(world_dir),
+        projection_records_path: extra_memory_projections_path(world_dir),
         traces_to_append,
         remembered_store: store,
     })
@@ -181,6 +211,49 @@ pub fn commit_extra_memory_projection(plan: &ExtraMemoryProjectionPlan) -> Resul
         append_jsonl(&plan.traces_path, trace)?;
     }
     write_json(&plan.remembered_extras_path, &plan.remembered_store)
+}
+
+/// Persist a preflighted extra-memory projection and append its terminal status.
+///
+/// # Errors
+///
+/// Returns an error only when the terminal status record itself cannot be
+/// written. Projection write failures are captured as `failed` records so the
+/// already-committed turn can close and projection repair can handle the fault.
+pub fn commit_extra_memory_projection_terminal(
+    plan: &ExtraMemoryProjectionPlan,
+) -> Result<ExtraMemoryProjectionRecord> {
+    let projection_result = commit_extra_memory_projection(plan);
+    let record = match projection_result {
+        Ok(()) => plan.projection_record(ExtraMemoryProjectionStatus::Committed, None),
+        Err(error) => plan.projection_record(
+            ExtraMemoryProjectionStatus::Failed,
+            Some(format!("{error:#}")),
+        ),
+    };
+    append_jsonl(&plan.projection_records_path, &record)?;
+    Ok(record)
+}
+
+/// Load terminal extra-memory projection records for health checks.
+///
+/// # Errors
+///
+/// Returns an error when the record file exists but cannot be parsed.
+pub fn load_extra_memory_projection_records(
+    world_dir: &Path,
+) -> Result<Vec<ExtraMemoryProjectionRecord>> {
+    let path = extra_memory_projections_path(world_dir);
+    let Ok(raw) = fs::read_to_string(path.as_path()) else {
+        return Ok(Vec::new());
+    };
+    raw.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str::<ExtraMemoryProjectionRecord>(line)
+                .context("failed to parse extra memory projection record")
+        })
+        .collect()
 }
 
 /// Apply agent-authored extra contact records after a turn commit.
@@ -202,6 +275,25 @@ pub fn apply_extra_memory_projection(
     let plan =
         compile_extra_memory_projection(world_dir, world_id, turn_id, location_id, contacts)?;
     commit_extra_memory_projection(&plan)
+}
+
+impl ExtraMemoryProjectionPlan {
+    fn projection_record(
+        &self,
+        status: ExtraMemoryProjectionStatus,
+        error: Option<String>,
+    ) -> ExtraMemoryProjectionRecord {
+        ExtraMemoryProjectionRecord {
+            schema_version: EXTRA_MEMORY_PROJECTION_RECORD_SCHEMA_VERSION.to_owned(),
+            world_id: self.world_id.clone(),
+            turn_id: self.turn_id.clone(),
+            status,
+            traces_planned: self.traces_to_append.len(),
+            remembered_extras_planned: Some(self.remembered_store.extras.len()),
+            error,
+            recorded_at: Utc::now().to_rfc3339(),
+        }
+    }
 }
 
 /// Retrieve the compact extra memory packet for the next pending turn.
@@ -680,6 +772,10 @@ fn remembered_extras_path(world_dir: &Path) -> PathBuf {
 
 fn extra_traces_path(world_dir: &Path) -> PathBuf {
     world_dir.join(EXTRA_TRACES_FILENAME)
+}
+
+fn extra_memory_projections_path(world_dir: &Path) -> PathBuf {
+    world_dir.join(EXTRA_MEMORY_PROJECTIONS_FILENAME)
 }
 
 #[cfg(test)]

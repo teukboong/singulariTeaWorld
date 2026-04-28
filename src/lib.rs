@@ -49,11 +49,14 @@ pub use codex_view::{
 };
 pub use entity_update::{EntityUpdateInput, apply_structured_entity_updates};
 pub use extra_memory::{
+    EXTRA_MEMORY_PROJECTION_RECORD_SCHEMA_VERSION, EXTRA_MEMORY_PROJECTIONS_FILENAME,
     EXTRA_TRACE_SCHEMA_VERSION, EXTRA_TRACES_FILENAME, ExtraMemoryPacket, ExtraMemoryPolicy,
-    ExtraMemoryRetrievalBudget, ExtraTrace, LocalFaceEntry, REMEMBERED_EXTRA_SCHEMA_VERSION,
-    REMEMBERED_EXTRAS_FILENAME, REMEMBERED_EXTRAS_SCHEMA_VERSION, RememberedExtra,
-    RememberedExtrasStore, apply_extra_memory_projection, commit_extra_memory_projection,
-    compile_extra_memory_projection, local_faces_for_codex_view, retrieve_extra_memory_packet,
+    ExtraMemoryProjectionRecord, ExtraMemoryProjectionStatus, ExtraMemoryRetrievalBudget,
+    ExtraTrace, LocalFaceEntry, REMEMBERED_EXTRA_SCHEMA_VERSION, REMEMBERED_EXTRAS_FILENAME,
+    REMEMBERED_EXTRAS_SCHEMA_VERSION, RememberedExtra, RememberedExtrasStore,
+    apply_extra_memory_projection, commit_extra_memory_projection,
+    commit_extra_memory_projection_terminal, compile_extra_memory_projection,
+    load_extra_memory_projection_records, local_faces_for_codex_view, retrieve_extra_memory_packet,
 };
 pub use host_supervisor::{
     HOST_SUPERVISOR_PLAN_SCHEMA_VERSION, HostSupervisorLaneKind, HostSupervisorLanePlan,

@@ -1,5 +1,5 @@
 use crate::extra_memory::{
-    ExtraMemoryPacket, commit_extra_memory_projection, compile_extra_memory_projection,
+    ExtraMemoryPacket, commit_extra_memory_projection_terminal, compile_extra_memory_projection,
     retrieve_extra_memory_packet,
 };
 use crate::models::{
@@ -454,7 +454,7 @@ pub fn commit_agent_turn(options: &AgentCommitTurnOptions) -> Result<CommittedAg
             &committed,
         ),
     )?;
-    commit_extra_memory_projection(&extra_memory_projection)?;
+    commit_extra_memory_projection_terminal(&extra_memory_projection)?;
     fs::remove_file(&pending_path)
         .with_context(|| format!("failed to remove {}", pending_path.display()))?;
     Ok(committed)
@@ -806,7 +806,9 @@ mod tests {
         normalize_narrative_level, selected_choice,
     };
     use crate::agent_bridge::commit_agent_turn;
-    use crate::extra_memory::load_remembered_extras;
+    use crate::extra_memory::{
+        ExtraMemoryProjectionStatus, load_extra_memory_projection_records, load_remembered_extras,
+    };
     use crate::models::{
         GUIDE_CHOICE_TAG, NARRATIVE_SCENE_SCHEMA_VERSION, NarrativeScene, TurnChoice, TurnSnapshot,
         default_turn_choices,
@@ -1088,6 +1090,12 @@ premise:
         let remembered = load_remembered_extras(files.dir.as_path(), "stw_agent_extras")?;
         assert_eq!(remembered.extras.len(), 1);
         assert_eq!(remembered.extras[0].display_name, "gate porter");
+        let projection_records = load_extra_memory_projection_records(files.dir.as_path())?;
+        assert_eq!(projection_records.len(), 1);
+        assert_eq!(
+            projection_records[0].status,
+            ExtraMemoryProjectionStatus::Committed
+        );
 
         let next_pending = enqueue_agent_turn(&AgentSubmitTurnOptions {
             store_root: Some(store),
@@ -1099,6 +1107,73 @@ premise:
             next_pending.visible_context.extra_memory.remembered_extras[0].display_name,
             "gate porter"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_corrupt_extra_memory_before_advancing_turn() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(&seed_path, seed_body("stw_agent_corrupt_extras"))?;
+        init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+        let store_paths = resolve_store_paths(Some(store.as_path()))?;
+        let files = world_file_paths(&store_paths, "stw_agent_corrupt_extras");
+
+        let pending = enqueue_agent_turn(&AgentSubmitTurnOptions {
+            store_root: Some(store.clone()),
+            world_id: "stw_agent_corrupt_extras".to_owned(),
+            input: "1".to_owned(),
+            narrative_level: None,
+        })?;
+        std::fs::write(files.dir.join(crate::REMEMBERED_EXTRAS_FILENAME), "{")?;
+        let result = commit_agent_turn(&AgentCommitTurnOptions {
+            store_root: Some(store.clone()),
+            world_id: "stw_agent_corrupt_extras".to_owned(),
+            response: AgentTurnResponse {
+                schema_version: AGENT_TURN_RESPONSE_SCHEMA_VERSION.to_owned(),
+                world_id: pending.world_id.clone(),
+                turn_id: pending.turn_id.clone(),
+                visible_scene: NarrativeScene {
+                    schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
+                    speaker: None,
+                    text_blocks: vec!["agent-authored visible scene".to_owned()],
+                    tone_notes: Vec::new(),
+                },
+                adjudication: None,
+                canon_event: None,
+                entity_updates: Vec::new(),
+                relationship_updates: Vec::new(),
+                extra_contacts: vec![AgentExtraContact {
+                    surface_label: "gate porter".to_owned(),
+                    known_name: None,
+                    role: Some("porter".to_owned()),
+                    location_id: Some("place:opening_location".to_owned()),
+                    scene_role: Some("witness".to_owned()),
+                    contact_summary: "noticed a torn sleeve".to_owned(),
+                    pressure_tags: Vec::new(),
+                    promotion_hint: None,
+                    memory_action: Some("remember".to_owned()),
+                    disposition: None,
+                    text_design: None,
+                    open_hooks: Vec::new(),
+                }],
+                hidden_state_delta: Vec::new(),
+                next_choices: scene_specific_choices(),
+            },
+        });
+        let Err(error) = result else {
+            anyhow::bail!("corrupt extra memory should fail before turn advance");
+        };
+
+        assert!(format!("{error:#}").contains("remembered_extras.json"));
+        let latest: TurnSnapshot = read_json(&files.latest_snapshot)?;
+        assert_eq!(latest.turn_id, "turn_0000");
+        assert!(load_pending_agent_turn(Some(store.as_path()), "stw_agent_corrupt_extras").is_ok());
         Ok(())
     }
 

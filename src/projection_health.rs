@@ -1,4 +1,6 @@
-use crate::extra_memory::load_remembered_extras;
+use crate::extra_memory::{
+    ExtraMemoryProjectionStatus, load_extra_memory_projection_records, load_remembered_extras,
+};
 use crate::job_ledger::{ReadWorldJobsOptions, WorldJobKind, WorldJobStatus, read_world_jobs};
 use crate::models::{CanonEvent, TurnSnapshot};
 use crate::store::{read_json, resolve_store_paths, world_file_paths};
@@ -282,16 +284,39 @@ fn turn_commit_health(
 }
 
 fn extra_memory_health(world_id: &str, world_dir: &Path) -> ProjectionComponentHealth {
-    match load_remembered_extras(world_dir, world_id) {
-        Ok(store) => ProjectionComponentHealth {
-            component: "extra_memory".to_owned(),
-            status: ProjectionHealthStatus::Healthy,
-            detail: format!("remembered_extras={}", store.extras.len()),
-            warnings: Vec::new(),
-            errors: Vec::new(),
-        },
-        Err(error) => failed_component("extra_memory", format!("{error:#}")),
-    }
+    let store = match load_remembered_extras(world_dir, world_id) {
+        Ok(store) => store,
+        Err(error) => return failed_component("extra_memory", format!("{error:#}")),
+    };
+    let records = match load_extra_memory_projection_records(world_dir) {
+        Ok(records) => records,
+        Err(error) => return failed_component("extra_memory", format!("{error:#}")),
+    };
+    let failed_records = records
+        .iter()
+        .filter(|record| record.status == ExtraMemoryProjectionStatus::Failed)
+        .collect::<Vec<_>>();
+    let errors = failed_records
+        .iter()
+        .map(|record| {
+            format!(
+                "extra memory projection failed: turn={}, error={}",
+                record.turn_id,
+                record.error.as_deref().unwrap_or("<missing>")
+            )
+        })
+        .collect::<Vec<_>>();
+    component_from_errors(
+        "extra_memory",
+        format!(
+            "remembered_extras={}, projection_records={}, failed_projection_records={}",
+            store.extras.len(),
+            records.len(),
+            failed_records.len()
+        ),
+        Vec::new(),
+        errors,
+    )
 }
 
 fn world_jobs_health(store_root: Option<&Path>, world_id: &str) -> ProjectionComponentHealth {
