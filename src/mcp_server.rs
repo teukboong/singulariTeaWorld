@@ -2,10 +2,10 @@ use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::Utc;
 use rmcp::model::{
-    Annotated, CallToolRequestParams, CallToolResult, Content, ListResourcesResult,
-    ListToolsResult, Meta, PaginatedRequestParams, RawResource, ReadResourceRequestParams,
-    ReadResourceResult, Resource, ResourceContents, ServerCapabilities, ServerInfo, Tool,
-    ToolAnnotations,
+    Annotated, CallToolRequestParams, CallToolResult, Content, ListResourceTemplatesResult,
+    ListResourcesResult, ListToolsResult, Meta, PaginatedRequestParams, RawResource,
+    RawResourceTemplate, ReadResourceRequestParams, ReadResourceResult, Resource, ResourceContents,
+    ResourceTemplate, ServerCapabilities, ServerInfo, Tool, ToolAnnotations,
 };
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler, handler::server::tool,
@@ -38,6 +38,33 @@ const WEB_IMAGE_FETCH_TIMEOUT_SECS: u64 = 30;
 const WEB_IMAGE_COMPLETION_STAGING_DIR: &str = "web_mcp_image_ingest";
 const CHATGPT_VN_WIDGET_URI: &str = "ui://singulari-world/vn-panel.html";
 const CHATGPT_VN_WIDGET_HTML: &str = include_str!("chatgpt_vn_widget.html");
+const CHATGPT_VN_WIDGET_MIME_TYPE: &str = "text/html+skybridge";
+const CHATGPT_WIDGET_PROBE_URI: &str = "ui://singulari-world/widget-probe.html";
+const CHATGPT_WIDGET_PROBE_HTML: &str = r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { margin: 0; font: 14px system-ui, sans-serif; background: #10141f; color: #f8fafc; }
+    main { padding: 18px; border: 1px solid rgba(148, 163, 184, .35); border-radius: 12px; }
+    h1 { margin: 0 0 8px; font-size: 18px; }
+    p { margin: 0; color: #cbd5e1; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Singulari Widget Probe</h1>
+    <p id="message">If this card is visible, ChatGPT mounted the Skybridge widget resource.</p>
+  </main>
+  <script>
+    const output = window.openai?.toolOutput || window.openai?.toolResponseMetadata || {};
+    const message = output.message || output.structuredContent?.message;
+    if (message) document.getElementById("message").textContent = message;
+    window.openai?.notifyIntrinsicHeight?.();
+  </script>
+</body>
+</html>"#;
 
 #[derive(Clone)]
 pub struct WorldsimMcpServer {
@@ -101,6 +128,11 @@ impl WorldsimMcpServer {
                 "worldsim_current_cg_image",
                 "Return the current turn CG as MCP image content when a generated PNG already exists.",
                 tool::schema_for_type::<WorldsimCurrentCgImageParams>(),
+            ),
+            Tool::new(
+                "worldsim_widget_probe",
+                "Diagnostic Apps SDK widget probe. Returns a tiny Skybridge HTML widget with no world-state dependency.",
+                tool::schema_for_type::<WorldsimWidgetProbeParams>(),
             ),
             Tool::new(
                 "worldsim_probe_image_ingest",
@@ -173,6 +205,7 @@ impl WorldsimMcpServer {
                     | "worldsim_submit_player_input"
                     | "worldsim_visual_assets"
                     | "worldsim_current_cg_image"
+                    | "worldsim_widget_probe"
                     | "worldsim_probe_image_ingest"
                     | "worldsim_complete_visual_job_from_base64"
                     | "worldsim_complete_visual_job_from_url"
@@ -186,6 +219,7 @@ impl WorldsimMcpServer {
                 "worldsim_current"
                     | "worldsim_visual_assets"
                     | "worldsim_current_cg_image"
+                    | "worldsim_widget_probe"
                     | "worldsim_resume_pack"
                     | "worldsim_search"
                     | "worldsim_codex_view"
@@ -269,6 +303,10 @@ impl ServerHandler for WorldsimMcpServer {
                 let params: WorldsimCurrentCgImageParams = tool::parse_json_object(arguments)?;
                 blocking_tool_result(move || worldsim_current_cg_image(params)).await
             }
+            "worldsim_widget_probe" => {
+                let params: WorldsimWidgetProbeParams = tool::parse_json_object(arguments)?;
+                std::future::ready(worldsim_widget_probe(params)).await
+            }
             "worldsim_probe_image_ingest" => {
                 let params: WorldsimProbeImageIngestParams = tool::parse_json_object(arguments)?;
                 blocking_tool(move || worldsim_probe_image_ingest(params)).await
@@ -338,11 +376,31 @@ impl ServerHandler for WorldsimMcpServer {
         _context: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<ListResourcesResult, McpError>> + Send + '_ {
         let resources = if self.profile.chatgpt_app_enabled() {
-            vec![chatgpt_vn_widget_resource()]
+            vec![
+                chatgpt_vn_widget_resource(),
+                chatgpt_widget_probe_resource(),
+            ]
         } else {
             Vec::new()
         };
         std::future::ready(Ok(ListResourcesResult::with_all_items(resources)))
+    }
+
+    fn list_resource_templates(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<ListResourceTemplatesResult, McpError>> + Send + '_
+    {
+        let templates = if self.profile.chatgpt_app_enabled() {
+            vec![
+                chatgpt_vn_widget_resource_template(),
+                chatgpt_widget_probe_resource_template(),
+            ]
+        } else {
+            Vec::new()
+        };
+        std::future::ready(Ok(ListResourceTemplatesResult::with_all_items(templates)))
     }
 
     fn read_resource(
@@ -350,15 +408,13 @@ impl ServerHandler for WorldsimMcpServer {
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<ReadResourceResult, McpError>> + Send + '_ {
-        let result = if self.profile.chatgpt_app_enabled()
-            && request.uri.as_str() == CHATGPT_VN_WIDGET_URI
-        {
-            Ok(chatgpt_vn_widget_contents())
-        } else {
-            Err(McpError::invalid_params(
+        let result = match (self.profile.chatgpt_app_enabled(), request.uri.as_str()) {
+            (true, CHATGPT_VN_WIDGET_URI) => Ok(chatgpt_vn_widget_contents()),
+            (true, CHATGPT_WIDGET_PROBE_URI) => Ok(chatgpt_widget_probe_contents()),
+            _ => Err(McpError::invalid_params(
                 format!("unknown singulari-world resource: {}", request.uri),
                 None,
-            ))
+            )),
         };
         std::future::ready(result)
     }
@@ -394,7 +450,7 @@ where
 {
     let mut result = blocking_tool(operation).await?;
     if profile.chatgpt_app_enabled() {
-        result.meta = Some(chatgpt_app_tool_result_meta());
+        result.meta = Some(chatgpt_app_tool_result_meta(CHATGPT_VN_WIDGET_URI));
     }
     Ok(result)
 }
@@ -430,6 +486,7 @@ fn attach_chatgpt_app_tool_metadata(tools: &mut [Tool]) {
                     "World ready",
                     true,
                     true,
+                    CHATGPT_VN_WIDGET_URI,
                 ));
             }
             "worldsim_submit_player_input" => {
@@ -445,6 +502,17 @@ fn attach_chatgpt_app_tool_metadata(tools: &mut [Tool]) {
                     "Choice sent",
                     true,
                     true,
+                    CHATGPT_VN_WIDGET_URI,
+                ));
+            }
+            "worldsim_widget_probe" => {
+                tool.annotations = Some(ToolAnnotations::new().read_only(true));
+                tool.meta = Some(chatgpt_app_tool_meta(
+                    "Rendering widget probe…",
+                    "Widget probe rendered",
+                    true,
+                    true,
+                    CHATGPT_WIDGET_PROBE_URI,
                 ));
             }
             "worldsim_visual_assets"
@@ -459,6 +527,7 @@ fn attach_chatgpt_app_tool_metadata(tools: &mut [Tool]) {
                     "World data ready",
                     true,
                     false,
+                    CHATGPT_VN_WIDGET_URI,
                 ));
             }
             "worldsim_complete_visual_job_from_base64"
@@ -470,7 +539,13 @@ fn attach_chatgpt_app_tool_metadata(tools: &mut [Tool]) {
                         .idempotent(false)
                         .open_world(false),
                 );
-                tool.meta = Some(chatgpt_app_tool_meta("Saving CG…", "CG saved", true, false));
+                tool.meta = Some(chatgpt_app_tool_meta(
+                    "Saving CG…",
+                    "CG saved",
+                    true,
+                    false,
+                    CHATGPT_VN_WIDGET_URI,
+                ));
             }
             _ => {}
         }
@@ -482,6 +557,7 @@ fn chatgpt_app_tool_meta(
     invoked: &str,
     widget_accessible: bool,
     renders_widget: bool,
+    resource_uri: &str,
 ) -> Meta {
     let mut meta = Meta::new();
     meta.0.insert(
@@ -492,7 +568,7 @@ fn chatgpt_app_tool_meta(
         "ui".to_owned(),
         serde_json::json!({
             "visibility": ["model", "app"],
-            "resourceUri": CHATGPT_VN_WIDGET_URI,
+            "resourceUri": resource_uri,
         }),
     );
     meta.0.insert(
@@ -510,17 +586,23 @@ fn chatgpt_app_tool_meta(
     if renders_widget {
         meta.0.insert(
             "openai/outputTemplate".to_owned(),
-            serde_json::json!(CHATGPT_VN_WIDGET_URI),
+            serde_json::json!(resource_uri),
         );
     }
     meta
 }
 
-fn chatgpt_app_tool_result_meta() -> Meta {
+fn chatgpt_app_tool_result_meta(resource_uri: &str) -> Meta {
     let mut meta = Meta::new();
     meta.0.insert(
         "openai/outputTemplate".to_owned(),
-        serde_json::json!(CHATGPT_VN_WIDGET_URI),
+        serde_json::json!(resource_uri),
+    );
+    meta.0.insert(
+        "ui".to_owned(),
+        serde_json::json!({
+            "resourceUri": resource_uri,
+        }),
     );
     meta
 }
@@ -532,19 +614,75 @@ fn chatgpt_vn_widget_resource() -> Resource {
         "Compact VN client for reading the current world state and submitting player choices."
             .to_owned(),
     );
-    raw.mime_type = Some("text/html".to_owned());
+    raw.mime_type = Some(CHATGPT_VN_WIDGET_MIME_TYPE.to_owned());
     raw.size = u32::try_from(CHATGPT_VN_WIDGET_HTML.len()).ok();
     raw.meta = Some(chatgpt_vn_widget_resource_meta());
     Annotated::new(raw, None)
+}
+
+fn chatgpt_vn_widget_resource_template() -> ResourceTemplate {
+    Annotated::new(
+        RawResourceTemplate {
+            uri_template: CHATGPT_VN_WIDGET_URI.to_owned(),
+            name: "Singulari World VN Panel".to_owned(),
+            title: Some("Singulari World".to_owned()),
+            description: Some(
+                "Compact VN client for reading the current world state and submitting player choices."
+                    .to_owned(),
+            ),
+            mime_type: Some(CHATGPT_VN_WIDGET_MIME_TYPE.to_owned()),
+            icons: None,
+        },
+        None,
+    )
 }
 
 fn chatgpt_vn_widget_contents() -> ReadResourceResult {
     ReadResourceResult {
         contents: vec![ResourceContents::TextResourceContents {
             uri: CHATGPT_VN_WIDGET_URI.to_owned(),
-            mime_type: Some("text/html".to_owned()),
+            mime_type: Some(CHATGPT_VN_WIDGET_MIME_TYPE.to_owned()),
             text: CHATGPT_VN_WIDGET_HTML.to_owned(),
             meta: Some(chatgpt_vn_widget_resource_meta()),
+        }],
+    }
+}
+
+fn chatgpt_widget_probe_resource() -> Resource {
+    let mut raw = RawResource::new(CHATGPT_WIDGET_PROBE_URI, "Singulari Widget Probe");
+    raw.title = Some("Singulari Widget Probe".to_owned());
+    raw.description =
+        Some("Minimal Skybridge probe for verifying ChatGPT Apps SDK widget mounting.".to_owned());
+    raw.mime_type = Some(CHATGPT_VN_WIDGET_MIME_TYPE.to_owned());
+    raw.size = u32::try_from(CHATGPT_WIDGET_PROBE_HTML.len()).ok();
+    raw.meta = Some(chatgpt_widget_probe_resource_meta());
+    Annotated::new(raw, None)
+}
+
+fn chatgpt_widget_probe_resource_template() -> ResourceTemplate {
+    Annotated::new(
+        RawResourceTemplate {
+            uri_template: CHATGPT_WIDGET_PROBE_URI.to_owned(),
+            name: "Singulari Widget Probe".to_owned(),
+            title: Some("Singulari Widget Probe".to_owned()),
+            description: Some(
+                "Minimal Skybridge probe for verifying ChatGPT Apps SDK widget mounting."
+                    .to_owned(),
+            ),
+            mime_type: Some(CHATGPT_VN_WIDGET_MIME_TYPE.to_owned()),
+            icons: None,
+        },
+        None,
+    )
+}
+
+fn chatgpt_widget_probe_contents() -> ReadResourceResult {
+    ReadResourceResult {
+        contents: vec![ResourceContents::TextResourceContents {
+            uri: CHATGPT_WIDGET_PROBE_URI.to_owned(),
+            mime_type: Some(CHATGPT_VN_WIDGET_MIME_TYPE.to_owned()),
+            text: CHATGPT_WIDGET_PROBE_HTML.to_owned(),
+            meta: Some(chatgpt_widget_probe_resource_meta()),
         }],
     }
 }
@@ -581,12 +719,38 @@ fn chatgpt_vn_widget_resource_meta() -> Meta {
     meta
 }
 
+fn chatgpt_widget_probe_resource_meta() -> Meta {
+    let mut meta = Meta::new();
+    meta.0.insert(
+        "openai/widgetDescription".to_owned(),
+        serde_json::json!("A tiny diagnostic widget that proves whether ChatGPT mounts Skybridge UI resources from this MCP connector."),
+    );
+    meta.0.insert(
+        "openai/widgetPrefersBorder".to_owned(),
+        serde_json::json!(true),
+    );
+    meta.0.insert(
+        "openai/widgetCSP".to_owned(),
+        serde_json::json!({
+            "connect_domains": [],
+            "resource_domains": []
+        }),
+    );
+    meta
+}
+
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 struct WorldsimWorldParams {
     #[serde(default)]
     store_root: Option<String>,
     #[serde(default)]
     world_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct WorldsimWidgetProbeParams {
+    #[serde(default = "default_widget_probe_message")]
+    message: String,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -600,6 +764,10 @@ struct WorldsimStartWorldParams {
     title: Option<String>,
     #[serde(default)]
     session_id: Option<String>,
+}
+
+fn default_widget_probe_message() -> String {
+    "Skybridge widget probe returned from Singulari World MCP.".to_owned()
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -868,6 +1036,20 @@ fn worldsim_current(params: WorldsimWorldParams) -> Result<singulari_world::VnPa
     let mut options = BuildVnPacketOptions::new(world_id);
     options.store_root = store_root;
     build_vn_packet(&options)
+}
+
+fn worldsim_widget_probe(params: WorldsimWidgetProbeParams) -> Result<CallToolResult, McpError> {
+    let payload = serde_json::json!({
+        "message": params.message,
+        "fromTool": "worldsim_widget_probe",
+    });
+    let mut result = json_tool_result(&payload)?;
+    result.content = vec![Content::text(format!(
+        "Widget probe ready with message: {}",
+        payload["message"].as_str().unwrap_or("probe")
+    ))];
+    result.meta = Some(chatgpt_app_tool_result_meta(CHATGPT_WIDGET_PROBE_URI));
+    Ok(result)
 }
 
 fn worldsim_submit_player_input(
@@ -1549,14 +1731,51 @@ mod tests {
             submit_tool.meta.context("submit meta missing")?.0["openai/widgetAccessible"],
             serde_json::json!(true)
         );
+        let probe_tool = server
+            .get_tool("worldsim_widget_probe")
+            .context("worldsim_widget_probe tool missing")?;
+        let probe_meta = probe_tool.meta.context("probe meta missing")?;
+        assert_eq!(
+            probe_meta.0["openai/outputTemplate"],
+            serde_json::json!(CHATGPT_WIDGET_PROBE_URI)
+        );
+        assert_eq!(
+            probe_meta.0["ui"]["resourceUri"],
+            serde_json::json!(CHATGPT_WIDGET_PROBE_URI)
+        );
         Ok(())
+    }
+
+    #[test]
+    fn chatgpt_vn_widget_result_meta_points_to_resource() {
+        let meta = chatgpt_app_tool_result_meta(CHATGPT_VN_WIDGET_URI);
+        assert_eq!(
+            meta.0["openai/outputTemplate"],
+            serde_json::json!(CHATGPT_VN_WIDGET_URI)
+        );
+        assert_eq!(
+            meta.0["ui"]["resourceUri"],
+            serde_json::json!(CHATGPT_VN_WIDGET_URI)
+        );
+        let probe_meta = chatgpt_app_tool_result_meta(CHATGPT_WIDGET_PROBE_URI);
+        assert_eq!(
+            probe_meta.0["openai/outputTemplate"],
+            serde_json::json!(CHATGPT_WIDGET_PROBE_URI)
+        );
+        assert_eq!(
+            probe_meta.0["ui"]["resourceUri"],
+            serde_json::json!(CHATGPT_WIDGET_PROBE_URI)
+        );
     }
 
     #[test]
     fn chatgpt_vn_widget_resource_contains_inline_client() {
         let resource = chatgpt_vn_widget_resource();
         assert_eq!(resource.raw.uri, CHATGPT_VN_WIDGET_URI);
-        assert_eq!(resource.raw.mime_type.as_deref(), Some("text/html"));
+        assert_eq!(
+            resource.raw.mime_type.as_deref(),
+            Some(CHATGPT_VN_WIDGET_MIME_TYPE)
+        );
         assert!(
             resource
                 .raw
@@ -1570,11 +1789,43 @@ mod tests {
             text, mime_type, ..
         } = &contents.contents[0]
         else {
-            panic!("ChatGPT VN widget should be served as text/html");
+            panic!("ChatGPT VN widget should be served as text/html+skybridge");
         };
-        assert_eq!(mime_type.as_deref(), Some("text/html"));
+        assert_eq!(mime_type.as_deref(), Some(CHATGPT_VN_WIDGET_MIME_TYPE));
         assert!(text.contains("worldsim_submit_player_input"));
         assert!(text.contains("notifyIntrinsicHeight"));
+    }
+
+    #[test]
+    fn chatgpt_widget_probe_resource_matches_apps_sdk_shape() -> anyhow::Result<()> {
+        let resource = chatgpt_widget_probe_resource();
+        assert_eq!(resource.raw.uri, CHATGPT_WIDGET_PROBE_URI);
+        assert_eq!(
+            resource.raw.mime_type.as_deref(),
+            Some(CHATGPT_VN_WIDGET_MIME_TYPE)
+        );
+
+        let template = chatgpt_widget_probe_resource_template();
+        assert_eq!(template.raw.uri_template, CHATGPT_WIDGET_PROBE_URI);
+        assert_eq!(
+            template.raw.mime_type.as_deref(),
+            Some(CHATGPT_VN_WIDGET_MIME_TYPE)
+        );
+
+        let result = worldsim_widget_probe(WorldsimWidgetProbeParams {
+            message: "probe ok".to_owned(),
+        })?;
+        assert_eq!(
+            result.meta.context("probe result meta missing")?.0["openai/outputTemplate"],
+            serde_json::json!(CHATGPT_WIDGET_PROBE_URI)
+        );
+        assert_eq!(
+            result
+                .structured_content
+                .context("probe structured missing")?["message"],
+            serde_json::json!("probe ok")
+        );
+        Ok(())
     }
 
     #[test]
