@@ -283,6 +283,8 @@ struct WorldsimSubmitPlayerInputParams {
     world_id: Option<String>,
     #[serde(default)]
     agent_authored: Option<bool>,
+    #[serde(default)]
+    narrative_level: Option<u8>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -434,6 +436,7 @@ fn worldsim_submit_player_input(
             store_root,
             world_id,
             input: params.input,
+            narrative_level: params.narrative_level,
         })?;
         return Ok(WorldsimSubmitPlayerInputResponse::WaitingAgent {
             pending: Box::new(pending),

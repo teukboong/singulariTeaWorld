@@ -394,7 +394,8 @@ select {
   background:
     linear-gradient(145deg, rgba(48, 48, 48, 0.18), rgba(10, 10, 10, 0.54));
   background-position: center;
-  background-size: cover;
+  background-repeat: no-repeat;
+  background-size: contain;
   box-shadow: inset 0 0 0 9999px var(--world-mood);
   transition:
     filter 220ms ease,
@@ -427,6 +428,16 @@ select {
 
 .scene-image.has-image .scene-empty {
   display: none;
+}
+
+.vn-shell.cg-focus .scene-image {
+  background-color: #050608;
+  box-shadow: none;
+}
+
+.vn-shell.cg-focus .scene-image::after {
+  background:
+    linear-gradient(180deg, rgba(8, 8, 8, 0.22) 0%, rgba(8, 8, 8, 0.02) 18%, rgba(8, 8, 8, 0.02) 82%, rgba(8, 8, 8, 0.24) 100%);
 }
 
 .scene-hud {
@@ -1732,18 +1743,6 @@ select {
   .view-toggle button {
     width: 46px;
     min-width: 46px;
-  }
-
-  .vn-shell.cg-focus .scene-image {
-    background-color: #050608;
-    background-repeat: no-repeat;
-    background-size: contain;
-    box-shadow: none;
-  }
-
-  .vn-shell.cg-focus .scene-image::after {
-    background:
-      linear-gradient(180deg, rgba(8, 8, 8, 0.28) 0%, rgba(8, 8, 8, 0.04) 24%, rgba(8, 8, 8, 0.04) 72%, rgba(8, 8, 8, 0.3) 100%);
   }
 
   .lower-band {

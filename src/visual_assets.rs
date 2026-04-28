@@ -23,9 +23,13 @@ pub const CODEX_APP_IMAGE_GENERATION_TOOL: &str = "codex_app.image.generate";
 const DEFAULT_TURN_CG_CADENCE_MIN: u32 = 5;
 const DEFAULT_AUTO_RETRY_LIMIT: u32 = 1;
 const DEFAULT_MAX_REFERENCE_IMAGES: u8 = 3;
+const TURN_CG_SCENE_HINT_BLOCKS: usize = 2;
+const TURN_CG_SCENE_HINT_CHARS: usize = 1_800;
 const VISUAL_JOBS_DIR: &str = "visual_jobs";
 const VISUAL_JOB_CLAIMS_DIR: &str = "claims";
 const VISUAL_JOB_COMPLETIONS_DIR: &str = "completed";
+const TURN_CG_SLOT_PREFIX: &str = "turn_cg:";
+const TURN_CG_JOBS_DIR: &str = "cg_jobs";
 const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 
 #[derive(Debug, Clone)]
@@ -393,11 +397,27 @@ pub fn complete_visual_job(options: &CompleteVisualJobOptions) -> Result<VisualJ
         fs::remove_file(&claim_path)
             .with_context(|| format!("failed to remove {}", claim_path.display()))?;
     }
+    clear_turn_cg_retry_marker(&files.dir, options.slot.as_str())?;
     let _refreshed_manifest = build_world_visual_assets(&BuildWorldVisualAssetsOptions {
         store_root: options.store_root.clone(),
         world_id: options.world_id.clone(),
     })?;
     Ok(completion)
+}
+
+fn clear_turn_cg_retry_marker(world_dir: &Path, slot: &str) -> Result<()> {
+    let Some(turn_id) = slot.strip_prefix(TURN_CG_SLOT_PREFIX) else {
+        return Ok(());
+    };
+    let retry_path = world_dir
+        .join(VN_ASSETS_DIR)
+        .join(TURN_CG_JOBS_DIR)
+        .join(format!("{turn_id}_retry.json"));
+    if retry_path.exists() {
+        fs::remove_file(&retry_path)
+            .with_context(|| format!("failed to remove {}", retry_path.display()))?;
+    }
+    Ok(())
 }
 
 /// Release an active visual job claim without accepting an asset.
@@ -931,12 +951,7 @@ fn turn_scene_prompt(
     reference_hint: &str,
 ) -> String {
     let dashboard = &packet.visible_state.dashboard;
-    let scene_text = packet
-        .narrative_scene
-        .as_ref()
-        .map(|scene| scene.text_blocks.join(" "))
-        .filter(|text| !text.trim().is_empty())
-        .unwrap_or_else(|| dashboard.status.clone());
+    let scene_text = turn_cg_scene_hint(packet).unwrap_or_else(|| dashboard.status.clone());
     let scan_targets = packet
         .visible_state
         .scan_targets
@@ -958,6 +973,37 @@ fn turn_scene_prompt(
         manifest.style_profile.camera_language,
         reference_hint
     )
+}
+
+fn turn_cg_scene_hint(packet: &RenderPacket) -> Option<String> {
+    let scene = packet.narrative_scene.as_ref()?;
+    let text = scene
+        .text_blocks
+        .iter()
+        .rev()
+        .take(TURN_CG_SCENE_HINT_BLOCKS)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(truncate_prompt_chars(trimmed, TURN_CG_SCENE_HINT_CHARS))
+    }
+}
+
+fn truncate_prompt_chars(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{truncated} ...")
+    } else {
+        truncated
+    }
 }
 
 fn player_visible_focus_label(target: &crate::models::ScanTarget) -> String {
@@ -1042,7 +1088,10 @@ mod tests {
         BuildWorldVisualAssetsOptions, CODEX_APP_IMAGE_GENERATION_TOOL, ClaimVisualJobOptions,
         CompleteVisualJobOptions, ReleaseVisualJobClaimOptions, VN_ASSETS_DIR,
         VisualJobClaimOutcome, build_world_visual_assets, claim_visual_job, complete_visual_job,
-        release_visual_job_claim, visual_generation_job,
+        release_visual_job_claim, turn_cg_scene_hint, visual_generation_job,
+    };
+    use crate::models::{
+        DashboardSummary, NarrativeScene, RenderPacket, ScanTarget, TurnChoice, VisibleState,
     };
     use crate::store::{InitWorldOptions, init_world};
     use tempfile::tempdir;
@@ -1258,5 +1307,50 @@ premise:
         assert_eq!(completion.slot, "turn_cg:turn_0001");
         assert!(turn_cg_path.is_file());
         Ok(())
+    }
+
+    #[test]
+    fn turn_cg_scene_hint_uses_recent_bounded_visible_blocks() {
+        let packet = RenderPacket {
+            schema_version: "singulari.render_packet.v1".to_owned(),
+            world_id: "stw_visual_hint".to_owned(),
+            turn_id: "turn_0007".to_owned(),
+            mode: "normal".to_owned(),
+            narrative_contract: "agent_authored".to_owned(),
+            narrative_scene: Some(NarrativeScene {
+                schema_version: "singulari.narrative_scene.v1".to_owned(),
+                speaker: None,
+                text_blocks: vec![
+                    "old-block".to_owned(),
+                    "middle-block".to_owned(),
+                    "가".repeat(2_400),
+                ],
+                tone_notes: Vec::new(),
+            }),
+            visible_state: VisibleState {
+                dashboard: DashboardSummary {
+                    phase: "opening".to_owned(),
+                    location: "place:test".to_owned(),
+                    anchor_invariant: "player-visible".to_owned(),
+                    current_event: "event:test".to_owned(),
+                    status: "fallback".to_owned(),
+                },
+                scan_targets: Vec::<ScanTarget>::new(),
+                choices: Vec::<TurnChoice>::new(),
+            },
+            adjudication: None,
+            codex_view: None,
+            canon_delta_refs: Vec::new(),
+            forbidden_reveals: Vec::new(),
+            style_notes: Vec::new(),
+        };
+
+        let Some(hint) = turn_cg_scene_hint(&packet) else {
+            panic!("scene hint should be present");
+        };
+        assert!(!hint.contains("old-block"));
+        assert!(hint.contains("middle-block"));
+        assert!(hint.ends_with(" ..."));
+        assert!(hint.chars().count() < 1_900);
     }
 }

@@ -34,6 +34,7 @@ const DEFAULT_SETTINGS = {
   cgPrompt: "",
   guideChoiceEnabled: true,
   autoReveal: false,
+  narrativeLevel: "1",
   textScale: "1",
   reduceMotion: false,
 };
@@ -129,6 +130,7 @@ const els = {
   settingCgPrompt: document.getElementById("settingCgPrompt"),
   settingGuideChoice: document.getElementById("settingGuideChoice"),
   settingAutoReveal: document.getElementById("settingAutoReveal"),
+  settingNarrativeLevel: document.getElementById("settingNarrativeLevel"),
   settingTextScale: document.getElementById("settingTextScale"),
   settingReduceMotion: document.getElementById("settingReduceMotion"),
   settingMainMenu: document.getElementById("settingMainMenu"),
@@ -1483,11 +1485,11 @@ function savedVisualAssets() {
 }
 
 function turnCgSummaryText(image) {
+  if (image.image_generation_job && turnCgJobsEnabled()) {
+    return image.exists ? "재생성 대기" : "이미지 연결 대기";
+  }
   if (image.exists) {
     return "저장됨";
-  }
-  if (image.image_generation_job && turnCgJobsEnabled()) {
-    return "이미지 연결 대기";
   }
   return "이번 턴은 자동 생성 예산을 쓰지 않음";
 }
@@ -1574,17 +1576,17 @@ function syncTurnCgButton() {
     !state.apiAvailable ||
     explicitPacketUrl ||
     !turnCgJobsEnabled() ||
-    Boolean(image?.exists);
+    Boolean(image?.image_generation_job);
   els.generateTurnCgButton.disabled = disabled;
   els.generateTurnCgButton.title = image?.exists
-    ? "이미 이 턴 CG가 저장되어 있어."
+    ? "현재 턴 CG를 다시 생성"
     : "현재 턴 서사 기반 CG 생성 요청";
-  if (image?.exists) {
+  if (image?.image_generation_job && turnCgJobsEnabled()) {
+    setTurnCgStatus("loading", image.exists ? "재생성 대기" : "생성 대기");
+  } else if (image?.exists) {
     setTurnCgStatus("ready", "저장됨");
   } else if (state.busy) {
     setTurnCgStatus("loading", "요청 중");
-  } else if (image?.image_generation_job) {
-    setTurnCgStatus("loading", "생성 대기");
   } else if (missingWorldBackgroundJobs().length) {
     setTurnCgStatus("loading", "배경 대기");
   } else {
@@ -1609,6 +1611,7 @@ function bindSettings() {
   els.settingCgPrompt.value = state.settings.cgPrompt;
   els.settingGuideChoice.checked = state.settings.guideChoiceEnabled;
   els.settingAutoReveal.checked = state.settings.autoReveal;
+  els.settingNarrativeLevel.value = normalizeNarrativeLevel(state.settings.narrativeLevel);
   els.settingTextScale.value = state.settings.textScale;
   els.settingReduceMotion.checked = state.settings.reduceMotion;
 
@@ -1631,6 +1634,9 @@ function bindSettings() {
     }
   });
   els.settingAutoReveal.addEventListener("change", () => updateSetting("autoReveal", els.settingAutoReveal.checked));
+  els.settingNarrativeLevel.addEventListener("change", () =>
+    updateSetting("narrativeLevel", normalizeNarrativeLevel(els.settingNarrativeLevel.value)),
+  );
   els.settingTextScale.addEventListener("input", () => updateSetting("textScale", els.settingTextScale.value));
   els.settingReduceMotion.addEventListener("change", () => updateSetting("reduceMotion", els.settingReduceMotion.checked));
 }
@@ -1767,7 +1773,10 @@ async function submitTurnInput(input) {
     const response = await fetchJson(chooseApiUrl, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ input }),
+      body: JSON.stringify({
+        input,
+        narrative_level: Number.parseInt(normalizeNarrativeLevel(state.settings.narrativeLevel), 10),
+      }),
     });
     if (response.status === "waiting_agent") {
       waitingForAgent = true;
@@ -1788,6 +1797,10 @@ async function submitTurnInput(input) {
       els.shell.classList.remove("is-loading");
     }
   }
+}
+
+function normalizeNarrativeLevel(value) {
+  return ["1", "2", "3"].includes(String(value)) ? String(value) : "1";
 }
 
 function handleWaitingAgentTurn(pending, options = {}) {

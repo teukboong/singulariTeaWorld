@@ -215,7 +215,7 @@ pub fn build_vn_packet(options: &BuildVnPacketOptions) -> Result<VnPacket> {
         &visual_assets.budget_policy,
     );
     let turn_visual_prompt = compile_turn_visual_prompt(&world, &render_packet, &visual_assets);
-    let turn_cg_job = if turn_cg_decision.requested && !turn_cg_exists {
+    let turn_cg_job = if turn_cg_decision.requested && (!turn_cg_exists || retry_requested) {
         Some(turn_cg_image_generation_job(
             render_packet.turn_id.as_str(),
             &turn_visual_prompt,
@@ -325,16 +325,6 @@ fn budgeted_turn_cg_decision(
     let cadence = policy.turn_cg_cadence_min.max(1);
     let turn_index = turn_index(packet.turn_id.as_str()).unwrap_or_default();
     let cadence_turns_remaining = cadence_turns_remaining(turn_index, cadence);
-    if asset_exists {
-        return turn_cg_decision(
-            "visual_budget_policy",
-            "reuse_existing",
-            false,
-            false,
-            cadence_turns_remaining,
-            "이미 저장된 turn CG가 있어서 새 작업을 만들지 않는다.",
-        );
-    }
     if retry_requested {
         return turn_cg_decision(
             "user_retry_request",
@@ -343,6 +333,16 @@ fn budgeted_turn_cg_decision(
             true,
             0,
             "사용자가 백그라운드 재시도를 요청했다.",
+        );
+    }
+    if asset_exists {
+        return turn_cg_decision(
+            "visual_budget_policy",
+            "reuse_existing",
+            false,
+            false,
+            cadence_turns_remaining,
+            "이미 저장된 turn CG가 있어서 새 작업을 만들지 않는다.",
         );
     }
     if policy.mode == "off" {

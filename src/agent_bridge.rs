@@ -29,6 +29,7 @@ pub struct AgentSubmitTurnOptions {
     pub store_root: Option<PathBuf>,
     pub world_id: String,
     pub input: String,
+    pub narrative_level: Option<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -130,6 +131,26 @@ pub struct AgentOutputContract {
     pub language: String,
     pub must_return_json: bool,
     pub hidden_truth_must_not_appear_in_visible_text: bool,
+    #[serde(default = "default_narrative_level")]
+    pub narrative_level: u8,
+    #[serde(default = "default_narrative_budget")]
+    pub narrative_budget: AgentNarrativeBudget,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentNarrativeBudget {
+    pub level_label: String,
+    pub ordinary_turn_blocks: u8,
+    pub standard_choice_turn_blocks: u8,
+    pub major_turn_blocks: u8,
+    pub opening_or_climax_blocks: u8,
+    pub target_chars: u32,
+    pub major_target_chars: u32,
+    pub ordinary_turn: String,
+    pub standard_choice_turn: String,
+    pub major_turn: String,
+    pub opening_or_climax: String,
+    pub character_budget: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -233,6 +254,8 @@ pub fn enqueue_agent_turn(options: &AgentSubmitTurnOptions) -> Result<PendingAge
             language: "ko".to_owned(),
             must_return_json: true,
             hidden_truth_must_not_appear_in_visible_text: true,
+            narrative_level: normalize_narrative_level(options.narrative_level),
+            narrative_budget: narrative_budget_for_level(options.narrative_level),
         },
         pending_ref,
         created_at: Utc::now().to_rfc3339(),
@@ -240,6 +263,67 @@ pub fn enqueue_agent_turn(options: &AgentSubmitTurnOptions) -> Result<PendingAge
     ensure_parent_dir(&pending_path)?;
     write_json(&pending_path, &pending)?;
     Ok(pending)
+}
+
+#[must_use]
+pub fn normalize_narrative_level(level: Option<u8>) -> u8 {
+    level.unwrap_or(default_narrative_level()).clamp(1, 3)
+}
+
+#[must_use]
+pub fn narrative_budget_for_level(level: Option<u8>) -> AgentNarrativeBudget {
+    match normalize_narrative_level(level) {
+        1 => AgentNarrativeBudget {
+            level_label: "서사레벨 1: 표준 VN 밀도".to_owned(),
+            ordinary_turn_blocks: 3,
+            standard_choice_turn_blocks: 6,
+            major_turn_blocks: 8,
+            opening_or_climax_blocks: 10,
+            target_chars: 1_400,
+            major_target_chars: 2_200,
+            ordinary_turn: "일상/이동/짧은 관찰은 2-3문단".to_owned(),
+            standard_choice_turn: "기본 선택 턴은 4-6문단".to_owned(),
+            major_turn: "전투 시작, 첫 인물 등장, 장소 전환, 비밀 단서 발견은 6-8문단".to_owned(),
+            opening_or_climax: "챕터 오프닝/클라이맥스는 8-10문단".to_owned(),
+            character_budget: "기본 턴 900-1400자, 큰 턴 1600-2200자".to_owned(),
+        },
+        2 => AgentNarrativeBudget {
+            level_label: "서사레벨 2: 장면 확장 밀도".to_owned(),
+            ordinary_turn_blocks: 5,
+            standard_choice_turn_blocks: 9,
+            major_turn_blocks: 12,
+            opening_or_climax_blocks: 14,
+            target_chars: 3_400,
+            major_target_chars: 4_800,
+            ordinary_turn: "일상/이동/짧은 관찰도 4-5문단".to_owned(),
+            standard_choice_turn: "기본 선택 턴은 7-9문단".to_owned(),
+            major_turn: "전투 시작, 첫 인물 등장, 장소 전환, 비밀 단서 발견은 10-12문단".to_owned(),
+            opening_or_climax: "챕터 오프닝/클라이맥스는 12-14문단".to_owned(),
+            character_budget: "기본 턴 2200-3400자, 큰 턴 3600-4800자".to_owned(),
+        },
+        _ => AgentNarrativeBudget {
+            level_label: "서사레벨 3: 장편 연재 밀도".to_owned(),
+            ordinary_turn_blocks: 9,
+            standard_choice_turn_blocks: 14,
+            major_turn_blocks: 20,
+            opening_or_climax_blocks: 24,
+            target_chars: 7_000,
+            major_target_chars: 12_000,
+            ordinary_turn: "일상/이동/짧은 관찰도 7-9문단".to_owned(),
+            standard_choice_turn: "기본 선택 턴은 11-14문단".to_owned(),
+            major_turn: "전투 시작, 첫 인물 등장, 장소 전환, 비밀 단서 발견은 16-20문단".to_owned(),
+            opening_or_climax: "챕터 오프닝/클라이맥스는 20-24문단".to_owned(),
+            character_budget: "기본 턴 4500-7000자, 큰 턴 8000-12000자".to_owned(),
+        },
+    }
+}
+
+const fn default_narrative_level() -> u8 {
+    1
+}
+
+fn default_narrative_budget() -> AgentNarrativeBudget {
+    narrative_budget_for_level(Some(default_narrative_level()))
 }
 
 /// Load the current pending agent turn.
@@ -720,7 +804,8 @@ mod tests {
     use super::{
         AGENT_TURN_RESPONSE_SCHEMA_VERSION, AgentCommitTurnOptions, AgentSubmitTurnOptions,
         AgentTurnResponse, SaveCodexThreadBindingOptions, clear_codex_thread_binding,
-        enqueue_agent_turn, load_codex_thread_binding, save_codex_thread_binding,
+        enqueue_agent_turn, load_codex_thread_binding, narrative_budget_for_level,
+        normalize_narrative_level, save_codex_thread_binding,
     };
     use crate::agent_bridge::commit_agent_turn;
     use crate::models::{NARRATIVE_SCENE_SCHEMA_VERSION, NarrativeScene};
@@ -757,7 +842,9 @@ premise:
             store_root: Some(store.clone()),
             world_id: "stw_agent".to_owned(),
             input: "1".to_owned(),
+            narrative_level: None,
         })?;
+        assert_eq!(pending.output_contract.narrative_level, 1);
         let committed = commit_agent_turn(&AgentCommitTurnOptions {
             store_root: Some(store.clone()),
             world_id: "stw_agent".to_owned(),
@@ -828,5 +915,23 @@ premise:
         assert_eq!(cleared.thread_id, binding.thread_id);
         assert!(load_codex_thread_binding(Some(store.as_path()), "stw_codex_bind")?.is_none());
         Ok(())
+    }
+
+    #[test]
+    fn narrative_budget_levels_are_distinct_and_clamped() {
+        let level_one = narrative_budget_for_level(Some(1));
+        let level_three = narrative_budget_for_level(Some(3));
+
+        assert_eq!(normalize_narrative_level(None), 1);
+        assert_eq!(normalize_narrative_level(Some(0)), 1);
+        assert_eq!(normalize_narrative_level(Some(4)), 3);
+        assert_ne!(
+            level_one.standard_choice_turn,
+            level_three.standard_choice_turn
+        );
+        assert_eq!(level_one.standard_choice_turn_blocks, 6);
+        assert_eq!(level_three.standard_choice_turn_blocks, 14);
+        assert_eq!(level_three.target_chars, 7_000);
+        assert!(level_three.character_budget.contains("8000-12000자"));
     }
 }

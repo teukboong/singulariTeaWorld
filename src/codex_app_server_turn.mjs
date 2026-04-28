@@ -147,6 +147,7 @@ async function main() {
   const promptPath = requireArg(args, "prompt-path");
   const resultPath = requireArg(args, "result-path");
   const timeoutMs = Number(args["timeout-ms"] ?? "900000");
+  const threadContextMode = args["thread-context-mode"] ?? "native-thread";
   const prompt = fs.readFileSync(promptPath, "utf8");
   const client = new CodexAppServerClient(url);
   let threadId = args["thread-id"] || null;
@@ -178,7 +179,7 @@ async function main() {
       const resumed = await client.send("thread/resume", {
         threadId,
         cwd,
-        excludeTurns: true,
+        excludeTurns: threadContextMode !== "native-thread",
         persistExtendedHistory: true,
       });
       threadId = resumed.thread.id;

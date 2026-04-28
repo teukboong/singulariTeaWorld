@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use singulari_world::{
     ACTIVE_WORLD_FILENAME, AdvanceTurnOptions, AgentCommitTurnOptions, AgentSubmitTurnOptions,
@@ -24,6 +24,7 @@ use singulari_world::{
     load_visual_job_claim, release_visual_job_claim, save_codex_thread_binding, serve_vn,
 };
 use std::collections::HashSet;
+use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::net::{TcpListener, TcpStream};
@@ -44,6 +45,29 @@ struct Cli {
 
     #[command(subcommand)]
     command: Commands,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CodexThreadContextMode {
+    /// Reuse the Codex App thread history and send only a small authoritative world packet.
+    NativeThread,
+    /// Exclude prior app-server turns and reinject the full pending packet every turn.
+    BoundedPacket,
+}
+
+impl CodexThreadContextMode {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::NativeThread => "native-thread",
+            Self::BoundedPacket => "bounded-packet",
+        }
+    }
+}
+
+impl fmt::Display for CodexThreadContextMode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 #[derive(Subcommand)]
@@ -417,6 +441,15 @@ enum Commands {
         #[arg(long, env = "SINGULARI_WORLD_CODEX_APP_SERVER_URL")]
         codex_app_server_url: Option<String>,
 
+        /// How the text backend uses Codex App thread history.
+        #[arg(
+            long,
+            env = "SINGULARI_WORLD_CODEX_THREAD_CONTEXT_MODE",
+            value_enum,
+            default_value_t = CodexThreadContextMode::NativeThread
+        )]
+        codex_thread_context_mode: CodexThreadContextMode,
+
         /// Node.js binary used only by the codex-app-server backend helper.
         #[arg(long, env = "SINGULARI_WORLD_NODE_BIN")]
         node_bin: Option<PathBuf>,
@@ -700,6 +733,7 @@ fn dispatch(cli: Cli) -> Result<()> {
             codex_thread_id,
             codex_bin,
             codex_app_server_url,
+            codex_thread_context_mode,
             node_bin,
         } => handle_host_worker(
             store_root.as_deref(),
@@ -710,6 +744,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                 codex_thread_id,
                 codex_bin,
                 codex_app_server_url,
+                codex_thread_context_mode,
                 node_bin,
             },
         )?,
@@ -1312,6 +1347,7 @@ fn handle_agent_submit(
         store_root: store_root.map(Path::to_path_buf),
         world_id,
         input,
+        narrative_level: None,
     })?;
     if json {
         println!("{}", serde_json::to_string_pretty(&pending)?);
@@ -1469,6 +1505,7 @@ struct HostWorkerOptions {
     codex_thread_id: Option<String>,
     codex_bin: Option<PathBuf>,
     codex_app_server_url: Option<String>,
+    codex_thread_context_mode: CodexThreadContextMode,
     node_bin: Option<PathBuf>,
 }
 
@@ -1486,6 +1523,7 @@ fn handle_host_worker(
     let mut app_server_dispatch_config = CodexAppServerDispatchConfig::from_cli(
         options.codex_app_server_url.clone(),
         options.codex_thread_id.clone(),
+        options.codex_thread_context_mode,
         options.node_bin.clone(),
         options.codex_bin.clone(),
     );
@@ -1745,6 +1783,7 @@ fn emit_host_event(event: &serde_json::Value) -> Result<()> {
 struct CodexAppServerDispatch {
     app_server_url: String,
     thread_id: Option<String>,
+    thread_context_mode: CodexThreadContextMode,
     node_bin: PathBuf,
     binding_source: Option<String>,
     binding_updated_at: Option<String>,
@@ -1756,6 +1795,7 @@ struct CodexAppServerDispatch {
 struct CodexAppServerDispatchConfig {
     app_server_url: Option<String>,
     cli_thread_id: Option<String>,
+    thread_context_mode: CodexThreadContextMode,
     node_bin: Option<PathBuf>,
     codex_bin: Option<PathBuf>,
     bound_worlds: HashSet<String>,
@@ -1766,6 +1806,7 @@ impl CodexAppServerDispatchConfig {
     fn from_cli(
         app_server_url: Option<String>,
         thread_id: Option<String>,
+        thread_context_mode: CodexThreadContextMode,
         node_bin: Option<PathBuf>,
         codex_bin: Option<PathBuf>,
     ) -> Self {
@@ -1774,6 +1815,7 @@ impl CodexAppServerDispatchConfig {
                 .map(|value| value.trim().to_owned())
                 .filter(|value| !value.is_empty()),
             cli_thread_id: thread_id.filter(|value| !value.trim().is_empty()),
+            thread_context_mode,
             node_bin,
             codex_bin,
             bound_worlds: HashSet::new(),
@@ -1809,6 +1851,7 @@ impl CodexAppServerDispatchConfig {
         Ok(Some(CodexAppServerDispatch {
             app_server_url,
             thread_id: binding.as_ref().map(|value| value.thread_id.clone()),
+            thread_context_mode: self.thread_context_mode,
             node_bin: self.resolved_node_bin(),
             binding_source: binding.as_ref().map(|value| value.source.clone()),
             binding_updated_at: binding.map(|value| value.updated_at),
@@ -2043,6 +2086,7 @@ struct CodexAppServerDispatchRecord {
     world_id: String,
     turn_id: String,
     thread_id: Option<String>,
+    thread_context_mode: &'static str,
     app_server_url: String,
     app_server_managed: bool,
     app_server_runtime_path: Option<String>,
@@ -2133,7 +2177,12 @@ fn dispatch_pending_agent_turn_via_app_server(
     let helper_path = dispatch_dir.join("codex_app_server_turn.mjs");
     let stdout_path = dispatch_dir.join(format!("{}-appserver-stdout.log", pending.turn_id));
     let stderr_path = dispatch_dir.join(format!("{}-appserver-stderr.log", pending.turn_id));
-    let prompt = build_codex_realtime_prompt(store_root, pending, response_path.as_path())?;
+    let prompt = build_codex_realtime_prompt(
+        store_root,
+        pending,
+        response_path.as_path(),
+        dispatch.thread_context_mode,
+    )?;
     fs::write(&prompt_path, prompt.as_bytes())
         .with_context(|| format!("failed to write {}", prompt_path.display()))?;
     fs::write(&helper_path, CODEX_APP_SERVER_TURN_HELPER.as_bytes())
@@ -2145,6 +2194,7 @@ fn dispatch_pending_agent_turn_via_app_server(
         "world_id": pending.world_id,
         "turn_id": pending.turn_id,
         "thread_id": dispatch.thread_id.as_deref(),
+        "thread_context_mode": dispatch.thread_context_mode.as_str(),
         "app_server_url": dispatch.app_server_url.as_str(),
         "app_server_managed": dispatch.app_server_managed,
         "app_server_runtime_path": dispatch
@@ -2184,6 +2234,8 @@ fn dispatch_pending_agent_turn_via_app_server(
         .arg(&prompt_path)
         .arg("--result-path")
         .arg(&result_path)
+        .arg("--thread-context-mode")
+        .arg(dispatch.thread_context_mode.as_str())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
     if let Some(thread_id) = &dispatch.thread_id {
@@ -2247,6 +2299,7 @@ fn dispatch_pending_agent_turn_via_app_server(
         world_id: pending.world_id.clone(),
         turn_id: pending.turn_id.clone(),
         thread_id: result_thread_id.or_else(|| dispatch.thread_id.clone()),
+        thread_context_mode: dispatch.thread_context_mode.as_str(),
         app_server_url: dispatch.app_server_url.clone(),
         app_server_managed: dispatch.app_server_managed,
         app_server_runtime_path: dispatch
@@ -2633,10 +2686,54 @@ fn write_dispatch_claim(path: &Path, claim: &serde_json::Value) -> Result<bool> 
     }
 }
 
+const AGENT_TURN_RESPONSE_SCHEMA_GUIDE: &str = r#"AgentTurnResponse 스키마:
+```json
+{
+  "schema_version": "singulari.agent_turn_response.v1",
+  "world_id": "<world_id>",
+  "turn_id": "<turn_id>",
+  "visible_scene": {
+    "schema_version": "singulari.narrative_scene.v1",
+    "text_blocks": ["위 서사 출력 지시와 pending.output_contract.narrative_budget에 맞춘 한국어 VN 본문"],
+    "tone_notes": ["짧은 톤 메모"]
+  },
+  "adjudication": {
+    "outcome": "accepted",
+    "summary": "플레이어-visible 한 줄 요약",
+    "gates": [
+      {"gate":"body","status":"pass","reason":"..."},
+      {"gate":"resource","status":"pass","reason":"..."},
+      {"gate":"time","status":"pass","reason":"..."},
+      {"gate":"social_permission","status":"pass","reason":"..."},
+      {"gate":"knowledge","status":"pass","reason":"..."}
+    ],
+    "visible_constraints": ["아직 확인되지 않은 플레이어-visible 제약"],
+    "consequences": ["이번 턴의 플레이어-visible 결과"]
+  },
+  "canon_event": {
+    "visibility": "player_visible",
+    "kind": "guided_choice",
+    "summary": "플레이어-visible 사건 요약"
+  },
+  "entity_updates": [],
+  "relationship_updates": [],
+  "hidden_state_delta": [],
+  "next_choices": [
+    {"slot":1,"tag":"정로","intent":"..."},
+    {"slot":2,"tag":"관찰","intent":"..."},
+    {"slot":3,"tag":"관계","intent":"..."},
+    {"slot":4,"tag":"안내자의 선택","intent":"맡긴다. 세부 내용은 선택 후 드러난다."},
+    {"slot":5,"tag":"기록","intent":"현재 알려진 세계 기록을 연다"},
+    {"slot":6,"tag":"흐름","intent":"..."}
+  ]
+}
+```"#;
+
 fn build_codex_realtime_prompt(
     store_root: Option<&Path>,
     pending: &singulari_world::PendingAgentTurn,
     response_path: &Path,
+    thread_context_mode: CodexThreadContextMode,
 ) -> Result<String> {
     let binary = current_binary_for_prompt()?;
     let store_args = store_root
@@ -2654,16 +2751,55 @@ fn build_codex_realtime_prompt(
     let commit_command = format!(
         "{binary_arg}{store_args} agent-commit --world-id {world_arg} --response {response_arg} --json"
     );
+    let narrative_budget = &pending.output_contract.narrative_budget;
+    let narrative_directive = format!(
+        "이번 턴 서사 목표: {}. 기본 선택 턴이면 {}문단 / 약 {}자까지 충분히 써라. 큰 사건이면 {}문단 / 약 {}자까지 확장해라. 짧게 요약하지 말고 장면, 감각, 행동, 반응, 여운을 각각 분리해서 쌓아라.",
+        narrative_budget.level_label,
+        narrative_budget.standard_choice_turn_blocks,
+        narrative_budget.target_chars,
+        narrative_budget.major_turn_blocks,
+        narrative_budget.major_target_chars,
+    );
+    let prompt = match thread_context_mode {
+        CodexThreadContextMode::NativeThread => build_native_thread_realtime_prompt(
+            pending,
+            response_path,
+            commit_command.as_str(),
+            narrative_directive.as_str(),
+        )?,
+        CodexThreadContextMode::BoundedPacket => build_bounded_packet_realtime_prompt(
+            pending,
+            response_path,
+            commit_command.as_str(),
+            narrative_directive.as_str(),
+        )?,
+    };
+    Ok(prompt)
+}
+
+fn build_bounded_packet_realtime_prompt(
+    pending: &singulari_world::PendingAgentTurn,
+    response_path: &Path,
+    commit_command: &str,
+    narrative_directive: &str,
+) -> Result<String> {
     let pending_packet = serde_json::to_string_pretty(pending)
         .context("failed to serialize pending turn for realtime prompt")?;
     Ok(format!(
         r#"Singulari World realtime event가 들어왔어. 이 턴 하나만 처리하고 멈춰.
+
+서사 출력 지시:
+- {narrative_directive}
+- text_blocks는 한 항목을 너무 길게 뭉치지 말고, 장면 박자마다 별도 문단으로 나눠라.
+- commit validator가 길이 부족을 reject하지 않으니, 처음 작성할 때 목표량을 스스로 채워라.
 
 역할:
 - 너는 Singulari World의 trusted narrative agent다.
 - 플레이어에게 다시 묻지 말고, 아래 pending turn JSON만 보고 바로 서사 턴을 작성한다.
 - hidden/private context는 판정에만 쓰고, visible_scene/canon_event/choice text에는 절대 누출하지 않는다.
 - 출력 서사는 한국어 VN prose다. 대화, 제스처, 말버릇을 살리고, 게임식 수치 계산처럼 보이게 쓰지 않는다.
+- 출력량은 pending turn JSON의 output_contract.narrative_level과 narrative_budget을 따른다. 레벨 간 차이는 확연해야 한다.
+- 레벨 1은 표준 VN 밀도, 레벨 2는 장면 확장 밀도, 레벨 3은 장편 연재 밀도다. 레벨 2/3에서는 같은 사건도 감각, 행동, 반응, 여운, 압박을 더 길게 쌓는다.
 - player_input이 "세계 개막"이면 그것은 선택지가 아니라 시드에서 첫 서사를 여는 bootstrap turn이다. 첫 장소, 첫 감각, 첫 사건의 hook을 visible_scene에 바로 작성한다.
 - 이 Codex thread의 이전 대화 맥락은 말맛과 리듬을 위한 working context다. 세계의 사실/상태/source of truth는 아래 pending turn JSON과 world store다.
 - thread context가 compact 되었거나 pending packet과 충돌하면 pending packet을 우선한다.
@@ -2672,48 +2808,7 @@ fn build_codex_realtime_prompt(
 - 소스 파일을 읽거나 repo를 탐색하지 마라. 필요한 스키마와 pending packet은 이 프롬프트 안에 있다.
 - 허용된 외부 명령은 마지막 commit 명령뿐이다. commit이 스키마 에러를 내면 그 에러만 보고 JSON을 고쳐 한 번 더 commit한다.
 
-AgentTurnResponse 스키마:
-```json
-{{
-  "schema_version": "singulari.agent_turn_response.v1",
-  "world_id": "{world_id}",
-  "turn_id": "{turn_id}",
-  "visible_scene": {{
-    "schema_version": "singulari.narrative_scene.v1",
-    "text_blocks": ["한국어 VN 본문 2-4문단"],
-    "tone_notes": ["짧은 톤 메모"]
-  }},
-  "adjudication": {{
-    "outcome": "accepted",
-    "summary": "플레이어-visible 한 줄 요약",
-    "gates": [
-      {{"gate":"body","status":"pass","reason":"..."}},
-      {{"gate":"resource","status":"pass","reason":"..."}},
-      {{"gate":"time","status":"pass","reason":"..."}},
-      {{"gate":"social_permission","status":"pass","reason":"..."}},
-      {{"gate":"knowledge","status":"pass","reason":"..."}}
-    ],
-    "visible_constraints": ["아직 확인되지 않은 플레이어-visible 제약"],
-    "consequences": ["이번 턴의 플레이어-visible 결과"]
-  }},
-  "canon_event": {{
-    "visibility": "player_visible",
-    "kind": "guided_choice",
-    "summary": "플레이어-visible 사건 요약"
-  }},
-  "entity_updates": [],
-  "relationship_updates": [],
-  "hidden_state_delta": [],
-  "next_choices": [
-    {{"slot":1,"tag":"정로","intent":"..."}},
-    {{"slot":2,"tag":"관찰","intent":"..."}},
-    {{"slot":3,"tag":"관계","intent":"..."}},
-    {{"slot":4,"tag":"안내자의 선택","intent":"맡긴다. 세부 내용은 선택 후 드러난다."}},
-    {{"slot":5,"tag":"기록","intent":"현재 알려진 세계 기록을 연다"}},
-    {{"slot":6,"tag":"흐름","intent":"..."}}
-  ]
-}}
-```
+{agent_schema}
 
 pending turn JSON:
 ```json
@@ -2732,6 +2827,8 @@ pending turn JSON:
 - turn_id: {turn_id}
 - player_input: {player_input}
 "#,
+        narrative_directive = narrative_directive,
+        agent_schema = AGENT_TURN_RESPONSE_SCHEMA_GUIDE,
         pending_packet = pending_packet,
         response_path = response_path.display(),
         commit_command = commit_command,
@@ -2739,6 +2836,123 @@ pending turn JSON:
         turn_id = pending.turn_id,
         player_input = pending.player_input,
     ))
+}
+
+fn build_native_thread_realtime_prompt(
+    pending: &singulari_world::PendingAgentTurn,
+    response_path: &Path,
+    commit_command: &str,
+    narrative_directive: &str,
+) -> Result<String> {
+    let authoritative_packet =
+        serde_json::to_string_pretty(&native_thread_authoritative_packet(pending))
+            .context("failed to serialize native-thread authoritative packet")?;
+    Ok(format!(
+        r#"Singulari World realtime event가 들어왔어. 이 턴 하나만 처리하고 멈춰.
+
+서사 출력 지시:
+- {narrative_directive}
+- text_blocks는 장면 박자마다 별도 문단으로 나눠라.
+- 이 Codex App thread의 이전 turn들은 말맛, 직전 감정선, 장면 리듬을 잇는 working context다.
+- 아래 authoritative packet은 세계 상태/source of truth다. thread 기억과 충돌하면 packet을 우선한다.
+
+역할:
+- 너는 Singulari World의 trusted narrative agent다.
+- 플레이어에게 다시 묻지 말고 바로 서사 턴을 작성한다.
+- hidden/private context는 판정에만 쓰고, visible_scene/canon_event/choice text에는 절대 누출하지 않는다.
+- 출력 서사는 한국어 VN prose다. 대화, 제스처, 말버릇을 살리고, 게임식 수치 계산처럼 보이게 쓰지 않는다.
+- player_input이 "세계 개막"이면 첫 장소, 첫 감각, 첫 사건의 hook을 visible_scene에 바로 작성한다.
+- slot 4는 항상 안내자의 선택이고 preview는 숨긴다: "맡긴다. 세부 내용은 선택 후 드러난다."
+- slot 7은 항상 자유서술이며 inline prose를 요구하는 선택지로 둔다.
+- 소스 파일을 읽거나 repo를 탐색하지 마라. 필요한 상태와 응답 계약은 이 프롬프트 안에 있다.
+- 허용된 외부 명령은 마지막 commit 명령뿐이다. commit이 스키마 에러를 내면 그 에러만 보고 JSON을 고쳐 한 번 더 commit한다.
+
+응답 JSON 계약:
+- schema_version은 "singulari.agent_turn_response.v1"이다.
+- world_id와 turn_id는 아래 고정값과 정확히 같아야 한다.
+- visible_scene은 NarrativeScene이며, 최소한 text_blocks와 choices를 포함한다.
+- choices는 1..7 슬롯을 유지한다. slot 4 preview는 숨김 문구, slot 7은 자유서술 안내다.
+- hidden_truth는 visible_scene, canon_event, choices, final chat text에 쓰지 않는다.
+- adjudication, canon_event, entity_updates, relationship_updates는 필요한 경우에만 넣는다.
+- 최종 채팅 답변에는 JSON 본문을 붙이지 않는다.
+
+authoritative packet:
+```json
+{authoritative_packet}
+```
+
+절차:
+1. AgentTurnResponse JSON을 작성해서 아래 경로에 저장해라.
+   {response_path}
+2. 저장한 JSON을 commit해라.
+   {commit_command}
+3. 최종 답변은 짧은 한국어 상태 한 줄만 남겨라.
+
+고정값:
+- world_id: {world_id}
+- turn_id: {turn_id}
+- player_input: {player_input}
+"#,
+        narrative_directive = narrative_directive,
+        authoritative_packet = authoritative_packet,
+        response_path = response_path.display(),
+        commit_command = commit_command,
+        world_id = pending.world_id,
+        turn_id = pending.turn_id,
+        player_input = pending.player_input,
+    ))
+}
+
+fn native_thread_authoritative_packet(
+    pending: &singulari_world::PendingAgentTurn,
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": pending.schema_version,
+        "world_id": pending.world_id,
+        "turn_id": pending.turn_id,
+        "status": pending.status,
+        "player_input": pending.player_input,
+        "selected_choice": pending.selected_choice,
+        "visible_context": {
+            "location": pending.visible_context.location,
+            "recent_scene_hint": compact_recent_scene_hint(&pending.visible_context.recent_scene),
+            "known_facts": pending.visible_context.known_facts,
+            "voice_anchors": pending.visible_context.voice_anchors,
+        },
+        "private_adjudication_context": pending.private_adjudication_context,
+        "output_contract": pending.output_contract,
+        "pending_ref": pending.pending_ref,
+        "thread_context_policy": {
+            "mode": "native_thread",
+            "use_thread_history_for": ["prose rhythm", "immediate emotional continuity", "recent dialogue cadence"],
+            "use_authoritative_packet_for": ["world facts", "current player input", "hidden adjudication", "output contract"],
+            "conflict_rule": "authoritative_packet_wins"
+        }
+    })
+}
+
+fn compact_recent_scene_hint(recent_scene: &[String]) -> Vec<String> {
+    const MAX_HINT_BLOCKS: usize = 2;
+    const MAX_HINT_CHARS_PER_BLOCK: usize = 1200;
+    recent_scene
+        .iter()
+        .rev()
+        .take(MAX_HINT_BLOCKS)
+        .map(|block| truncate_for_prompt_hint(block, MAX_HINT_CHARS_PER_BLOCK))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
+}
+
+fn truncate_for_prompt_hint(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{truncated} ...")
+    } else {
+        truncated
+    }
 }
 
 fn current_binary_for_prompt() -> Result<PathBuf> {
@@ -2856,6 +3070,7 @@ mod tests {
         CodexAppServerDispatch {
             app_server_url: "ws://127.0.0.1:48713".to_owned(),
             thread_id: thread_id.map(str::to_owned),
+            thread_context_mode: CodexThreadContextMode::NativeThread,
             node_bin: PathBuf::from("node"),
             binding_source: Some("test".to_owned()),
             binding_updated_at: Some("2026-04-28T00:00:00Z".to_owned()),
@@ -2907,5 +3122,16 @@ mod tests {
             app_server_stale_thread_binding_reason(Some(&result), &app_server_dispatch(None)),
             None
         );
+    }
+
+    #[test]
+    fn native_thread_recent_scene_hint_is_bounded_to_latest_two_blocks() {
+        let recent_scene = vec!["old".to_owned(), "middle".to_owned(), "가".repeat(1300)];
+        let hint = compact_recent_scene_hint(&recent_scene);
+
+        assert_eq!(hint.len(), 2);
+        assert_eq!(hint[0], "middle");
+        assert!(hint[1].chars().count() < recent_scene[2].chars().count());
+        assert!(hint[1].ends_with(" ..."));
     }
 }

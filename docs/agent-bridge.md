@@ -97,11 +97,17 @@ singulari-world --store-root .world-store host-worker \
 ```
 
 The world-specific Codex thread is the narrative working context, not the source
-of truth. The worker expects Codex to compact long threads according to normal
-runtime behavior, and it reinjects the bounded world-store packet on every turn.
-If a bound thread cannot be resumed because it is stale or missing, the worker
-clears that world's binding so the next dispatch can start a fresh thread from
-the same world DB.
+of truth. By default, `host-worker` runs with
+`--codex-thread-context-mode native-thread`: resumed app-server turns include the
+Codex App thread history for prose rhythm and immediate scene continuity, while
+each turn injects only a compact authoritative world packet for current state,
+hidden adjudication, and output contract. If a bound thread cannot be resumed
+because it is stale or missing, the worker clears that world's binding so the
+next dispatch can start a fresh thread from the same world DB.
+
+Use `--codex-thread-context-mode bounded-packet` when the thread history should
+be excluded and the full pending world-store packet should be reinjected every
+turn. This is more deterministic but grows the per-turn prompt faster.
 
 If no `--codex-app-server-url` is provided, `host-worker` starts
 `codex app-server` on a loopback port and writes

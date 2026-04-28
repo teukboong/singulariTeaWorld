@@ -1,6 +1,7 @@
 use crate::agent_bridge::{
     AgentCommitTurnOptions, AgentSubmitTurnOptions, AgentTurnResponse, PendingAgentTurn,
     commit_agent_turn, enqueue_agent_turn, load_codex_thread_binding, load_pending_agent_turn,
+    normalize_narrative_level,
 };
 use crate::start::{StartWorldOptions, start_world};
 use crate::store::{
@@ -62,6 +63,8 @@ impl VnServeOptions {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VnChooseRequest {
     pub input: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub narrative_level: Option<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -467,7 +470,7 @@ fn choose_response(state: &VnServerState, body: &[u8]) -> HttpResponse {
         return error_response("400 Bad Request", error.to_string());
     }
     if agent_bridge_enabled(state) {
-        return choose_agent_pending_response(state, request.input);
+        return choose_agent_pending_response(state, request.input, request.narrative_level);
     }
     let turn_options = AdvanceTurnOptions {
         store_root: state.store_root.clone(),
@@ -483,7 +486,11 @@ fn choose_response(state: &VnServerState, body: &[u8]) -> HttpResponse {
     current_packet_response(state)
 }
 
-fn choose_agent_pending_response(state: &VnServerState, input: String) -> HttpResponse {
+fn choose_agent_pending_response(
+    state: &VnServerState,
+    input: String,
+    narrative_level: Option<u8>,
+) -> HttpResponse {
     let world_id = match state.world_id() {
         Ok(world_id) => world_id,
         Err(error) => return error_response("500 Internal Server Error", error.to_string()),
@@ -492,6 +499,7 @@ fn choose_agent_pending_response(state: &VnServerState, input: String) -> HttpRe
         store_root: state.store_root.clone(),
         world_id,
         input,
+        narrative_level: Some(normalize_narrative_level(narrative_level)),
     }) {
         Ok(pending) => json_response(&vn_agent_pending_response(&pending)),
         Err(error) => error_response("400 Bad Request", error.to_string()),
@@ -674,10 +682,10 @@ fn visual_runtime_status(
             .filter(|asset| asset.exists)
             .map(|asset| asset.slot),
     );
-    let turn_cg_status = if packet.image.exists {
-        "saved"
-    } else if packet.image.image_generation_job.is_some() {
+    let turn_cg_status = if packet.image.image_generation_job.is_some() {
         "pending"
+    } else if packet.image.exists {
+        "saved"
     } else {
         "idle"
     }
@@ -901,6 +909,7 @@ fn new_world(state: &VnServerState, request: VnNewWorldRequest) -> Result<VnWorl
             store_root: state.store_root.clone(),
             world_id: world_id.clone(),
             input: INITIAL_AGENT_TURN_INPUT.to_owned(),
+            narrative_level: None,
         })?;
         Some(vn_agent_pending_response(&pending))
     } else {
@@ -1339,6 +1348,7 @@ impl HttpResponse {
 fn choose_request_body(input: &str) -> Vec<u8> {
     serde_json::to_vec(&VnChooseRequest {
         input: input.to_owned(),
+        narrative_level: None,
     })
     .unwrap_or_default()
 }
