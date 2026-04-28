@@ -8,6 +8,7 @@ pub mod extra_memory;
 pub mod models;
 pub mod render;
 pub mod resume;
+pub mod revival;
 pub mod sqlite;
 pub mod start;
 pub mod store;
@@ -70,6 +71,9 @@ pub use resume::{
     BuildResumePackOptions, HiddenStateSummary, RESUME_PACK_SCHEMA_VERSION, ResumePack,
     build_resume_pack, render_resume_pack_markdown,
 };
+pub use revival::{
+    AGENT_REVIVAL_PACKET_SCHEMA_VERSION, AgentRevivalCompileOptions, build_agent_revival_packet,
+};
 pub use start::{
     StartWorldOptions, StartedWorld, render_started_world_report, start_world,
     world_seed_from_compact_text,
@@ -92,10 +96,11 @@ pub use visual_assets::{
     ImageGenerationJob, LOCATION_SHEETS_DIR, MENU_BACKGROUND_FILENAME,
     ReleaseVisualJobClaimOptions, VISUAL_ASSETS_FILENAME, VISUAL_JOB_CLAIM_RELEASE_SCHEMA_VERSION,
     VISUAL_JOB_CLAIM_SCHEMA_VERSION, VISUAL_JOB_COMPLETION_SCHEMA_VERSION, VN_ASSETS_DIR,
-    VisualBudgetPolicy, VisualEntityAsset, VisualJobClaim, VisualJobClaimOutcome,
-    VisualJobClaimRelease, VisualJobCompletion, WORLD_VISUAL_ASSETS_SCHEMA_VERSION,
-    WorldVisualAsset, WorldVisualAssets, WorldVisualStyleProfile, build_world_visual_assets,
-    claim_visual_job, compile_turn_visual_prompt, complete_visual_job, load_visual_job_claim,
+    VisualArtifactKind, VisualBudgetPolicy, VisualEntityAsset, VisualJobClaim,
+    VisualJobClaimOutcome, VisualJobClaimRelease, VisualJobCompletion,
+    WORLD_VISUAL_ASSETS_SCHEMA_VERSION, WorldVisualAsset, WorldVisualAssets,
+    WorldVisualStyleProfile, build_world_visual_assets, claim_visual_job,
+    compile_turn_visual_prompt, complete_visual_job, load_visual_job_claim,
     release_visual_job_claim, visual_generation_job,
 };
 pub use vn::{

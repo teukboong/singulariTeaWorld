@@ -85,6 +85,46 @@ pub struct WorldVisualStyleProfile {
     pub negative_prompt: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VisualArtifactKind {
+    SceneCg,
+    CharacterDesignSheet,
+    LocationDesignSheet,
+    UiBackground,
+}
+
+impl VisualArtifactKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SceneCg => "scene_cg",
+            Self::CharacterDesignSheet => "character_design_sheet",
+            Self::LocationDesignSheet => "location_design_sheet",
+            Self::UiBackground => "ui_background",
+        }
+    }
+
+    #[must_use]
+    pub const fn canonical_use(self) -> &'static str {
+        match self {
+            Self::SceneCg => "display_scene",
+            Self::CharacterDesignSheet | Self::LocationDesignSheet => "reference_generation",
+            Self::UiBackground => "display_ui_background",
+        }
+    }
+
+    #[must_use]
+    pub const fn display_allowed(self) -> bool {
+        matches!(self, Self::SceneCg | Self::UiBackground)
+    }
+
+    #[must_use]
+    pub const fn reference_allowed(self) -> bool {
+        matches!(self, Self::CharacterDesignSheet | Self::LocationDesignSheet)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VisualBudgetPolicy {
     pub mode: String,
@@ -120,6 +160,10 @@ impl Default for VisualBudgetPolicy {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorldVisualAsset {
     pub slot: String,
+    pub artifact_kind: VisualArtifactKind,
+    pub canonical_use: String,
+    pub display_allowed: bool,
+    pub reference_allowed: bool,
     pub prompt: String,
     pub recommended_path: String,
     pub asset_url: String,
@@ -133,6 +177,10 @@ pub struct VisualEntityAsset {
     pub entity_type: String,
     pub display_name: String,
     pub slot: String,
+    pub artifact_kind: VisualArtifactKind,
+    pub canonical_use: String,
+    pub display_allowed: bool,
+    pub reference_allowed: bool,
     pub prompt: String,
     pub recommended_path: String,
     pub asset_url: String,
@@ -146,6 +194,10 @@ pub struct ImageGenerationJob {
     pub tool: String,
     pub image_generation_call: HostImageGenerationCall,
     pub slot: String,
+    pub artifact_kind: VisualArtifactKind,
+    pub canonical_use: String,
+    pub display_allowed: bool,
+    pub reference_allowed: bool,
     pub prompt: String,
     pub destination_path: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -235,6 +287,10 @@ pub fn build_world_visual_assets(
     let style_profile = world_style_profile(&world);
     let menu = WorldVisualAsset {
         slot: "menu_background".to_owned(),
+        artifact_kind: VisualArtifactKind::UiBackground,
+        canonical_use: VisualArtifactKind::UiBackground.canonical_use().to_owned(),
+        display_allowed: VisualArtifactKind::UiBackground.display_allowed(),
+        reference_allowed: VisualArtifactKind::UiBackground.reference_allowed(),
         prompt: menu_background_prompt(&world, &style_profile),
         recommended_path: menu_path.display().to_string(),
         asset_url: world_asset_url(world.world_id.as_str(), MENU_BACKGROUND_FILENAME),
@@ -243,6 +299,10 @@ pub fn build_world_visual_assets(
     };
     let stage = WorldVisualAsset {
         slot: "stage_background".to_owned(),
+        artifact_kind: VisualArtifactKind::UiBackground,
+        canonical_use: VisualArtifactKind::UiBackground.canonical_use().to_owned(),
+        display_allowed: VisualArtifactKind::UiBackground.display_allowed(),
+        reference_allowed: VisualArtifactKind::UiBackground.reference_allowed(),
         prompt: stage_background_prompt(&world, &style_profile),
         recommended_path: stage_path.display().to_string(),
         asset_url: world_asset_url(world.world_id.as_str(), STAGE_BACKGROUND_FILENAME),
@@ -463,6 +523,7 @@ pub fn load_visual_job_claim(
 fn image_generation_job(asset: &WorldVisualAsset) -> ImageGenerationJob {
     visual_generation_job(
         asset.slot.clone(),
+        asset.artifact_kind,
         asset.prompt.clone(),
         asset.recommended_path.clone(),
         Vec::new(),
@@ -474,6 +535,7 @@ fn image_generation_job(asset: &WorldVisualAsset) -> ImageGenerationJob {
 fn visual_entity_generation_job(asset: &VisualEntityAsset) -> ImageGenerationJob {
     visual_generation_job(
         asset.slot.clone(),
+        asset.artifact_kind,
         asset.prompt.clone(),
         asset.recommended_path.clone(),
         Vec::new(),
@@ -485,6 +547,7 @@ fn visual_entity_generation_job(asset: &VisualEntityAsset) -> ImageGenerationJob
 #[must_use]
 pub fn visual_generation_job(
     slot: String,
+    artifact_kind: VisualArtifactKind,
     prompt: String,
     destination_path: String,
     reference_asset_urls: Vec<String>,
@@ -502,6 +565,10 @@ pub fn visual_generation_job(
             overwrite: false,
         },
         slot,
+        artifact_kind,
+        canonical_use: artifact_kind.canonical_use().to_owned(),
+        display_allowed: artifact_kind.display_allowed(),
+        reference_allowed: artifact_kind.reference_allowed(),
         prompt,
         destination_path,
         reference_asset_urls,
@@ -785,6 +852,12 @@ fn character_sheet_asset(
         entity_type: "character".to_owned(),
         display_name: display_name.clone(),
         slot: format!("character_sheet:{}", character.id),
+        artifact_kind: VisualArtifactKind::CharacterDesignSheet,
+        canonical_use: VisualArtifactKind::CharacterDesignSheet
+            .canonical_use()
+            .to_owned(),
+        display_allowed: VisualArtifactKind::CharacterDesignSheet.display_allowed(),
+        reference_allowed: VisualArtifactKind::CharacterDesignSheet.reference_allowed(),
         prompt: character_sheet_prompt(world, character, display_name.as_str()),
         recommended_path: path.display().to_string(),
         asset_url: visual_entity_asset_url(
@@ -818,6 +891,12 @@ fn location_sheet_asset(
         entity_type: "location".to_owned(),
         display_name: display_name.clone(),
         slot: format!("location_sheet:{}", place.id),
+        artifact_kind: VisualArtifactKind::LocationDesignSheet,
+        canonical_use: VisualArtifactKind::LocationDesignSheet
+            .canonical_use()
+            .to_owned(),
+        display_allowed: VisualArtifactKind::LocationDesignSheet.display_allowed(),
+        reference_allowed: VisualArtifactKind::LocationDesignSheet.reference_allowed(),
         prompt: location_sheet_prompt(world, place, display_name.as_str()),
         recommended_path: path.display().to_string(),
         asset_url: visual_entity_asset_url(
@@ -929,7 +1008,11 @@ fn select_reference_assets<'a>(
         manifest
             .visual_entities
             .iter()
-            .filter(|asset| asset.exists && asset.entity_type == "character")
+            .filter(|asset| {
+                asset.exists
+                    && asset.reference_allowed
+                    && asset.artifact_kind == VisualArtifactKind::CharacterDesignSheet
+            })
             .take(max_refs),
     );
     if refs.len() < max_refs {
@@ -939,7 +1022,8 @@ fn select_reference_assets<'a>(
                 .iter()
                 .filter(|asset| {
                     asset.exists
-                        && asset.entity_type == "location"
+                        && asset.reference_allowed
+                        && asset.artifact_kind == VisualArtifactKind::LocationDesignSheet
                         && packet
                             .visible_state
                             .dashboard
@@ -1124,14 +1208,15 @@ mod tests {
     use super::{
         BuildWorldVisualAssetsOptions, CHARACTER_SHEETS_DIR, ClaimVisualJobOptions,
         CompleteVisualJobOptions, IMAGE_GENERATION_TOOL, ReleaseVisualJobClaimOptions,
-        VN_ASSETS_DIR, VisualJobClaimOutcome, build_world_visual_assets, claim_visual_job,
-        compile_turn_visual_prompt, complete_visual_job, release_visual_job_claim,
-        turn_cg_scene_hint, visual_generation_job,
+        VN_ASSETS_DIR, VisualArtifactKind, VisualJobClaimOutcome, build_world_visual_assets,
+        claim_visual_job, compile_turn_visual_prompt, complete_visual_job,
+        release_visual_job_claim, turn_cg_scene_hint, visual_generation_job,
     };
     use crate::models::{
         DashboardSummary, NarrativeScene, RenderPacket, ScanTarget, TurnChoice, VisibleState,
     };
     use crate::store::{InitWorldOptions, init_world};
+    use anyhow::Context;
     use tempfile::tempdir;
 
     const MINIMAL_PNG: &[u8] = b"\x89PNG\r\n\x1a\nminimal-test-png";
@@ -1162,6 +1247,12 @@ premise:
             store_root: Some(store),
             world_id: "stw_visual_assets".to_owned(),
         })?;
+        assert_eq!(
+            manifest.menu_background.artifact_kind,
+            VisualArtifactKind::UiBackground
+        );
+        assert!(manifest.menu_background.display_allowed);
+        assert!(!manifest.menu_background.reference_allowed);
         assert_eq!(manifest.budget_policy.mode, "balanced");
         assert_eq!(manifest.budget_policy.turn_cg_cadence_min, 5);
         assert_eq!(manifest.image_generation_jobs.len(), 3);
@@ -1172,11 +1263,25 @@ premise:
                 .any(|job| job.slot == "character_sheet:char:protagonist")
         );
         assert_eq!(manifest.visual_entities.len(), 2);
+        let protagonist_asset = manifest
+            .visual_entities
+            .iter()
+            .find(|asset| asset.slot == "character_sheet:char:protagonist")
+            .context("protagonist character sheet asset missing")?;
+        assert_eq!(
+            protagonist_asset.artifact_kind,
+            VisualArtifactKind::CharacterDesignSheet
+        );
+        assert!(!protagonist_asset.display_allowed);
+        assert!(protagonist_asset.reference_allowed);
         for job in &manifest.image_generation_jobs {
             assert_eq!(job.tool, IMAGE_GENERATION_TOOL);
             assert_eq!(job.image_generation_call.capability, "image_generation");
             assert_eq!(job.image_generation_call.slot, job.slot);
             assert_eq!(job.image_generation_call.prompt, job.prompt);
+            assert_eq!(job.canonical_use, job.artifact_kind.canonical_use());
+            assert_eq!(job.display_allowed, job.artifact_kind.display_allowed());
+            assert_eq!(job.reference_allowed, job.artifact_kind.reference_allowed());
             assert_eq!(
                 job.image_generation_call.destination_path,
                 job.destination_path
@@ -1315,6 +1420,7 @@ premise:
             .join("turn_0001.png");
         let extra_job = visual_generation_job(
             "turn_cg:turn_0001".to_owned(),
+            VisualArtifactKind::SceneCg,
             "player-visible turn CG prompt".to_owned(),
             turn_cg_path.display().to_string(),
             Vec::new(),

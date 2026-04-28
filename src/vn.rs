@@ -8,8 +8,8 @@ use crate::models::{
 use crate::render::{RenderPacketLoadOptions, load_render_packet, render_packet_markdown};
 use crate::store::{TURN_LOG_FILENAME, load_world_record, resolve_store_paths, world_file_paths};
 use crate::visual_assets::{
-    BuildWorldVisualAssetsOptions, ImageGenerationJob, VN_ASSETS_DIR, VisualBudgetPolicy,
-    WorldVisualAssets, build_world_visual_assets, compile_turn_visual_prompt,
+    BuildWorldVisualAssetsOptions, ImageGenerationJob, VN_ASSETS_DIR, VisualArtifactKind,
+    VisualBudgetPolicy, WorldVisualAssets, build_world_visual_assets, compile_turn_visual_prompt,
     visual_generation_job,
 };
 use anyhow::{Context, Result};
@@ -341,6 +341,7 @@ fn turn_cg_image_generation_job(
 ) -> ImageGenerationJob {
     visual_generation_job(
         format!("turn_cg:{turn_id}"),
+        VisualArtifactKind::SceneCg,
         compiled_prompt.prompt.clone(),
         destination_path.display().to_string(),
         compiled_prompt.reference_asset_urls.clone(),
@@ -1350,7 +1351,9 @@ fn vn_choices(world: &WorldRecord, choices: &[TurnChoice]) -> Vec<VnChoice> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BuildVnPacketOptions, HOST_WORKER_VISUAL_GENERATOR, build_vn_packet};
+    use super::{
+        BuildVnPacketOptions, HOST_WORKER_VISUAL_GENERATOR, VisualArtifactKind, build_vn_packet,
+    };
     use crate::backend_selection::{
         WorldBackendSelection, WorldTextBackend, WorldVisualBackend, save_world_backend_selection,
     };
@@ -1527,6 +1530,10 @@ premise:
         let Some(job) = packet.image.image_generation_job.as_ref() else {
             anyhow::bail!("turn_0005 should have a scene CG job");
         };
+        assert_eq!(job.artifact_kind, VisualArtifactKind::SceneCg);
+        assert_eq!(job.canonical_use, "display_scene");
+        assert!(job.display_allowed);
+        assert!(!job.reference_allowed);
         assert!(job.reference_paths.is_empty());
 
         let sheet_dir = initialized

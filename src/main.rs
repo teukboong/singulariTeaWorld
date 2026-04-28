@@ -3,25 +3,26 @@ use chrono::Utc;
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use singulari_world::{
-    ACTIVE_WORLD_FILENAME, AdvanceTurnOptions, AgentCommitTurnOptions, AgentSubmitTurnOptions,
-    AgentTurnResponse, ApplyCharacterAnchorOptions, InitWorldOptions, RenderPacketLoadOptions,
-    ValidationStatus, WorldTextBackend, WorldVisualBackend, advance_turn, apply_character_anchor,
-    build_codex_view, build_resume_pack, commit_agent_turn, enqueue_agent_turn,
-    force_chapter_summary, init_world, load_active_world, load_latest_snapshot,
-    load_pending_agent_turn, load_render_packet, load_world_backend_selection, load_world_record,
-    recent_entity_updates, recent_relationship_updates, refresh_world_docs,
-    render_advanced_turn_report, render_chat_route, render_codex_view_section_markdown,
-    render_packet_markdown, render_resume_pack_markdown, render_started_world_report,
-    repair_world_db, resolve_store_paths, resolve_world_id, route_chat_input, search_world_db,
-    start_world, validate_world, world_db_stats,
+    ACTIVE_WORLD_FILENAME, AdvanceTurnOptions, AgentCommitTurnOptions, AgentRevivalCompileOptions,
+    AgentSubmitTurnOptions, AgentTurnResponse, ApplyCharacterAnchorOptions, InitWorldOptions,
+    RenderPacketLoadOptions, ValidationStatus, WorldTextBackend, WorldVisualBackend, advance_turn,
+    apply_character_anchor, build_agent_revival_packet, build_codex_view, build_resume_pack,
+    commit_agent_turn, enqueue_agent_turn, force_chapter_summary, init_world, load_active_world,
+    load_latest_snapshot, load_pending_agent_turn, load_render_packet,
+    load_world_backend_selection, load_world_record, recent_entity_updates,
+    recent_relationship_updates, refresh_world_docs, render_advanced_turn_report,
+    render_chat_route, render_codex_view_section_markdown, render_packet_markdown,
+    render_resume_pack_markdown, render_started_world_report, repair_world_db, resolve_store_paths,
+    resolve_world_id, route_chat_input, search_world_db, start_world, validate_world,
+    world_db_stats,
 };
 use singulari_world::{
     BuildCodexViewOptions, BuildResumePackOptions, BuildVnPacketOptions,
     BuildWorldVisualAssetsOptions, ChatRouteOptions, ClaimVisualJobOptions, CodexViewSection,
     CompleteVisualJobOptions, ExportWorldOptions, ImageGenerationJob, ImportWorldOptions,
-    ReleaseVisualJobClaimOptions, StartWorldOptions, VnServeOptions, build_vn_packet,
-    build_world_visual_assets, claim_visual_job, complete_visual_job, export_world, import_world,
-    load_visual_job_claim, release_visual_job_claim, serve_vn,
+    ReleaseVisualJobClaimOptions, StartWorldOptions, VisualArtifactKind, VnServeOptions,
+    build_vn_packet, build_world_visual_assets, claim_visual_job, complete_visual_job,
+    export_world, import_world, load_visual_job_claim, release_visual_job_claim, serve_vn,
 };
 use std::collections::HashSet;
 use std::fmt;
@@ -2995,6 +2996,7 @@ fn dispatch_visual_job_via_webgpt(
         "{slot_component}-{claim_component}-webgpt-image-stderr.log"
     ));
     let image_session_kind = WebGptImageSessionKind::from_slot(claim.slot.as_str());
+    ensure_image_job_matches_session_kind(&claim.job, image_session_kind)?;
     let conversation_id = load_webgpt_image_conversation_binding(
         store_root,
         claim.world_id.as_str(),
@@ -3182,6 +3184,40 @@ fn dispatch_visual_job_via_webgpt(
     Ok(record)
 }
 
+fn ensure_image_job_matches_session_kind(
+    job: &ImageGenerationJob,
+    image_session_kind: WebGptImageSessionKind,
+) -> Result<()> {
+    let valid = match image_session_kind {
+        WebGptImageSessionKind::TurnCg => {
+            job.artifact_kind == VisualArtifactKind::SceneCg
+                && job.display_allowed
+                && !job.reference_allowed
+                && job.canonical_use == job.artifact_kind.canonical_use()
+        }
+        WebGptImageSessionKind::ReferenceAsset => {
+            matches!(
+                job.artifact_kind,
+                VisualArtifactKind::CharacterDesignSheet | VisualArtifactKind::LocationDesignSheet
+            ) && !job.display_allowed
+                && job.reference_allowed
+                && job.canonical_use == job.artifact_kind.canonical_use()
+        }
+    };
+    if valid {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "webgpt image job kind/session mismatch: slot={}, artifact_kind={:?}, canonical_use={}, display_allowed={}, reference_allowed={}, image_session_kind={}",
+        job.slot,
+        job.artifact_kind,
+        job.canonical_use,
+        job.display_allowed,
+        job.reference_allowed,
+        image_session_kind.as_str()
+    )
+}
+
 fn webgpt_image_reference_paths(job: &ImageGenerationJob) -> Result<Vec<String>> {
     job.reference_paths
         .iter()
@@ -3319,6 +3355,10 @@ fn build_webgpt_image_generation_prompt(
     prompt.push_str("Return no prose unless ChatGPT requires a short title. Do not make a collage, grid, contact sheet, or variants.\n");
     prompt.push_str("Image job slot: ");
     prompt.push_str(job.slot.as_str());
+    prompt.push_str("\nArtifact kind: ");
+    prompt.push_str(job.artifact_kind.as_str());
+    prompt.push_str("\nCanonical use: ");
+    prompt.push_str(job.canonical_use.as_str());
     prompt.push_str("\nDestination path: ");
     prompt.push_str(job.destination_path.as_str());
     prompt.push('\n');
@@ -3432,123 +3472,15 @@ const NARRATIVE_TEXT_DESIGN_DIRECTIVE: &str = r"- 캐릭터 voice_anchors는 캐
 - 문체를 설명문으로 노출하지 마라. 대사 말끝, 행동 습관, 문단 박자, 장면 압력으로만 체감되게 써라.
 - tone_notes에는 이번 턴에서 실제로 반영한 캐릭터 화법/어미/어투와 전역 서사 문체를 짧게 기록한다.";
 
-const AGENT_REVIVAL_PACKET_SCHEMA_VERSION: &str = "singulari.agent_revival_packet.v1";
-const WEBGPT_REVIVAL_RECENT_EVENTS: usize = 24;
-const WEBGPT_REVIVAL_RECENT_MEMORIES: usize = 24;
-const WEBGPT_REVIVAL_CHAPTER_LIMIT: usize = 6;
-const WEBGPT_REVIVAL_ARCHIVE_LIMIT: usize = 24;
-const WEBGPT_REVIVAL_UPDATE_LIMIT: usize = 16;
-const WEBGPT_REVIVAL_SEARCH_LIMIT: usize = 8;
-
-fn build_agent_revival_packet(
-    store_root: Option<&Path>,
-    pending: &singulari_world::PendingAgentTurn,
-    engine_session_kind: &str,
-) -> Result<serde_json::Value> {
-    let store_paths = resolve_store_paths(store_root)?;
-    let world_dir = store_paths.worlds_dir.join(pending.world_id.as_str());
-    let mut resume_options = BuildResumePackOptions::new(pending.world_id.clone());
-    resume_options.store_root = store_root.map(Path::to_path_buf);
-    resume_options.recent_events = WEBGPT_REVIVAL_RECENT_EVENTS;
-    resume_options.recent_memories = WEBGPT_REVIVAL_RECENT_MEMORIES;
-    resume_options.chapter_limit = WEBGPT_REVIVAL_CHAPTER_LIMIT;
-    let resume_pack = build_resume_pack(&resume_options).with_context(|| {
-        format!(
-            "failed to build revival resume pack: world_id={}",
-            pending.world_id
-        )
-    })?;
-    let mut codex_view_options = BuildCodexViewOptions::new(pending.world_id.clone());
-    codex_view_options.store_root = store_root.map(Path::to_path_buf);
-    codex_view_options.query = Some(pending.player_input.clone());
-    codex_view_options.limit = WEBGPT_REVIVAL_ARCHIVE_LIMIT;
-    let archive_view = build_codex_view(&codex_view_options).with_context(|| {
-        format!(
-            "failed to build webgpt archive revival view: world_id={}",
-            pending.world_id
-        )
-    })?;
-    let query_recall_hits = search_world_db(
-        &world_dir,
-        pending.world_id.as_str(),
-        pending.player_input.as_str(),
-        WEBGPT_REVIVAL_SEARCH_LIMIT,
-    )
-    .with_context(|| {
-        format!(
-            "failed to build webgpt query recall hits: world_id={}, turn_id={}",
-            pending.world_id, pending.turn_id
-        )
-    })?;
-    let entity_updates = recent_entity_updates(
-        &world_dir,
-        pending.world_id.as_str(),
-        WEBGPT_REVIVAL_UPDATE_LIMIT,
-    )?;
-    let relationship_updates = recent_relationship_updates(
-        &world_dir,
-        pending.world_id.as_str(),
-        WEBGPT_REVIVAL_UPDATE_LIMIT,
-    )?;
-    Ok(serde_json::json!({
-        "schema_version": AGENT_REVIVAL_PACKET_SCHEMA_VERSION,
-        "world_id": pending.world_id,
-        "turn_id": pending.turn_id,
-        "engine_session_kind": engine_session_kind,
-        "retrieval_profile": {
-            "name": "webgpt_active_memory",
-            "purpose": "WebGPT context-window and compaction behavior are not the world source of truth, so host-worker proactively surfaces more player-visible continuity from world.db before each turn.",
-            "recent_events": WEBGPT_REVIVAL_RECENT_EVENTS,
-            "recent_character_memories": WEBGPT_REVIVAL_RECENT_MEMORIES,
-            "chapter_summaries": WEBGPT_REVIVAL_CHAPTER_LIMIT,
-            "archive_limit": WEBGPT_REVIVAL_ARCHIVE_LIMIT,
-            "update_limit": WEBGPT_REVIVAL_UPDATE_LIMIT,
-            "query_recall_limit": WEBGPT_REVIVAL_SEARCH_LIMIT
-        },
-        "current_turn": {
-            "schema_version": pending.schema_version,
-            "world_id": pending.world_id,
-            "turn_id": pending.turn_id,
-            "status": pending.status,
-            "player_input": pending.player_input,
-            "selected_choice": pending.selected_choice,
-            "created_at": pending.created_at,
-            "pending_ref": pending.pending_ref,
-        },
-        "memory_revival": {
-            "resume_pack": resume_pack,
-            "recent_scene_window": pending.visible_context.recent_scene,
-            "known_facts": pending.visible_context.known_facts,
-            "voice_anchors": pending.visible_context.voice_anchors,
-            "extra_memory": pending.visible_context.extra_memory,
-            "active_memory_revival": {
-                "player_visible_archive_view": archive_view,
-                "query_recall": {
-                    "query": pending.player_input,
-                    "hits": query_recall_hits
-                },
-                "recent_entity_updates": entity_updates,
-                "recent_relationship_updates": relationship_updates
-            }
-        },
-        "private_adjudication_context": pending.private_adjudication_context,
-        "output_contract": pending.output_contract,
-        "source_of_truth_policy": {
-            "world_state_source": "world_store",
-            "turn_source": "current_turn",
-            "continuity_source": "memory_revival.resume_pack + memory_revival.active_memory_revival",
-            "session_context_use": ["prose rhythm", "immediate emotional continuity", "recent dialogue cadence"],
-            "session_context_must_not_supply": ["world facts", "current player input", "hidden adjudication", "output contract"],
-            "conflict_rule": "revival_packet_wins"
-        }
-    }))
-}
-
 fn build_webgpt_turn_prompt(
     store_root: Option<&Path>,
     pending: &singulari_world::PendingAgentTurn,
 ) -> Result<String> {
-    let revival_packet = build_agent_revival_packet(store_root, pending, "webgpt_project_session")?;
+    let revival_packet = build_agent_revival_packet(&AgentRevivalCompileOptions {
+        store_root,
+        pending,
+        engine_session_kind: "webgpt_project_session",
+    })?;
     let revival_packet = serde_json::to_string_pretty(&revival_packet)
         .context("failed to serialize webgpt revival packet")?;
     let narrative_budget = &pending.output_contract.narrative_budget;
@@ -3900,6 +3832,10 @@ mod tests {
                 overwrite: false,
             },
             slot: "turn_cg:turn_0002".to_owned(),
+            artifact_kind: VisualArtifactKind::SceneCg,
+            canonical_use: "display_scene".to_owned(),
+            display_allowed: true,
+            reference_allowed: false,
             prompt: "draw the scene".to_owned(),
             destination_path: "/tmp/turn_0002.png".to_owned(),
             reference_asset_urls: Vec::new(),
@@ -3935,6 +3871,10 @@ mod tests {
                 overwrite: false,
             },
             slot: "character_sheet:char:protagonist".to_owned(),
+            artifact_kind: VisualArtifactKind::CharacterDesignSheet,
+            canonical_use: "reference_generation".to_owned(),
+            display_allowed: false,
+            reference_allowed: true,
             prompt: "draw the character sheet".to_owned(),
             destination_path: "/tmp/char_protagonist.png".to_owned(),
             reference_asset_urls: Vec::new(),
@@ -3973,6 +3913,10 @@ mod tests {
                 overwrite: false,
             },
             slot: "turn_cg:turn_0002".to_owned(),
+            artifact_kind: VisualArtifactKind::SceneCg,
+            canonical_use: "display_scene".to_owned(),
+            display_allowed: true,
+            reference_allowed: false,
             prompt: "draw the scene".to_owned(),
             destination_path: "/tmp/turn_0002.png".to_owned(),
             reference_asset_urls: Vec::new(),
@@ -4001,6 +3945,10 @@ mod tests {
                 overwrite: false,
             },
             slot: "turn_cg:turn_0002".to_owned(),
+            artifact_kind: VisualArtifactKind::SceneCg,
+            canonical_use: "display_scene".to_owned(),
+            display_allowed: true,
+            reference_allowed: false,
             prompt: "draw the scene".to_owned(),
             destination_path: "/tmp/turn_0002.png".to_owned(),
             reference_asset_urls: Vec::new(),
