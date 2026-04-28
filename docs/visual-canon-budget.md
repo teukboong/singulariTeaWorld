@@ -73,8 +73,9 @@ Default balanced behavior:
 - Initial turn uses world menu/stage backgrounds.
 - Veiled characters do not get reference sheet jobs until the story makes them
   player-visible.
-- Existing turn CG is reused.
-- User retry creates one background retry job.
+- Existing turn CG is reused until the user explicitly requests regeneration.
+- User retry creates one background retry job even when an image already exists;
+  completion overwrites the turn PNG and clears the retry marker.
 - Codex/log/settings turns do not generate CG.
 - Major transitions and explicit visual modes can generate immediately.
 - Normal story turns use sparse cadence: roughly one CG per

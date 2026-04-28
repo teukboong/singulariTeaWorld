@@ -80,8 +80,11 @@ then calls `worldsim_complete_visual_job`.
 
 Each world owns a durable Codex `thread_id` under
 `worlds/<world-id>/agent_bridge/codex_thread_binding.json`. That thread keeps
-the warm narrative context; the world DB remains source of truth and is injected
-into every turn so Codex compaction or thread rebuilds do not erase canon.
+the warm narrative context. By default, `host-worker` resumes it in
+`native-thread` mode so Codex App history carries prose rhythm and immediate
+continuity, while each turn injects a compact authoritative world packet for
+current state, hidden adjudication, and output contract. The world DB remains
+source of truth, so Codex compaction or thread rebuilds do not erase canon.
 When no active world exists yet, `host-worker` idles until the browser creates
 or loads one.
 

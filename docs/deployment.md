@@ -111,6 +111,11 @@ claim -> Codex App `imageGeneration` -> saved PNG -> completion metadata.
 Keep Codex App open while playing. Hosts that already own the websocket may pass
 `--codex-app-server-url`.
 
+Text turns default to `--codex-thread-context-mode native-thread`: Codex App
+thread history carries narrative rhythm, and each dispatch injects only a
+compact authoritative world packet for current state. Use `bounded-packet` for
+the older full-packet reinjection mode.
+
 For macOS `launchctl` supervision, use absolute paths. If `codex` comes from npm,
 the launcher uses `/usr/bin/env node`; set PATH in the LaunchAgent so `node` is
 visible, or managed app-server startup will fail before listening.

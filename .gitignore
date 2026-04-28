@@ -18,6 +18,7 @@ vn-web/current-vn.json
 *.swp
 *.tmp
 *.log
+screenlog.*
 
 # Local extracted design references.
 design-system/

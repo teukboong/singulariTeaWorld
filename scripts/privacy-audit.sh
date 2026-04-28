@@ -10,6 +10,10 @@ DEFAULT_REGEX_PATTERNS=(
   "/Users/"
 )
 
+SAFE_REGEX_PLACEHOLDERS=(
+  "/Users/<user>"
+)
+
 FIXED_PATTERNS=()
 
 add_fixed_pattern() {
@@ -57,25 +61,42 @@ report_failure() {
   FAILED=1
 }
 
+filter_safe_regex_placeholders() {
+  local matches="$1"
+  local safe
+  for safe in "${SAFE_REGEX_PLACEHOLDERS[@]}"; do
+    matches="$(printf '%s\n' "$matches" | grep -v -F -- "$safe" || true)"
+  done
+  printf '%s' "$matches"
+}
+
+report_regex_matches() {
+  local label="$1"
+  local pattern="$2"
+  local matches="$3"
+  matches="$(filter_safe_regex_placeholders "$matches")"
+  if [[ -n "$matches" ]]; then
+    printf '%s\n' "$matches"
+    report_failure "$label matched regex: $pattern"
+  fi
+}
+
 check_regex_pattern() {
   local pattern="$1"
+  local matches
 
-  if grep -n -E -- "$pattern" "$PATH_FILE"; then
-    report_failure "tracked path matched regex: $pattern"
-  fi
+  matches="$(grep -n -E -- "$pattern" "$PATH_FILE" || true)"
+  report_regex_matches "tracked path" "$pattern" "$matches"
 
-  if git grep -I -n -E -- "$pattern" -- . ":(exclude)scripts/privacy-audit.sh"; then
-    report_failure "tracked content matched regex: $pattern"
-  fi
+  matches="$(git grep -I -n -E -- "$pattern" -- . ":(exclude)scripts/privacy-audit.sh" || true)"
+  report_regex_matches "tracked content" "$pattern" "$matches"
 
-  if grep -n -E -- "$pattern" "$LOG_FILE"; then
-    report_failure "git history matched regex: $pattern"
-  fi
+  matches="$(grep -n -E -- "$pattern" "$LOG_FILE" || true)"
+  report_regex_matches "git history" "$pattern" "$matches"
 
   while IFS= read -r rev; do
-    if git grep -I -n -E -- "$pattern" "$rev" -- . ":(exclude)scripts/privacy-audit.sh"; then
-      report_failure "tracked historical content matched regex: $pattern"
-    fi
+    matches="$(git grep -I -n -E -- "$pattern" "$rev" -- . ":(exclude)scripts/privacy-audit.sh" || true)"
+    report_regex_matches "tracked historical content" "$pattern" "$matches"
   done < <(git rev-list "$HISTORY_REF")
 }
 

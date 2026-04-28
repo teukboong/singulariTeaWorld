@@ -208,10 +208,13 @@ command works in an interactive shell.
 
 `world_id -> thread_id` is the durable realtime context contract. The websocket
 URL is replaceable runtime plumbing; the saved thread is the world's narrative
-working context. Codex may compact that thread normally, so every dispatched
-turn must still include the bounded world-store packet. If app-server
-`thread/resume` fails for a stale or missing thread, clear only that world's
-binding and let the next dispatch rebuild from the world store.
+working context. The default `--codex-thread-context-mode native-thread`
+includes prior app-server turns for prose rhythm and immediate continuity while
+injecting only a compact authoritative world packet for current state, hidden
+adjudication, and output contract. Use `bounded-packet` only when thread history
+should be excluded and the full pending packet reinjected every turn. If
+app-server `thread/resume` fails for a stale or missing thread, clear only that
+world's binding and let the next dispatch rebuild from the world store.
 
 ## Visual Job Worker
 
@@ -220,6 +223,10 @@ Image jobs are host-consumed jobs, not `codex exec` jobs. The same
 claim one job, request Codex App `imageGeneration`, copy the returned
 `savedPath`, then complete the job. The Codex chat/session-level `image_gen`
 path is not an acceptable substitute.
+
+Turn CG retry is a regeneration request. If a current turn image already exists,
+the retry marker still creates a new `turn_cg:<turn_id>` job; completion
+overwrites the turn PNG, clears the visual claim, and removes the retry marker.
 
 The MCP path uses the standalone `singulari-world-mcp` tool surface.
 `worldsim_claim_visual_job` returns structured MCP content containing

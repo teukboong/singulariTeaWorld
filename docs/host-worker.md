@@ -41,15 +41,19 @@ the browser as long as Codex App and `host-worker` remain alive.
 - Read the active world from `.world-store/active_world.json`.
 - When `pending_turn.json` exists, resume the saved world thread or start a new
   Codex thread.
-- Send the bounded world prompt through `turn/start`.
+- Send a prompt through `turn/start`. In the default `native-thread` mode, the
+  prompt keeps the Codex App thread history and injects only a compact
+  authoritative world packet; `bounded-packet` excludes prior app-server turns
+  and reinjects the full pending packet.
 - Persist the returned `thread_id` in
   `worlds/<world-id>/agent_bridge/codex_thread_binding.json`.
 - Commit the agent-authored visible turn through the normal world-store
   contract.
 
 That thread is the world's warm narrative context. The world DB and JSON/JSONL
-files remain source of truth and are injected into every turn, so Codex
-compaction or thread rebuilds do not erase canon.
+files remain source of truth; the compact authoritative packet wins over thread
+memory whenever they conflict, so Codex compaction or thread rebuilds do not
+erase canon.
 
 If `thread/resume` fails for a stale or missing thread, the worker clears only
 that world's binding. The next tick starts a fresh thread from the same world
@@ -62,6 +66,10 @@ Image generation is the same worker loop:
 - Read the returned `savedPath`.
 - Copy the PNG to `destination_path`.
 - Complete the visual job and clear the claim.
+
+Turn CG retry is allowed even when the current turn PNG already exists. A retry
+marker creates a new `turn_cg:<turn_id>` job, runtime status reports it as
+pending/claimed, and completion replaces the PNG and removes the retry marker.
 
 The simulator binary never calls external image providers, `~/.codex` skills,
 the active chat visual session, shell drawing scripts, SVG placeholders, or
@@ -87,7 +95,7 @@ that lookup. A suitable launchd environment includes the directories containing
 `node`, `codex`, and the system tools:
 
 ```text
-PATH=/usr/local/bin:/Users/<user>/.npm/bin:/usr/bin:/bin:/usr/sbin:/sbin
+PATH=/usr/local/bin:$HOME/.npm/bin:/usr/bin:/bin:/usr/sbin:/sbin
 ```
 
 When replacing an old runtime, stop the old `vn-serve`, `host-worker`, and any
