@@ -124,6 +124,14 @@ async function proxyToOrigin(request, env, key) {
 
   const headers = new Headers(request.headers);
   headers.delete("host");
+  const mcpSessionId = request.headers.get("mcp-session-id");
+  if (mcpSessionId) {
+    headers.set("mcp-session-id", mcpSessionId);
+  }
+  const mcpProtocolVersion = request.headers.get("mcp-protocol-version");
+  if (mcpProtocolVersion) {
+    headers.set("mcp-protocol-version", mcpProtocolVersion);
+  }
   headers.set("X-Forwarded-Host", incoming.host);
   headers.set("X-Forwarded-Proto", incoming.protocol.replace(":", ""));
   headers.set("X-Singulari-External-Host", incoming.host);
