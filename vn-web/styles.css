@@ -1376,7 +1376,8 @@ select {
   color: color-mix(in srgb, var(--paper) 72%, var(--muted));
 }
 
-.projection-health-panel {
+.projection-health-panel,
+.world-job-ledger-panel {
   display: grid;
   grid-column: 1 / -1;
   gap: 8px;
@@ -1394,6 +1395,8 @@ select {
   padding: 8px;
 }
 
+.world-job-ledger-title,
+.world-job-ledger-row-head,
 .host-supervisor-title,
 .host-supervisor-row-head {
   display: flex;
@@ -1403,6 +1406,8 @@ select {
   min-width: 0;
 }
 
+.world-job-ledger-title strong,
+.world-job-ledger-row-head strong,
 .host-supervisor-title strong,
 .host-supervisor-row-head strong {
   color: var(--paper-strong);
@@ -1411,6 +1416,8 @@ select {
   letter-spacing: 0;
 }
 
+.world-job-ledger-title span,
+.world-job-ledger-row-head span,
 .host-supervisor-title span,
 .host-supervisor-row-head span {
   color: var(--muted);
@@ -1420,12 +1427,14 @@ select {
   overflow-wrap: anywhere;
 }
 
+.world-job-ledger-list,
 .host-supervisor-list {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 6px;
 }
 
+.world-job-ledger-row,
 .host-supervisor-row {
   display: grid;
   gap: 5px;
@@ -1434,18 +1443,23 @@ select {
   background: rgba(238, 238, 238, 0.03);
 }
 
+.world-job-ledger-row[data-status="completed"],
 .host-supervisor-row[data-status="ready"] {
   border-left-color: color-mix(in srgb, var(--world-accent) 62%, var(--line-soft));
 }
 
+.world-job-ledger-row[data-status="pending"],
 .host-supervisor-row[data-status="idle"] {
   border-left-color: color-mix(in srgb, #b6bccd 54%, var(--line-soft));
 }
 
+.world-job-ledger-row[data-status="claimed"],
 .host-supervisor-row[data-status="blocked"] {
   border-left-color: color-mix(in srgb, #f1b5b5 68%, var(--line-soft));
 }
 
+.world-job-ledger-row p,
+.world-job-ledger-empty,
 .host-supervisor-row p,
 .host-supervisor-empty {
   margin: 0;

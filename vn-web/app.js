@@ -1120,6 +1120,7 @@ function renderRuntimeStatus(status) {
     runtimeStatusPill("CG", visual, selection.visual_backend),
     runtimeStatusPill("상태", projection, "store"),
     runtimeStatusPill("워커", supervisor, "host-supervisor"),
+    worldJobLedgerPanel(status?.details?.world_jobs),
     hostSupervisorPanel(status?.details?.host_supervisor),
     projectionHealthPanel(status?.details?.projection_health),
   );
@@ -1271,6 +1272,51 @@ function hostSupervisorPanel(plan) {
   }
   panel.append(list);
   return panel;
+}
+
+function worldJobLedgerPanel(jobs) {
+  const panel = document.createElement("section");
+  panel.className = "world-job-ledger-panel";
+  const title = document.createElement("div");
+  title.className = "world-job-ledger-title";
+  const heading = document.createElement("strong");
+  heading.textContent = "World Jobs";
+  const count = document.createElement("span");
+  const items = Array.isArray(jobs) ? jobs : [];
+  count.textContent = `${items.length}`;
+  title.append(heading, count);
+  panel.append(title);
+  if (!items.length) {
+    const empty = document.createElement("p");
+    empty.className = "world-job-ledger-empty";
+    empty.textContent = "job 없음";
+    panel.append(empty);
+    return panel;
+  }
+  const list = document.createElement("div");
+  list.className = "world-job-ledger-list";
+  for (const job of items) {
+    list.append(worldJobLedgerRow(job));
+  }
+  panel.append(list);
+  return panel;
+}
+
+function worldJobLedgerRow(job) {
+  const row = document.createElement("article");
+  row.className = "world-job-ledger-row";
+  row.dataset.status = job.status || "unknown";
+  const head = document.createElement("div");
+  head.className = "world-job-ledger-row-head";
+  const name = document.createElement("strong");
+  name.textContent = job.job_id || "job";
+  const status = document.createElement("span");
+  status.textContent = job.status || "unknown";
+  head.append(name, status);
+  const detail = document.createElement("p");
+  detail.textContent = `${job.kind || "kind"} · ${job.slot || "slot"}`;
+  row.append(head, detail);
+  return row;
 }
 
 function hostSupervisorLaneRow(lane) {
