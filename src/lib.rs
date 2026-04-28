@@ -15,6 +15,7 @@ pub mod start;
 pub mod store;
 pub mod transfer;
 pub mod turn;
+pub mod turn_commit;
 pub mod validate;
 pub mod visual_assets;
 pub mod vn;
@@ -94,6 +95,10 @@ pub use transfer::{
     ImportWorldOptions, ImportWorldReport, export_world, import_world,
 };
 pub use turn::{AdvanceTurnOptions, AdvancedTurn, advance_turn, render_advanced_turn_report};
+pub use turn_commit::{
+    TURN_COMMIT_ENVELOPE_SCHEMA_VERSION, TURN_COMMITS_FILENAME, TurnCommitEnvelope,
+    TurnCommitStatus, append_turn_commit_envelope,
+};
 pub use validate::{ValidationReport, ValidationStatus, validate_world};
 pub use visual_assets::{
     BuildWorldVisualAssetsOptions, CHARACTER_SHEETS_DIR, ClaimVisualJobOptions,

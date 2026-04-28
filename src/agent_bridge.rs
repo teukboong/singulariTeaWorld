@@ -9,6 +9,7 @@ use crate::models::{
 };
 use crate::store::{WorldFilePaths, read_json, resolve_store_paths, world_file_paths, write_json};
 use crate::turn::{AdvanceTurnOptions, advance_turn};
+use crate::turn_commit::{TurnCommitEnvelope, append_turn_commit_envelope};
 use crate::vn::{BuildVnPacketOptions, VnPacket, build_vn_packet};
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
@@ -386,6 +387,15 @@ pub fn commit_agent_turn(options: &AgentCommitTurnOptions) -> Result<CommittedAg
         pending.visible_context.location.as_str(),
         &response.extra_contacts,
     )?;
+    let before_commit_snapshot: TurnSnapshot = read_json(&files.latest_snapshot)?;
+    append_turn_commit_envelope(
+        files.dir.as_path(),
+        &TurnCommitEnvelope::prepared(
+            &pending,
+            before_commit_snapshot.turn_id.as_str(),
+            Utc::now().to_rfc3339(),
+        ),
+    )?;
 
     let advanced = advance_turn(&AdvanceTurnOptions {
         store_root: options.store_root.clone(),
@@ -436,6 +446,14 @@ pub fn commit_agent_turn(options: &AgentCommitTurnOptions) -> Result<CommittedAg
         packet,
     };
     write_json(&commit_record_path, &committed)?;
+    append_turn_commit_envelope(
+        files.dir.as_path(),
+        &TurnCommitEnvelope::committed(
+            &pending,
+            before_commit_snapshot.turn_id.as_str(),
+            &committed,
+        ),
+    )?;
     commit_extra_memory_projection(&extra_memory_projection)?;
     fs::remove_file(&pending_path)
         .with_context(|| format!("failed to remove {}", pending_path.display()))?;
@@ -796,6 +814,7 @@ mod tests {
     use crate::store::{
         InitWorldOptions, init_world, read_json, resolve_store_paths, world_file_paths,
     };
+    use crate::turn_commit::{TURN_COMMITS_FILENAME, TurnCommitEnvelope, TurnCommitStatus};
     use crate::vn::{BuildVnPacketOptions, build_vn_packet};
     use tempfile::tempdir;
 
@@ -984,6 +1003,18 @@ premise:
             },
         })?;
         assert_eq!(committed.turn_id, "turn_0001");
+        let store_paths = resolve_store_paths(Some(store.as_path()))?;
+        let files = world_file_paths(&store_paths, "stw_agent");
+        let raw = std::fs::read_to_string(files.dir.join(TURN_COMMITS_FILENAME))?;
+        let envelopes = raw
+            .lines()
+            .map(serde_json::from_str::<TurnCommitEnvelope>)
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(envelopes.len(), 2);
+        assert_eq!(envelopes[0].status, TurnCommitStatus::Prepared);
+        assert_eq!(envelopes[1].status, TurnCommitStatus::Committed);
+        assert_eq!(envelopes[1].parent_turn_id, "turn_0000");
+        assert_eq!(envelopes[1].turn_id, "turn_0001");
 
         let packet = build_vn_packet(&BuildVnPacketOptions {
             store_root: Some(store),
