@@ -78,9 +78,9 @@ The engine must not write "anchor character", "hidden identity", "destined
 guide", or equivalent focus text into player-facing output unless canon already
 made it visible.
 
-## Slot 4
+## Slot 7
 
-Slot 4 remains useful and should not be removed. Its active label is
+Slot 7 remains useful and should not be removed. Its active label is
 `판단 위임`.
 
 It is a meta-GM judgment slot, not an in-world guide. It means:
@@ -154,6 +154,7 @@ unrequested genre injection.
   gifted protagonist" with neutral simulator seeds.
 - Stop deterministic entity updates from adding protagonist-anchor story tension
   every turn.
-- Treat slot 4 as `판단 위임`; keep legacy `안내자의 선택` readable only for old
-  worlds and tests.
+- Treat slots 1-5 as scene-specific presented choices, slot 6 as inline
+  `자유서술`, and slot 7 as `판단 위임`; keep legacy `안내자의 선택` readable only
+  for old worlds and tests.
 - Prompt all text backends with the anti-trope rule and pressure-vector rule.

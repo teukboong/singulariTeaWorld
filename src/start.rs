@@ -223,7 +223,7 @@ pub fn render_started_world_report(started: &StartedWorld) -> String {
         format!("world_dir: {}", started.initialized.world_dir.display()),
         format!("snapshot: {}", started.initialized.snapshot_path.display()),
         format!("active_world: {}", started.active_binding.world_id),
-        "next: singulari-world turn --input \"4\" --render".to_owned(),
+        "next: singulari-world turn --input \"1\" --render".to_owned(),
     ]
     .join("\n")
 }

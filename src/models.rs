@@ -21,8 +21,9 @@ pub const OPENING_LOCATION_ID: &str = "place:opening_location";
 pub const INITIAL_TURN_ID: &str = "turn_0000";
 pub const INITIAL_EVENT_ID: &str = "evt_000000";
 pub const DEFAULT_CHOICE_COUNT: usize = 7;
-pub const FREEFORM_CHOICE_SLOT: u8 = 7;
+pub const FREEFORM_CHOICE_SLOT: u8 = 6;
 pub const FREEFORM_CHOICE_TAG: &str = "자유서술";
+pub const GUIDE_CHOICE_SLOT: u8 = 7;
 pub const GUIDE_CHOICE_TAG: &str = "판단 위임";
 pub const LEGACY_GUIDE_CHOICE_TAG: &str = "안내자의 선택";
 pub const GUIDE_CHOICE_REDACTED_INTENT: &str = "맡긴다. 세부 내용은 선택 후 드러난다.";
@@ -40,6 +41,8 @@ const DEPRECATED_GUIDE_CHOICE_HINTS: &[(&str, &str)] = &[
         "주인공이 안내자의 최선 후보를 따른 기록",
         "주인공이 판단 위임에 맡긴 기록",
     ),
+    ("4번 [안내자의 선택]", "7번 [판단 위임]"),
+    ("4번 [판단 위임]", "7번 [판단 위임]"),
     ("안내자의 최선 후보", "판단 위임"),
     ("안내자의 선택", GUIDE_CHOICE_TAG),
     ("앵커 인물", "아직 정해지지 않은 극점"),
@@ -857,38 +860,45 @@ impl TurnSnapshot {
 #[must_use]
 pub fn default_turn_choices() -> Vec<TurnChoice> {
     vec![
-        TurnChoice {
-            slot: 1,
+        default_presented_choice(1),
+        default_presented_choice(2),
+        default_presented_choice(3),
+        default_presented_choice(4),
+        default_presented_choice(5),
+        default_freeform_choice(),
+        default_guide_choice(),
+    ]
+}
+
+#[must_use]
+fn default_presented_choice(slot: u8) -> TurnChoice {
+    match slot {
+        1 => TurnChoice {
+            slot,
             tag: "움직임".to_owned(),
             intent: "현재 장소에서 가장 직접적으로 가능한 이동이나 접근을 시도한다".to_owned(),
         },
-        TurnChoice {
-            slot: 2,
+        2 => TurnChoice {
+            slot,
             tag: "살핌".to_owned(),
             intent: "몸, 장소, 물건, 흔적 중 지금 실제로 보이는 것을 살핀다".to_owned(),
         },
-        TurnChoice {
-            slot: 3,
+        3 => TurnChoice {
+            slot,
             tag: "접촉".to_owned(),
             intent: "현장에 있는 사람, 기척, 사회적 신호에 조심스럽게 반응한다".to_owned(),
         },
-        TurnChoice {
-            slot: 4,
-            tag: GUIDE_CHOICE_TAG.to_owned(),
-            intent: GUIDE_CHOICE_REDACTED_INTENT.to_owned(),
-        },
-        TurnChoice {
-            slot: 5,
+        4 => TurnChoice {
+            slot,
             tag: "기록".to_owned(),
             intent: "현재 알려진 세계 기록을 연다".to_owned(),
         },
-        TurnChoice {
-            slot: 6,
+        _ => TurnChoice {
+            slot,
             tag: "흐름".to_owned(),
             intent: "시간, 위험, 주변 움직임이 한 박자 뒤 어떻게 밀려오는지 본다".to_owned(),
         },
-        default_freeform_choice(),
-    ]
+    }
 }
 
 #[must_use]
@@ -896,20 +906,61 @@ pub fn default_freeform_choice() -> TurnChoice {
     TurnChoice {
         slot: FREEFORM_CHOICE_SLOT,
         tag: FREEFORM_CHOICE_TAG.to_owned(),
-        intent: "7 뒤에 직접 행동, 말, 내면 판단을 이어서 서술한다".to_owned(),
+        intent: "6 뒤에 직접 행동, 말, 내면 판단을 이어서 서술한다".to_owned(),
+    }
+}
+
+#[must_use]
+pub fn default_guide_choice() -> TurnChoice {
+    TurnChoice {
+        slot: GUIDE_CHOICE_SLOT,
+        tag: GUIDE_CHOICE_TAG.to_owned(),
+        intent: GUIDE_CHOICE_REDACTED_INTENT.to_owned(),
     }
 }
 
 #[must_use]
 pub fn normalize_turn_choices(choices: &[TurnChoice]) -> Vec<TurnChoice> {
-    let mut normalized = choices.to_vec();
-    if !normalized
+    let mut ordinary = choices
         .iter()
-        .any(|choice| choice.slot == FREEFORM_CHOICE_SLOT)
-    {
-        normalized.push(default_freeform_choice());
+        .filter(|choice| {
+            choice.tag != FREEFORM_CHOICE_TAG && !is_guide_choice_tag(choice.tag.as_str())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    ordinary.sort_by_key(|choice| choice.slot);
+
+    let mut normalized = Vec::with_capacity(DEFAULT_CHOICE_COUNT);
+    for slot in 1..FREEFORM_CHOICE_SLOT {
+        let mut choice = ordinary
+            .get(usize::from(slot - 1))
+            .cloned()
+            .unwrap_or_else(|| default_presented_choice(slot));
+        choice.slot = slot;
+        normalized.push(choice);
     }
-    normalized.sort_by_key(|choice| choice.slot);
+
+    let mut freeform = choices
+        .iter()
+        .find(|choice| choice.tag == FREEFORM_CHOICE_TAG)
+        .cloned()
+        .unwrap_or_else(default_freeform_choice);
+    freeform.slot = FREEFORM_CHOICE_SLOT;
+    if freeform.intent.contains("7 뒤에") {
+        freeform.intent = freeform.intent.replace("7 뒤에", "6 뒤에");
+    }
+    normalized.push(freeform);
+
+    let mut guide = choices
+        .iter()
+        .find(|choice| is_guide_choice_tag(choice.tag.as_str()))
+        .cloned()
+        .unwrap_or_else(default_guide_choice);
+    guide.slot = GUIDE_CHOICE_SLOT;
+    GUIDE_CHOICE_TAG.clone_into(&mut guide.tag);
+    GUIDE_CHOICE_REDACTED_INTENT.clone_into(&mut guide.intent);
+    normalized.push(guide);
+
     normalized
 }
 
@@ -1063,7 +1114,9 @@ const fn default_true() -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        CharacterVoiceAnchor, GUIDE_CHOICE_REDACTED_INTENT, redact_guide_choice_public_hints,
+        CharacterVoiceAnchor, FREEFORM_CHOICE_SLOT, FREEFORM_CHOICE_TAG,
+        GUIDE_CHOICE_REDACTED_INTENT, GUIDE_CHOICE_SLOT, GUIDE_CHOICE_TAG, LEGACY_GUIDE_CHOICE_TAG,
+        TurnChoice, normalize_turn_choices, redact_guide_choice_public_hints,
     };
 
     #[test]
@@ -1095,5 +1148,44 @@ mod tests {
         assert!(redacted.contains("주인공이 판단 위임에 맡긴 기록"));
         assert!(!redacted.contains("가장 덜 무모"));
         assert!(!redacted.contains("최선 후보"));
+    }
+
+    #[test]
+    fn normalizes_legacy_guide_and_freeform_slots_to_current_contract() {
+        let normalized = normalize_turn_choices(&[
+            TurnChoice {
+                slot: 1,
+                tag: "움직임".to_owned(),
+                intent: "다가간다".to_owned(),
+            },
+            TurnChoice {
+                slot: 4,
+                tag: LEGACY_GUIDE_CHOICE_TAG.to_owned(),
+                intent: "안내자가 보기에 가장 덜 무모하고 가장 의미 있는 길을 따른다".to_owned(),
+            },
+            TurnChoice {
+                slot: 5,
+                tag: "기록".to_owned(),
+                intent: "기록을 본다".to_owned(),
+            },
+            TurnChoice {
+                slot: 6,
+                tag: "흐름".to_owned(),
+                intent: "흐름을 본다".to_owned(),
+            },
+            TurnChoice {
+                slot: 7,
+                tag: FREEFORM_CHOICE_TAG.to_owned(),
+                intent: "7 뒤에 직접 행동을 쓴다".to_owned(),
+            },
+        ]);
+
+        assert_eq!(normalized.len(), 7);
+        assert_eq!(normalized[5].slot, FREEFORM_CHOICE_SLOT);
+        assert_eq!(normalized[5].tag, FREEFORM_CHOICE_TAG);
+        assert!(normalized[5].intent.contains("6 뒤에"));
+        assert_eq!(normalized[6].slot, GUIDE_CHOICE_SLOT);
+        assert_eq!(normalized[6].tag, GUIDE_CHOICE_TAG);
+        assert_eq!(normalized[6].intent, GUIDE_CHOICE_REDACTED_INTENT);
     }
 }

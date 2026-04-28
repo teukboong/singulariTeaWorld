@@ -294,7 +294,7 @@ fn classify_input(input: &str, snapshot: &TurnSnapshot) -> Result<ClassifiedInpu
     }
     if let Some((choice, action)) = inline_freeform {
         if action.is_empty() {
-            bail!("자유서술은 7 뒤에 행동 서술을 같이 써야 한다: 예) 7 세아에게 낮게 묻는다");
+            bail!("자유서술은 6 뒤에 행동 서술을 같이 써야 한다: 예) 6 세아에게 낮게 묻는다");
         }
         return Ok(ClassifiedInput {
             kind: TurnInputKind::FreeformAction,
@@ -307,7 +307,7 @@ fn classify_input(input: &str, snapshot: &TurnSnapshot) -> Result<ClassifiedInpu
     if let Some(choice) = &selection {
         if choice.tag == FREEFORM_CHOICE_TAG {
             bail!(
-                "자유서술은 7 뒤에 행동 서술을 같이 써야 한다: 예) 7 문 아래의 흙을 손끝으로 문질러 본다"
+                "자유서술은 6 뒤에 행동 서술을 같이 써야 한다: 예) 6 문 아래의 흙을 손끝으로 문질러 본다"
             );
         }
         if is_guide_choice_tag(choice.tag.as_str()) {
@@ -631,7 +631,7 @@ fn next_turn_number(turn_id: &str) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::{AdvanceTurnOptions, advance_turn};
-    use crate::models::{GUIDE_CHOICE_TAG, TurnInputKind};
+    use crate::models::{FREEFORM_CHOICE_SLOT, GUIDE_CHOICE_SLOT, GUIDE_CHOICE_TAG, TurnInputKind};
     use crate::store::{InitWorldOptions, init_world};
     use crate::validate::{ValidationStatus, validate_world};
     use tempfile::tempdir;
@@ -648,7 +648,7 @@ premise:
     }
 
     #[test]
-    fn turn_four_records_guide_choice_and_render_packet() -> anyhow::Result<()> {
+    fn turn_seven_records_guide_choice_and_render_packet() -> anyhow::Result<()> {
         let temp = tempdir()?;
         let store = temp.path().join("store");
         let seed_path = temp.path().join("seed.yaml");
@@ -661,7 +661,7 @@ premise:
         let turn = advance_turn(&AdvanceTurnOptions {
             store_root: Some(store.clone()),
             world_id: "stw_turn".to_owned(),
-            input: "4".to_owned(),
+            input: "7".to_owned(),
         })?;
         assert_eq!(turn.snapshot.turn_id, "turn_0001");
         assert_eq!(turn.canon_event.kind, TurnInputKind::GuideChoice.as_wire());
@@ -671,7 +671,9 @@ premise:
                 .visible_state
                 .choices
                 .iter()
-                .any(|choice| { choice.slot == 4 && choice.tag == GUIDE_CHOICE_TAG })
+                .any(|choice| {
+                    choice.slot == GUIDE_CHOICE_SLOT && choice.tag == GUIDE_CHOICE_TAG
+                })
         );
         let report = validate_world(Some(&store), "stw_turn")?;
         assert_eq!(report.status, ValidationStatus::Passed);
@@ -679,7 +681,7 @@ premise:
     }
 
     #[test]
-    fn turn_seven_inline_freeform_records_direct_action() -> anyhow::Result<()> {
+    fn turn_six_inline_freeform_records_direct_action() -> anyhow::Result<()> {
         let temp = tempdir()?;
         let store = temp.path().join("store");
         let seed_path = temp.path().join("seed.yaml");
@@ -692,7 +694,7 @@ premise:
         let turn = advance_turn(&AdvanceTurnOptions {
             store_root: Some(store.clone()),
             world_id: "stw_freeform".to_owned(),
-            input: "7 세아에게 낮게 묻는다".to_owned(),
+            input: "6 세아에게 낮게 묻는다".to_owned(),
         })?;
         assert_eq!(
             turn.canon_event.kind,
@@ -701,7 +703,7 @@ premise:
         assert!(
             turn.canon_event
                 .summary
-                .contains("7번 [자유서술] 서술이 접수됐다: 세아에게 낮게 묻는다")
+                .contains("6번 [자유서술] 서술이 접수됐다: 세아에게 낮게 묻는다")
         );
         assert_eq!(
             turn.render_packet
@@ -715,7 +717,7 @@ premise:
                 .visible_state
                 .choices
                 .iter()
-                .any(|choice| choice.slot == 7 && choice.tag == "자유서술")
+                .any(|choice| choice.slot == FREEFORM_CHOICE_SLOT && choice.tag == "자유서술")
         );
         let report = validate_world(Some(&store), "stw_freeform")?;
         assert_eq!(report.status, ValidationStatus::Passed);
@@ -723,14 +725,11 @@ premise:
     }
 
     #[test]
-    fn bare_turn_seven_requires_inline_description() -> anyhow::Result<()> {
+    fn bare_turn_six_requires_inline_description() -> anyhow::Result<()> {
         let temp = tempdir()?;
         let store = temp.path().join("store");
         let seed_path = temp.path().join("seed.yaml");
-        std::fs::write(
-            &seed_path,
-            seed_body().replace("stw_turn", "stw_bare_seven"),
-        )?;
+        std::fs::write(&seed_path, seed_body().replace("stw_turn", "stw_bare_six"))?;
         init_world(&InitWorldOptions {
             seed_path,
             store_root: Some(store.clone()),
@@ -738,18 +737,18 @@ premise:
         })?;
         let result = advance_turn(&AdvanceTurnOptions {
             store_root: Some(store),
-            world_id: "stw_bare_seven".to_owned(),
-            input: "7".to_owned(),
+            world_id: "stw_bare_six".to_owned(),
+            input: "6".to_owned(),
         });
         let Err(error) = result else {
-            anyhow::bail!("bare slot 7 should require inline description");
+            anyhow::bail!("bare slot 6 should require inline description");
         };
-        assert!(error.to_string().contains("7 뒤에 행동 서술"));
+        assert!(error.to_string().contains("6 뒤에 행동 서술"));
         Ok(())
     }
 
     #[test]
-    fn turn_five_enters_codex_mode() -> anyhow::Result<()> {
+    fn turn_four_enters_codex_mode() -> anyhow::Result<()> {
         let temp = tempdir()?;
         let store = temp.path().join("store");
         let seed_path = temp.path().join("seed.yaml");
@@ -762,7 +761,7 @@ premise:
         let turn = advance_turn(&AdvanceTurnOptions {
             store_root: Some(store),
             world_id: "stw_codex".to_owned(),
-            input: "5".to_owned(),
+            input: "4".to_owned(),
         })?;
         assert_eq!(turn.render_packet.mode, "codex");
         assert_eq!(turn.snapshot.phase, "codex");

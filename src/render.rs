@@ -122,7 +122,7 @@ fn render_macro_time_flow(packet: &RenderPacket) -> String {
             "2. 몸, 자원, 시간 중 하나가 비용으로 떠오를 가능성",
             "3. 가까운 장소가 구체적인 위험이나 기회로 변하는 순간",
             "4. 아직 정해지지 않은 인물, 장소, 물건, 세력 중 하나가 극점이 되는 순간",
-            "5. 판단 위임이 보이는 증거 안에서 가장 강한 장면 압력을 고르는 순간",
+            "5. 다음 사건 압력이 선택지로 좁혀지는 순간",
         ]
         .join("\n"),
     );
@@ -317,7 +317,7 @@ premise:
         let turn = advance_turn(&AdvanceTurnOptions {
             store_root: Some(store),
             world_id: "stw_render".to_owned(),
-            input: "4".to_owned(),
+            input: "7".to_owned(),
         })?;
         let rendered = render_packet_markdown(&turn.render_packet);
         assert!(rendered.contains("### 상태"));
@@ -325,7 +325,7 @@ premise:
         assert!(rendered.contains("판단 위임"));
         assert!(rendered.contains("맡긴다. 세부 내용은 선택 후 드러난다."));
         assert!(rendered.contains("자유서술"));
-        assert!(rendered.contains("7 뒤에 직접 행동"));
+        assert!(rendered.contains("6 뒤에 직접 행동"));
         Ok(())
     }
 }

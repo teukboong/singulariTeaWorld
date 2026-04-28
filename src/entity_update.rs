@@ -190,7 +190,7 @@ mod tests {
         let mut event = initial_canon_event(&world);
         event.turn_id = "turn_0001".to_owned();
         event.event_id = "evt_000001".to_owned();
-        event.summary = "4번 [판단 위임] 선택이 접수됐다".to_owned();
+        event.summary = "7번 [판단 위임] 선택이 접수됐다".to_owned();
         let adjudication = adjudicate_turn(&AdjudicationInput {
             world: &world,
             snapshot: &snapshot,

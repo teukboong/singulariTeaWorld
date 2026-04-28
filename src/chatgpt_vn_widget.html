@@ -358,7 +358,7 @@
           </section>
           <section class="choices">${choices}</section>
           <section class="freeform">
-            <input id="freeform" placeholder="7 자유서술을 여기에 입력" />
+            <input id="freeform" placeholder="6 자유서술을 여기에 입력" />
             <button class="btn" id="sendFreeform">보내기</button>
           </section>
           <div class="${statusClass}" id="status">${html(status)}</div>
@@ -414,7 +414,7 @@
           render();
           return;
         }
-        await submitInput(input.startsWith("7 ") ? input : `7 ${input}`);
+        await submitInput(input.startsWith("6 ") ? input : `6 ${input}`);
       }
 
       async function withBusy(work) {

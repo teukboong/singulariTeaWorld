@@ -1,9 +1,9 @@
 use crate::models::{
     ANCHOR_CHARACTER_ID, ANCHOR_CHARACTER_INVARIANT, CANON_EVENT_SCHEMA_VERSION, CanonEvent,
     DEFAULT_CHOICE_COUNT, ENTITY_RECORDS_SCHEMA_VERSION, EntityRecords, FREEFORM_CHOICE_SLOT,
-    FREEFORM_CHOICE_TAG, HIDDEN_STATE_SCHEMA_VERSION, HiddenState, PLAYER_KNOWLEDGE_SCHEMA_VERSION,
-    PlayerKnowledge, SINGULARI_WORLD_SCHEMA_VERSION, TURN_SNAPSHOT_SCHEMA_VERSION, TurnSnapshot,
-    WorldRecord, is_guide_choice_tag,
+    FREEFORM_CHOICE_TAG, GUIDE_CHOICE_SLOT, HIDDEN_STATE_SCHEMA_VERSION, HiddenState,
+    PLAYER_KNOWLEDGE_SCHEMA_VERSION, PlayerKnowledge, SINGULARI_WORLD_SCHEMA_VERSION,
+    TURN_SNAPSHOT_SCHEMA_VERSION, TurnSnapshot, WorldRecord, is_guide_choice_tag,
 };
 use crate::store::{read_json, resolve_store_paths, world_file_paths};
 use crate::world_db::validate_world_db;
@@ -372,9 +372,11 @@ fn validate_snapshot_choices(snapshot: &TurnSnapshot, errors: &mut Vec<String>) 
     if !snapshot
         .last_choices
         .iter()
-        .any(|choice| choice.slot == 4 && is_guide_choice_tag(choice.tag.as_str()))
+        .any(|choice| choice.slot == GUIDE_CHOICE_SLOT && is_guide_choice_tag(choice.tag.as_str()))
     {
-        errors.push("latest_snapshot missing slot 4 판단 위임".to_owned());
+        errors.push(format!(
+            "latest_snapshot missing slot {GUIDE_CHOICE_SLOT} 판단 위임"
+        ));
     }
     if !snapshot
         .last_choices

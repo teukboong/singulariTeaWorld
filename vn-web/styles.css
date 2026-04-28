@@ -872,15 +872,20 @@ select {
 }
 
 .choice-panel {
-  width: min(720px, 100%);
+  width: min(1040px, 100%);
   display: grid;
-  gap: 9px;
+  gap: 10px;
   animation: choices-in 180ms ease-out both;
 }
 
-.choices {
+.choices,
+.guide-choices {
   display: grid;
   gap: 8px;
+}
+
+.guide-choices:empty {
+  display: none;
 }
 
 .choice-button,
@@ -896,12 +901,12 @@ select {
 }
 
 .choice-button {
-  min-height: 48px;
+  min-height: 58px;
   display: grid;
-  grid-template-columns: 5.2rem minmax(0, 1fr);
-  gap: 10px;
+  grid-template-columns: clamp(10rem, 24vw, 15rem) minmax(0, 1fr);
+  gap: 18px;
   align-items: center;
-  padding: 9px 12px;
+  padding: 12px 18px;
   text-align: left;
   border-left: 2px solid transparent;
 }
@@ -921,16 +926,24 @@ select {
 }
 
 .choice-label {
+  min-width: 0;
   color: var(--gold);
   font-family: var(--font-sans);
   font-size: 0.9rem;
+  line-height: 1.42;
+  overflow-wrap: break-word;
+  word-break: keep-all;
 }
 
 .choice-intent {
-  overflow: hidden;
+  min-width: 0;
+  overflow: visible;
   color: var(--paper);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.62;
+  overflow-wrap: break-word;
+  text-overflow: clip;
+  white-space: normal;
+  word-break: keep-all;
 }
 
 .freeform-row {
@@ -1945,11 +1958,19 @@ select {
   }
 
   .choice-button {
-    grid-template-columns: 4.6rem minmax(0, 1fr);
+    grid-template-columns: 1fr;
+    gap: 6px;
+    min-height: 60px;
+    padding: 10px 12px;
+  }
+
+  .choice-label {
+    font-size: 0.86rem;
   }
 
   .choice-intent {
-    white-space: normal;
+    font-size: 0.96rem;
+    line-height: 1.55;
   }
 
   .side-dock {

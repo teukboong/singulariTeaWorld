@@ -33,11 +33,11 @@ pub fn route_chat_input(options: &ChatRouteOptions) -> ChatRoute {
                 "singulari-world turn{world_arg} --input {} --render",
                 shell_quote(message)
             ),
-            "slot 7 carries an inline freeform action for plausibility adjudication",
+            "slot 6 carries an inline freeform action for plausibility adjudication",
         )
     } else if message
         .parse::<u8>()
-        .is_ok_and(|slot| (1..=6).contains(&slot))
+        .is_ok_and(|slot| (1..=7).contains(&slot) && slot != FREEFORM_CHOICE_SLOT)
     {
         (
             "turn",
@@ -227,14 +227,14 @@ mod tests {
     #[test]
     fn inline_freeform_slot_routes_to_turn_render() {
         let route = route_chat_input(&ChatRouteOptions {
-            message: "7 세아에게 낮게 묻는다".to_owned(),
+            message: "6 세아에게 낮게 묻는다".to_owned(),
             world_id: Some("stw".to_owned()),
         });
         assert_eq!(route.route, "turn");
         assert!(
             route
                 .command
-                .contains("--input '7 세아에게 낮게 묻는다' --render")
+                .contains("--input '6 세아에게 낮게 묻는다' --render")
         );
         assert!(route.explanation.contains("freeform action"));
     }

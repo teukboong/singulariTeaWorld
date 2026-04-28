@@ -2147,7 +2147,7 @@ premise:
         advance_turn(&AdvanceTurnOptions {
             store_root: Some(store),
             world_id: "stw_search_test".to_owned(),
-            input: "4".to_owned(),
+            input: "7".to_owned(),
         })?;
         let hits = search_world_db(&initialized.world_dir, "stw_search_test", "판단 위임", 10)?;
         assert!(!hits.is_empty());
@@ -2178,7 +2178,7 @@ premise:
         advance_turn(&AdvanceTurnOptions {
             store_root: Some(store),
             world_id: "stw_repair_test".to_owned(),
-            input: "4".to_owned(),
+            input: "7".to_owned(),
         })?;
         let report = repair_world_db(&initialized.world_dir, "stw_repair_test")?;
         assert!(report.rebuilt);

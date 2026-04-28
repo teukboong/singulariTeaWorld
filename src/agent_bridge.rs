@@ -1,5 +1,5 @@
 use crate::models::{
-    AdjudicationGate, CharacterVoiceAnchor, FREEFORM_CHOICE_SLOT, HiddenState,
+    AdjudicationGate, CharacterVoiceAnchor, FREEFORM_CHOICE_SLOT, GUIDE_CHOICE_SLOT, HiddenState,
     NARRATIVE_SCENE_SCHEMA_VERSION, NarrativeScene, TurnChoice, TurnSnapshot,
     default_freeform_choice, default_turn_choices, is_guide_choice_tag, normalize_turn_choices,
 };
@@ -538,20 +538,20 @@ fn validate_agent_next_choices(response: &AgentTurnResponse) -> Result<()> {
     let guide_choice = response
         .next_choices
         .iter()
-        .find(|choice| choice.slot == 4)
-        .context("agent response next_choices missing slot 4")?;
+        .find(|choice| choice.slot == GUIDE_CHOICE_SLOT)
+        .context("agent response next_choices missing slot 7")?;
     if !is_guide_choice_tag(guide_choice.tag.as_str())
         || guide_choice.intent != "맡긴다. 세부 내용은 선택 후 드러난다."
     {
-        bail!("agent response slot 4 must keep hidden delegated-judgment wording");
+        bail!("agent response slot 7 must keep hidden delegated-judgment wording");
     }
     let freeform_choice = response
         .next_choices
         .iter()
         .find(|choice| choice.slot == FREEFORM_CHOICE_SLOT)
-        .context("agent response next_choices missing slot 7")?;
+        .context("agent response next_choices missing slot 6")?;
     if freeform_choice.tag != "자유서술" || !freeform_choice.intent.contains("직접") {
-        bail!("agent response slot 7 must remain inline freeform");
+        bail!("agent response slot 6 must remain inline freeform");
     }
     if choices_keep_default_template(&response.next_choices) {
         bail!(
@@ -901,24 +901,24 @@ premise:
             },
             TurnChoice {
                 slot: 4,
-                tag: GUIDE_CHOICE_TAG.to_owned(),
-                intent: "맡긴다. 세부 내용은 선택 후 드러난다.".to_owned(),
-            },
-            TurnChoice {
-                slot: 5,
                 tag: "기록".to_owned(),
                 intent: "방금 본 이끼 낀 문장과 발자국의 의미를 세계 기록에서 대조한다".to_owned(),
             },
             TurnChoice {
-                slot: 6,
+                slot: 5,
                 tag: "먼 시야".to_owned(),
                 intent: "이 장소를 둘러싼 숲길과 사람들의 이동 흐름을 한 박자 멀리서 본다"
                     .to_owned(),
             },
             TurnChoice {
-                slot: 7,
+                slot: 6,
                 tag: "자유서술".to_owned(),
-                intent: "7 뒤에 직접 행동, 말, 내면 독백을 서술한다".to_owned(),
+                intent: "6 뒤에 직접 행동, 말, 내면 독백을 서술한다".to_owned(),
+            },
+            TurnChoice {
+                slot: 7,
+                tag: GUIDE_CHOICE_TAG.to_owned(),
+                intent: "맡긴다. 세부 내용은 선택 후 드러난다.".to_owned(),
             },
         ]
     }

@@ -1,8 +1,9 @@
 use crate::backend_selection::{WorldVisualBackend, load_world_backend_selection};
 use crate::models::{
-    CodexView, DashboardSummary, EntityRecords, FREEFORM_CHOICE_SLOT, INITIAL_TURN_ID,
-    PROTAGONIST_CHARACTER_ID, RenderPacket, ScanTarget, TurnChoice, TurnLogEntry, TurnSnapshot,
-    WorldRecord, normalize_turn_choices,
+    CodexView, DashboardSummary, EntityRecords, FREEFORM_CHOICE_SLOT, GUIDE_CHOICE_SLOT,
+    GUIDE_CHOICE_TAG, INITIAL_TURN_ID, PROTAGONIST_CHARACTER_ID, RenderPacket, ScanTarget,
+    TurnChoice, TurnLogEntry, TurnSnapshot, WorldRecord, is_guide_choice_tag,
+    normalize_turn_choices, redact_guide_choice_public_hints,
 };
 use crate::render::{RenderPacketLoadOptions, load_render_packet, render_packet_markdown};
 use crate::store::{TURN_LOG_FILENAME, load_world_record, resolve_store_paths, world_file_paths};
@@ -594,7 +595,7 @@ fn vn_codex_surface(
     let turn_log = recent_turn_log(world, files, latest_snapshot.session_id.as_str())?;
     let scan_targets = player_visible_scan_targets(&packet.visible_state.scan_targets);
     Ok(VnCodexSurface {
-        full_markdown: render_packet_markdown(packet),
+        full_markdown: redact_guide_choice_public_hints(&render_packet_markdown(packet)),
         dashboard: player_visible_dashboard(world, &packet.visible_state.dashboard, place_record),
         scan_targets,
         adjudication: packet.adjudication.as_ref().map(vn_adjudication),
@@ -641,21 +642,27 @@ fn vn_scene(
                     ),
                 ]
             },
-            |scene| scene.text_blocks.clone(),
+            |scene| {
+                scene
+                    .text_blocks
+                    .iter()
+                    .map(|block| redact_guide_choice_public_hints(block))
+                    .collect()
+            },
         );
     let scan_targets = player_visible_scan_targets(&packet.visible_state.scan_targets);
     VnScene {
         location: scene_location,
         current_event: display_event(dashboard.current_event.as_str()),
-        status: dashboard.status.clone(),
+        status: redact_guide_choice_public_hints(dashboard.status.as_str()),
         text_blocks,
         scan_lines: scan_targets
             .iter()
             .map(|target| {
-                format!(
+                redact_guide_choice_public_hints(&format!(
                     "{} / {} / {} / {}",
                     target.target, target.class, target.distance, target.thought
-                )
+                ))
             })
             .collect(),
         adjudication: packet.adjudication.as_ref().map(vn_adjudication),
@@ -672,7 +679,7 @@ fn player_visible_dashboard(
         location: display_location(world, dashboard.location.as_str(), place),
         anchor_invariant: "플레이어-visible".to_owned(),
         current_event: display_event(dashboard.current_event.as_str()),
-        status: dashboard.status.clone(),
+        status: redact_guide_choice_public_hints(dashboard.status.as_str()),
     }
 }
 
@@ -718,8 +725,12 @@ fn leaks_internal_anchor_or_hidden_text<'a>(parts: impl IntoIterator<Item = &'a 
 fn vn_adjudication(report: &crate::models::AdjudicationReport) -> VnAdjudication {
     VnAdjudication {
         outcome: report.outcome.clone(),
-        summary: report.summary.clone(),
-        visible_constraints: report.visible_constraints.clone(),
+        summary: redact_guide_choice_public_hints(report.summary.as_str()),
+        visible_constraints: report
+            .visible_constraints
+            .iter()
+            .map(|constraint| redact_guide_choice_public_hints(constraint))
+            .collect(),
     }
 }
 
@@ -736,8 +747,10 @@ fn current_turn_status(
         turn_id: packet.turn_id.clone(),
         input: current_log.map(|entry| entry.input.clone()),
         input_kind: current_log.map(|entry| entry.input_kind.clone()),
-        selected_choice: current_log.and_then(|entry| entry.selected_choice.clone()),
-        summary: packet.visible_state.dashboard.status.clone(),
+        selected_choice: current_log
+            .and_then(|entry| entry.selected_choice.clone())
+            .map(|choice| redact_guide_choice_public_hints(choice.as_str())),
+        summary: redact_guide_choice_public_hints(packet.visible_state.dashboard.status.as_str()),
     }
 }
 
@@ -764,10 +777,29 @@ fn protagonist_status(
         .current_event
         .as_ref()
         .map(|event| event.progress.clone());
-    let inventory = snapshot.protagonist_state.inventory.clone();
-    let body = snapshot.protagonist_state.body.clone();
-    let mind = snapshot.protagonist_state.mind.clone();
-    let open_questions = snapshot.open_questions.clone();
+    let inventory = snapshot
+        .protagonist_state
+        .inventory
+        .iter()
+        .map(|value| redact_guide_choice_public_hints(value))
+        .collect::<Vec<_>>();
+    let body = snapshot
+        .protagonist_state
+        .body
+        .iter()
+        .map(|value| redact_guide_choice_public_hints(value))
+        .collect::<Vec<_>>();
+    let mind = snapshot
+        .protagonist_state
+        .mind
+        .iter()
+        .map(|value| redact_guide_choice_public_hints(value))
+        .collect::<Vec<_>>();
+    let open_questions = snapshot
+        .open_questions
+        .iter()
+        .map(|value| redact_guide_choice_public_hints(value))
+        .collect::<Vec<_>>();
     let status_source = VnStatusRowSource {
         snapshot,
         dashboard,
@@ -997,10 +1029,11 @@ fn status_row(row_id: &str, cells: Vec<VnStatusCell>) -> VnStatusRow {
 }
 
 fn status_cell(emoji: &str, label: &str, value: impl Into<String>) -> VnStatusCell {
+    let raw_value = value.into();
     VnStatusCell {
         emoji: emoji.to_owned(),
         label: label.to_owned(),
-        value: value.into(),
+        value: redact_guide_choice_public_hints(raw_value.as_str()),
     }
 }
 
@@ -1239,7 +1272,9 @@ fn prepend_initial_turn_log_if_missing(
             selected_choice: None,
             canon_event_id: "world_init".to_owned(),
             render_packet_ref: render_packet_path.display().to_string(),
-            render_markdown: Some(render_packet_markdown(&packet)),
+            render_markdown: Some(redact_guide_choice_public_hints(&render_packet_markdown(
+                &packet,
+            ))),
             created_at: world.created_at.clone(),
         },
     );
@@ -1252,9 +1287,14 @@ fn vn_turn_log_summary(entry: TurnLogEntry) -> VnTurnLogSummary {
         turn_id: entry.turn_id,
         input: entry.input,
         input_kind: entry.input_kind.to_string(),
-        selected_choice: entry
-            .selected_choice
-            .map(|choice| format!("{}. {}", choice.slot, choice.tag)),
+        selected_choice: entry.selected_choice.map(|choice| {
+            let slot = if is_guide_choice_tag(choice.tag.as_str()) {
+                GUIDE_CHOICE_SLOT
+            } else {
+                choice.slot
+            };
+            redact_guide_choice_public_hints(&format!("{}. {}", slot, choice.tag))
+        }),
         canon_event_id: entry.canon_event_id,
         render_packet_ref: entry.render_packet_ref,
         render_markdown,
@@ -1265,7 +1305,9 @@ fn vn_turn_log_summary(entry: TurnLogEntry) -> VnTurnLogSummary {
 fn load_turn_markdown(render_packet_ref: &str) -> Option<String> {
     let packet: RenderPacket =
         crate::store::read_json(PathBuf::from(render_packet_ref).as_path()).ok()?;
-    Some(render_packet_markdown(&packet))
+    Some(redact_guide_choice_public_hints(&render_packet_markdown(
+        &packet,
+    )))
 }
 
 fn vn_choices(world: &WorldRecord, choices: &[TurnChoice]) -> Vec<VnChoice> {
@@ -1273,7 +1315,12 @@ fn vn_choices(world: &WorldRecord, choices: &[TurnChoice]) -> Vec<VnChoice> {
         .into_iter()
         .map(|choice| {
             let requires_inline_text = choice.slot == FREEFORM_CHOICE_SLOT;
-            let intent = choice.player_visible_intent().to_owned();
+            let tag = if is_guide_choice_tag(choice.tag.as_str()) {
+                GUIDE_CHOICE_TAG.to_owned()
+            } else {
+                redact_guide_choice_public_hints(choice.tag.as_str())
+            };
+            let intent = redact_guide_choice_public_hints(choice.player_visible_intent());
             let input_template = if requires_inline_text {
                 format!("{} <action>", choice.slot)
             } else {
@@ -1292,8 +1339,8 @@ fn vn_choices(world: &WorldRecord, choices: &[TurnChoice]) -> Vec<VnChoice> {
             };
             VnChoice {
                 slot: choice.slot,
-                label: format!("{}. {}", choice.slot, choice.tag),
-                tag: choice.tag,
+                label: format!("{}. {}", choice.slot, tag),
+                tag,
                 intent,
                 requires_inline_text,
                 input_template,
@@ -1308,6 +1355,10 @@ mod tests {
     use super::{BuildVnPacketOptions, HOST_WORKER_VISUAL_GENERATOR, build_vn_packet};
     use crate::backend_selection::{
         WorldBackendSelection, WorldTextBackend, WorldVisualBackend, save_world_backend_selection,
+    };
+    use crate::models::{
+        FREEFORM_CHOICE_SLOT, GUIDE_CHOICE_REDACTED_INTENT, GUIDE_CHOICE_SLOT, GUIDE_CHOICE_TAG,
+        LEGACY_GUIDE_CHOICE_TAG, TurnChoice,
     };
     use crate::store::{InitWorldOptions, init_world};
     use crate::turn::{AdvanceTurnOptions, advance_turn};
@@ -1341,7 +1392,7 @@ premise:
         advance_turn(&AdvanceTurnOptions {
             store_root: Some(store.clone()),
             world_id: "stw_vn_packet".to_owned(),
-            input: "7 세아에게 낮게 묻는다".to_owned(),
+            input: "6 세아에게 낮게 묻는다".to_owned(),
         })?;
         let mut options = BuildVnPacketOptions::new("stw_vn_packet".to_owned());
         options.store_root = Some(store);
@@ -1351,7 +1402,7 @@ premise:
             packet
                 .choices
                 .iter()
-                .any(|choice| choice.slot == 7 && choice.requires_inline_text)
+                .any(|choice| choice.slot == FREEFORM_CHOICE_SLOT && choice.requires_inline_text)
         );
         assert!(
             packet
@@ -1385,6 +1436,7 @@ premise:
             "anchor_character",
             "시드가 정한",
             "정체와 역할",
+            "안내자의 선택",
         ] {
             assert!(
                 !packet.scene.text_blocks.join("\n").contains(hidden_marker),
@@ -1420,7 +1472,7 @@ premise:
         );
         assert_eq!(
             packet.codex_surface.current_turn.selected_choice.as_deref(),
-            Some("7. 자유서술")
+            Some("6. 자유서술")
         );
         assert_eq!(packet.codex_surface.protagonist.location, "첫 장소");
         assert_eq!(
@@ -1499,6 +1551,49 @@ premise:
                 .iter()
                 .any(|path| path.ends_with("char_anchor.png"))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn vn_choices_redact_legacy_guide_choice_label() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(
+            &seed_path,
+            r#"
+schema_version: singulari.world_seed.v1
+world_id: stw_vn_legacy_guide
+title: "레거시 선택지 세계"
+premise:
+  genre: "중세 판타지"
+  protagonist: "변경 순찰자, 남자 주인공"
+"#,
+        )?;
+        let initialized = init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store),
+            session_id: None,
+        })?;
+        let projected = super::vn_choices(
+            &initialized.world,
+            &[TurnChoice {
+                slot: 4,
+                tag: LEGACY_GUIDE_CHOICE_TAG.to_owned(),
+                intent: "안내자가 보기에 가장 덜 무모하고 가장 의미 있는 길을 따른다".to_owned(),
+            }],
+        );
+        let Some(choice) = projected
+            .iter()
+            .find(|choice| choice.slot == GUIDE_CHOICE_SLOT)
+        else {
+            anyhow::bail!("slot 7 choice missing");
+        };
+        assert_eq!(choice.tag, GUIDE_CHOICE_TAG);
+        assert_eq!(choice.label, "7. 판단 위임");
+        assert_eq!(choice.intent, GUIDE_CHOICE_REDACTED_INTENT);
+        assert!(!choice.label.contains("안내자"));
+        assert!(!choice.intent.contains("안내자"));
         Ok(())
     }
 

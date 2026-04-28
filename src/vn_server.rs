@@ -7,6 +7,7 @@ use crate::backend_selection::{
     WorldBackendSelection, WorldTextBackend, WorldVisualBackend, load_world_backend_selection,
     save_world_backend_selection,
 };
+use crate::models::FREEFORM_CHOICE_SLOT;
 use crate::start::{StartWorldOptions, start_world};
 use crate::store::{
     WORLD_FILENAME, read_json, resolve_store_paths, resolve_world_id, save_active_world,
@@ -1480,14 +1481,14 @@ fn validate_vn_input(input: &str) -> Result<()> {
     }
     if trimmed
         .parse::<u8>()
-        .is_ok_and(|slot| (1..=6).contains(&slot))
+        .is_ok_and(|slot| (1..=7).contains(&slot) && slot != FREEFORM_CHOICE_SLOT)
     {
         return Ok(());
     }
     if is_inline_freeform(trimmed) {
         return Ok(());
     }
-    bail!("VN input must be 1..6 or inline 7 <action>");
+    bail!("VN input must be 1..7 or inline 6 <action>");
 }
 
 fn ensure_safe_world_id(world_id: &str) -> Result<()> {
@@ -1574,7 +1575,10 @@ fn read_bundle_world_record(bundle: &Path) -> Result<crate::models::WorldRecord>
 }
 
 fn is_inline_freeform(input: &str) -> bool {
-    let Some(after_slot) = input.strip_prefix('7') else {
+    let Some(slot_digit) = char::from_digit(u32::from(FREEFORM_CHOICE_SLOT), 10) else {
+        return false;
+    };
+    let Some(after_slot) = input.strip_prefix(slot_digit) else {
         return false;
     };
     if after_slot.is_empty() {
@@ -1776,10 +1780,11 @@ mod tests {
     #[test]
     fn validate_vn_input_accepts_direct_choices_and_inline_freeform() {
         assert!(validate_vn_input("1").is_ok());
-        assert!(validate_vn_input("6").is_ok());
-        assert!(validate_vn_input("7 세아에게 낮게 묻는다").is_ok());
-        assert!(validate_vn_input("7번 문서관을 본다").is_ok());
-        assert!(validate_vn_input("7").is_err());
+        assert!(validate_vn_input("5").is_ok());
+        assert!(validate_vn_input("6 세아에게 낮게 묻는다").is_ok());
+        assert!(validate_vn_input("6번 문서관을 본다").is_ok());
+        assert!(validate_vn_input("6").is_err());
+        assert!(validate_vn_input("7").is_ok());
         assert!(validate_vn_input("8").is_err());
         assert!(validate_vn_input("문서관을 본다").is_err());
     }
@@ -1825,11 +1830,11 @@ premise:
             store_root: Some(store),
             world_id: Mutex::new("stw_vn_server".to_owned()),
         };
-        let response = choose_response(&state, &choose_request_body("7 세아에게 낮게 묻는다"));
+        let response = choose_response(&state, &choose_request_body("6 세아에게 낮게 묻는다"));
         assert_eq!(response.status, "200 OK");
         let packet: crate::vn::VnPacket = serde_json::from_slice(&response.body)?;
         assert_eq!(packet.turn_id, "turn_0002");
-        assert!(packet.scene.status.contains("7번 [자유서술]"));
+        assert!(packet.scene.status.contains("6번 [자유서술]"));
         Ok(())
     }
 

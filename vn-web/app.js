@@ -17,6 +17,8 @@ const SIDE_DOCK_RIGHT_EXIT_GRACE_MS = 900;
 const VISUAL_JOB_POLL_MS = 2500;
 const RUNTIME_STATUS_POLL_MS = 3000;
 const DEFAULT_VIEW_MODE = "text";
+const FREEFORM_CHOICE_SLOT = 6;
+const GUIDE_CHOICE_SLOT = 7;
 const AGENT_WAITING_BADGE = "흐름 수렴 중";
 const AGENT_WAITING_COPY = {
   initial: [
@@ -99,6 +101,7 @@ const els = {
   advanceButton: document.getElementById("advanceButton"),
   choicePanel: document.getElementById("choicePanel"),
   choices: document.getElementById("choices"),
+  guideChoices: document.getElementById("guideChoices"),
   freeformInput: document.getElementById("freeformInput"),
   freeformButton: document.getElementById("freeformButton"),
   commandOutput: document.getElementById("commandOutput"),
@@ -897,13 +900,14 @@ function renderCurrentTextLog() {
 
 function renderChoices(packet) {
   els.choices.replaceChildren();
+  els.guideChoices.replaceChildren();
   els.freeformInput.value = "";
   for (const choice of packet.choices || []) {
-    if (!state.settings.guideChoiceEnabled && choice.slot === 4) {
-      continue;
-    }
     if (choice.requires_inline_text) {
       els.freeformInput.placeholder = choice.input_template;
+      continue;
+    }
+    if (!state.settings.guideChoiceEnabled && choice.slot === GUIDE_CHOICE_SLOT) {
       continue;
     }
     const button = document.createElement("button");
@@ -913,7 +917,12 @@ function renderChoices(packet) {
     button.querySelector(".choice-label").textContent = `${choice.slot}. ${choice.tag}`;
     button.querySelector(".choice-intent").textContent = choice.intent;
     button.addEventListener("click", () => chooseSlot(choice));
-    els.choices.append(button);
+    if (choice.slot === GUIDE_CHOICE_SLOT) {
+      button.classList.add("guide-choice-button");
+      els.guideChoices.append(button);
+    } else {
+      els.choices.append(button);
+    }
   }
 }
 
@@ -1809,7 +1818,7 @@ function chooseFreeform() {
   }
   const action = els.freeformInput.value.trim();
   if (!action) {
-    showTransientLine("7번 자유서술은 행동을 같이 써야 해.");
+    showTransientLine(`${FREEFORM_CHOICE_SLOT}번 자유서술은 행동을 같이 써야 해.`);
     revealChoices();
     selectCommand(
       `singulari-world turn --world-id ${packet.world_id} --input ${shellQuote(`${choice.slot} <action>`)} --render`,
@@ -1842,7 +1851,7 @@ function chooseShortcutSlot(slot) {
     return false;
   }
   const choice = state.packet.choices.find((item) => item.slot === slot);
-  if (!choice || (!state.settings.guideChoiceEnabled && choice.slot === 4)) {
+  if (!choice || (!state.settings.guideChoiceEnabled && choice.slot === GUIDE_CHOICE_SLOT)) {
     return false;
   }
   if (choice.requires_inline_text) {
