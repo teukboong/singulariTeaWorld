@@ -145,6 +145,9 @@ Core MCP tools:
 - `worldsim_next_pending_turn`
 - `worldsim_commit_agent_turn`
 - `worldsim_visual_assets`
+- `worldsim_current_cg_image`
+- `worldsim_probe_image_ingest`
+- `worldsim_complete_visual_job_from_base64`
 - `worldsim_claim_visual_job`
 - `worldsim_complete_visual_job`
 - `worldsim_release_visual_job`
@@ -153,6 +156,33 @@ Core MCP tools:
 - `worldsim_codex_view`
 - `worldsim_validate`
 - `worldsim_repair_db`
+
+## ChatGPT Web MCP
+
+`singulari-world-mcp-web` serves the same MCP handler over Streamable HTTP for
+remote ChatGPT app hosts:
+
+```bash
+cargo build --locked --release --bin singulari-world-mcp-web
+target/release/singulari-world-mcp-web --host 127.0.0.1 --port 4187 --path /mcp --profile play
+```
+
+ChatGPT web requires a remote HTTPS URL; loopback is for local smoke tests or a
+trusted tunnel/reverse proxy. The default `play` profile exposes player-visible
+read tools, player input submission, `worldsim_current_cg_image`, and
+`worldsim_probe_image_ingest`, and the narrow
+`worldsim_complete_visual_job_from_base64` PNG completion path. It does not
+expose hidden pending-turn packets, direct commits, generic visual claim
+completion from local paths, DB repair, or other trusted local-agent tools. Use
+`--profile trusted-local` only behind an operator-controlled private boundary.
+
+Image direction is probe-first. `worldsim_current_cg_image` returns an existing
+stored PNG as MCP image content. `worldsim_probe_image_ingest` records only the
+shape of image references a host can pass back (`image_base64`, `image_url`,
+`resource_uri`, `file_id`) and deliberately does not persist image bytes or
+complete visual jobs. `worldsim_complete_visual_job_from_base64` accepts only
+PNG base64 or `data:image/png;base64,...`, stages it temporarily, and then
+reuses the normal visual-job completion verifier.
 
 ## Agent-Authored Text Turns
 

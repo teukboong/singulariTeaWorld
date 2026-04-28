@@ -32,6 +32,7 @@ Release binaries:
 
 - `target/release/singulari-world`
 - `target/release/singulari-world-mcp`
+- `target/release/singulari-world-mcp-web`
 
 ## Codex MCP Install
 
@@ -55,6 +56,38 @@ To force a specific local store:
 SINGULARI_WORLD_HOME="$HOME/.local/share/singulari-world" \
   scripts/install-codex-mcp.sh
 ```
+
+## ChatGPT Web MCP
+
+ChatGPT web developer mode expects a remote HTTPS MCP URL. The repository
+provides a Streamable HTTP server for that host shape:
+
+```bash
+cargo build --locked --release --bin singulari-world-mcp-web
+target/release/singulari-world-mcp-web \
+  --host 127.0.0.1 \
+  --port 4187 \
+  --path /mcp \
+  --profile play
+```
+
+Use a trusted HTTPS tunnel or reverse proxy in front of the local listener, then
+configure ChatGPT with the public `/mcp` URL. The default `play` profile exposes
+player-visible reads, player input submission, current CG image output, and an
+image-ingest probe, plus `worldsim_complete_visual_job_from_base64` for
+host-provided PNG payloads. It deliberately withholds hidden pending-turn
+context, direct commit, repair, and generic visual-job completion from local
+paths. `--profile read-only` removes player input submission and base64
+completion. `--profile trusted-local` is for private operator-controlled
+surfaces only.
+
+Image generation remains host-owned. `worldsim_current_cg_image` can return an
+already saved PNG as MCP image content. `worldsim_probe_image_ingest` is the
+compatibility probe for ChatGPT/App hosts that may be able to pass generated
+image references back; it records only reference shape and byte counts, not the
+image payload. If the host can pass PNG bytes, use
+`worldsim_complete_visual_job_from_base64` with raw base64 or a
+`data:image/png;base64,...` URL.
 
 ## Local VN Runtime
 
@@ -132,6 +165,7 @@ The standalone simulator owns:
 - world persistence
 - VN projection
 - MCP tools
+- ChatGPT web MCP Streamable HTTP adapter
 - text-turn pending/commit
 - Codex thread binding
 - host-worker event supervisor

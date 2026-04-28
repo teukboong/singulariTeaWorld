@@ -24,6 +24,9 @@ Core MCP tools:
 - `worldsim_next_pending_turn`
 - `worldsim_commit_agent_turn`
 - `worldsim_visual_assets`
+- `worldsim_current_cg_image`
+- `worldsim_probe_image_ingest`
+- `worldsim_complete_visual_job_from_base64`
 - `worldsim_claim_visual_job`
 - `worldsim_complete_visual_job`
 - `worldsim_release_visual_job`
@@ -32,6 +35,14 @@ Core MCP tools:
 - `worldsim_codex_view`
 - `worldsim_validate`
 - `worldsim_repair_db`
+
+ChatGPT web uses the separate `singulari-world-mcp-web` binary over Streamable
+HTTP. Its default `play` profile is intentionally narrower than the local stdio
+MCP: it can read player-visible state, submit player input, return an existing
+CG as MCP image content, record image-ingest probe shapes, and complete a visual
+job from host-provided PNG base64. It cannot read hidden pending-turn
+adjudication or directly commit agent-authored turns unless started with
+`--profile trusted-local`.
 
 `worldsim_commit_agent_turn` rejects visible text that directly includes hidden
 truth strings or forbidden leak strings from the pending packet.

@@ -116,6 +116,16 @@ The primary Codex App path is MCP-driven: `worldsim_claim_visual_job` returns
 structured content with `job.codex_app_call`, Codex App runs its built-in image
 generation capability, and `worldsim_complete_visual_job` registers the PNG.
 
+ChatGPT web MCP uses a narrower image contract. `worldsim_current_cg_image`
+returns an already saved PNG as MCP image content so the host/model can inspect
+the current CG. `worldsim_probe_image_ingest` records whether the host can pass
+generated images back as `image_base64`, `image_url`, `resource_uri`, or
+`file_id`; it records only shape/byte-count metadata and does not persist image
+payloads or complete jobs. `worldsim_complete_visual_job_from_base64` is the
+first promoted ingest path: it accepts only PNG base64 or
+`data:image/png;base64,...`, stages it temporarily, and then reuses the normal
+visual-job completion verifier.
+
 Worker loop:
 
 1. `host-worker` or `worldsim_claim_visual_job` claims one job.

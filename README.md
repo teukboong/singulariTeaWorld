@@ -100,7 +100,7 @@ target/release/singulari-world --store-root .world-store vn-serve \
 The VN server allowlist accepts loopback and Tailscale addresses only. Do not
 use `0.0.0.0` as a shortcut.
 
-The MCP server runs over stdio:
+The local Codex MCP server runs over stdio:
 
 ```bash
 cargo run --locked --bin singulari-world-mcp
@@ -119,6 +119,31 @@ turn CG job from the VN packet when it is pending. Codex App should claim and
 complete those jobs through `worldsim_claim_visual_job` and
 `worldsim_complete_visual_job`. The CLI claim/complete commands remain operator
 inspection tools, not the normal play loop.
+
+For ChatGPT web developer mode, serve the remote MCP transport separately:
+
+```bash
+cargo run --locked --bin singulari-world-mcp-web -- \
+  --host 127.0.0.1 \
+  --port 4187 \
+  --path /mcp \
+  --profile play
+```
+
+ChatGPT web cannot connect to a private loopback URL directly; put this behind a
+trusted HTTPS tunnel or reverse proxy and paste the public `/mcp` URL into the
+custom app form. The default `play` profile exposes player-visible read tools,
+player input submission, current-CG image output, and
+`worldsim_probe_image_ingest`, plus the narrow
+`worldsim_complete_visual_job_from_base64` PNG completion path. It does not
+expose trusted local-agent tools such as pending hidden adjudication, direct
+commit, or generic completion from local paths. Existing generated CGs can be
+returned to the host as MCP image content through `worldsim_current_cg_image`.
+The probe tool records which image reference shapes the host can pass back
+(`image_base64`, `image_url`, `resource_uri`, or `file_id`) without persisting
+image bytes. If the host can pass PNG bytes, complete the pending visual job
+with `worldsim_complete_visual_job_from_base64` using raw base64 or a
+`data:image/png;base64,...` URL.
 
 ## Seed Anchor
 
