@@ -5,6 +5,7 @@ pub mod chat;
 pub mod codex_view;
 pub mod entity_update;
 pub mod extra_memory;
+pub mod job_ledger;
 pub mod models;
 pub mod render;
 pub mod resume;
@@ -50,6 +51,10 @@ pub use extra_memory::{
     REMEMBERED_EXTRAS_FILENAME, REMEMBERED_EXTRAS_SCHEMA_VERSION, RememberedExtra,
     RememberedExtrasStore, apply_extra_memory_projection, commit_extra_memory_projection,
     compile_extra_memory_projection, local_faces_for_codex_view, retrieve_extra_memory_packet,
+};
+pub use job_ledger::{
+    ReadWorldJobsOptions, WORLD_JOB_LEDGER_SCHEMA_VERSION, WorldJob, WorldJobKind, WorldJobStatus,
+    read_world_jobs,
 };
 pub use models::{
     ADJUDICATION_SCHEMA_VERSION, ANCHOR_CHARACTER_ID, ANCHOR_CHARACTER_INVARIANT, AdjudicationGate,

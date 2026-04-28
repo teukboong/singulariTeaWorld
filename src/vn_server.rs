@@ -6,6 +6,7 @@ use crate::backend_selection::{
     WorldBackendSelection, WorldTextBackend, WorldVisualBackend, load_world_backend_selection,
     save_world_backend_selection,
 };
+use crate::job_ledger::{ReadWorldJobsOptions, WorldJobKind, WorldJobStatus, read_world_jobs};
 use crate::models::FREEFORM_CHOICE_SLOT;
 use crate::start::{StartWorldOptions, start_world};
 use crate::store::{
@@ -16,7 +17,6 @@ use crate::transfer::{ExportWorldOptions, ImportWorldOptions, export_world, impo
 use crate::turn::{AdvanceTurnOptions, advance_turn};
 use crate::visual_assets::{
     BuildWorldVisualAssetsOptions, ImageGenerationJob, build_world_visual_assets,
-    load_visual_job_claim,
 };
 use crate::vn::{BuildVnPacketOptions, build_vn_packet, turn_cg_retry_path};
 use anyhow::{Context, Result, bail};
@@ -853,36 +853,30 @@ fn visual_runtime_status(
     if let Some(job) = packet.image.image_generation_job.clone() {
         pending_jobs.push(job);
     }
-    let pending_slots = pending_jobs
+    let world_jobs = read_world_jobs(&ReadWorldJobsOptions {
+        store_root: state.store_root.clone(),
+        world_id: packet.world_id.clone(),
+        extra_visual_jobs: pending_jobs.clone(),
+    })?;
+    let visual_jobs = world_jobs
         .iter()
+        .filter(|job| job.kind != WorldJobKind::TextTurn)
+        .collect::<Vec<_>>();
+    let pending_slots = visual_jobs
+        .iter()
+        .filter(|job| job.status == WorldJobStatus::Pending)
         .map(|job| job.slot.clone())
         .collect::<Vec<_>>();
-    let mut claimed_slots = Vec::new();
-    for job in &pending_jobs {
-        if load_visual_job_claim(
-            state.store_root.as_deref(),
-            packet.world_id.as_str(),
-            job.slot.as_str(),
-        )?
-        .is_some()
-        {
-            claimed_slots.push(job.slot.clone());
-        }
-    }
-    let mut completed_slots = Vec::new();
-    if manifest.menu_background.exists {
-        completed_slots.push(manifest.menu_background.slot);
-    }
-    if manifest.stage_background.exists {
-        completed_slots.push(manifest.stage_background.slot);
-    }
-    completed_slots.extend(
-        manifest
-            .visual_entities
-            .into_iter()
-            .filter(|asset| asset.exists)
-            .map(|asset| asset.slot),
-    );
+    let claimed_slots = visual_jobs
+        .iter()
+        .filter(|job| job.status == WorldJobStatus::Claimed)
+        .map(|job| job.slot.clone())
+        .collect::<Vec<_>>();
+    let completed_slots = visual_jobs
+        .iter()
+        .filter(|job| job.status == WorldJobStatus::Completed)
+        .map(|job| job.slot.clone())
+        .collect::<Vec<_>>();
     let turn_cg_status = if packet.image.image_generation_job.is_some() {
         "pending"
     } else if packet.image.exists {
