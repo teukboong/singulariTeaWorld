@@ -124,7 +124,9 @@ generated images back as `image_base64`, `image_url`, `resource_uri`, or
 payloads or complete jobs. `worldsim_complete_visual_job_from_base64` is the
 first promoted ingest path: it accepts only PNG base64 or
 `data:image/png;base64,...`, stages it temporarily, and then reuses the normal
-visual-job completion verifier.
+visual-job completion verifier. `worldsim_complete_visual_job_from_url` applies
+the same verifier after fetching an HTTPS `image/png` URL with redirect, host,
+and byte-count limits.
 
 Worker loop:
 

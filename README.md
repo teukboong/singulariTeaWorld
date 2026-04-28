@@ -135,15 +135,19 @@ trusted HTTPS tunnel or reverse proxy and paste the public `/mcp` URL into the
 custom app form. The default `play` profile exposes player-visible read tools,
 player input submission, current-CG image output, and
 `worldsim_probe_image_ingest`, plus the narrow
-`worldsim_complete_visual_job_from_base64` PNG completion path. It does not
-expose trusted local-agent tools such as pending hidden adjudication, direct
-commit, or generic completion from local paths. Existing generated CGs can be
-returned to the host as MCP image content through `worldsim_current_cg_image`.
+`worldsim_complete_visual_job_from_base64` /
+`worldsim_complete_visual_job_from_url` PNG completion paths. It does not expose
+trusted local-agent tools such as pending hidden adjudication, direct commit, or
+generic completion from local paths. Existing generated CGs can be returned to
+the host as MCP image content through `worldsim_current_cg_image`.
 The probe tool records which image reference shapes the host can pass back
 (`image_base64`, `image_url`, `resource_uri`, or `file_id`) without persisting
 image bytes. If the host can pass PNG bytes, complete the pending visual job
 with `worldsim_complete_visual_job_from_base64` using raw base64 or a
-`data:image/png;base64,...` URL.
+`data:image/png;base64,...` URL. If it can pass a temporary URL, use
+`worldsim_complete_visual_job_from_url`; the server accepts only HTTPS
+`image/png`, rejects local/private hosts, private DNS resolution targets, and
+credentials, limits redirects, and caps the download size.
 
 ## Seed Anchor
 

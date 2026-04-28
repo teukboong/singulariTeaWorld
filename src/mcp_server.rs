@@ -22,10 +22,17 @@ use singulari_world::{
     repair_world_db, resolve_store_paths, resolve_world_id, search_world_db, start_world,
     validate_world,
 };
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    net::{IpAddr, ToSocketAddrs},
+    path::PathBuf,
+    time::Duration,
+};
 
 const MCP_INSTRUCTIONS: &str = "Singulari World MCP server. It exposes standalone world-simulator tools for worldsim-agent play: player input can be queued as a pending agent turn, the trusted agent can read hidden adjudication context, and committed visible narrative is projected back into the VN packet. Browser-visible routes remain redacted.";
 const WEB_IMAGE_COMPLETION_MAX_BASE64_CHARS: usize = 32 * 1024 * 1024;
+const WEB_IMAGE_COMPLETION_MAX_URL_BYTES: u64 = 16 * 1024 * 1024;
+const WEB_IMAGE_FETCH_TIMEOUT_SECS: u64 = 30;
 const WEB_IMAGE_COMPLETION_STAGING_DIR: &str = "web_mcp_image_ingest";
 
 #[derive(Clone)]
@@ -103,6 +110,11 @@ impl WorldsimMcpServer {
                     tool::schema_for_type::<WorldsimCompleteVisualJobFromBase64Params>(),
                 ),
                 Tool::new(
+                    "worldsim_complete_visual_job_from_url",
+                    "Complete a pending visual job from an HTTPS image/png URL. The URL is fetched with size, redirect, and host-shape limits before the normal PNG completion verifier runs.",
+                    tool::schema_for_type::<WorldsimCompleteVisualJobFromUrlParams>(),
+                ),
+                Tool::new(
                     "worldsim_claim_visual_job",
                     "Atomically claim one pending player-visible Codex App image generation job. Codex App should call its image generation host capability with the returned prompt and save to destination_path.",
                     tool::schema_for_type::<WorldsimClaimVisualJobParams>(),
@@ -158,6 +170,7 @@ impl WorldsimMcpServer {
                     | "worldsim_current_cg_image"
                     | "worldsim_probe_image_ingest"
                     | "worldsim_complete_visual_job_from_base64"
+                    | "worldsim_complete_visual_job_from_url"
                     | "worldsim_resume_pack"
                     | "worldsim_search"
                     | "worldsim_codex_view"
@@ -252,6 +265,11 @@ impl ServerHandler for WorldsimMcpServer {
                 let params: WorldsimCompleteVisualJobFromBase64Params =
                     tool::parse_json_object(arguments)?;
                 blocking_tool(move || worldsim_complete_visual_job_from_base64(params)).await
+            }
+            "worldsim_complete_visual_job_from_url" => {
+                let params: WorldsimCompleteVisualJobFromUrlParams =
+                    tool::parse_json_object(arguments)?;
+                blocking_tool(move || worldsim_complete_visual_job_from_url(params)).await
             }
             "worldsim_claim_visual_job" => {
                 let params: WorldsimClaimVisualJobParams = tool::parse_json_object(arguments)?;
@@ -442,6 +460,20 @@ struct WorldsimCompleteVisualJobFromBase64Params {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct WorldsimCompleteVisualJobFromUrlParams {
+    slot: String,
+    image_url: String,
+    #[serde(default)]
+    store_root: Option<String>,
+    #[serde(default)]
+    world_id: Option<String>,
+    #[serde(default)]
+    claim_id: Option<String>,
+    #[serde(default)]
+    source_note: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 struct WorldsimCompleteVisualJobParams {
     slot: String,
     #[serde(default)]
@@ -568,6 +600,20 @@ struct WorldsimCompleteVisualJobFromBase64Response {
     completion: singulari_world::VisualJobCompletion,
     staged_path: String,
     staged_bytes: usize,
+    staged_file_removed: bool,
+    source_note: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct WorldsimCompleteVisualJobFromUrlResponse {
+    status: &'static str,
+    world_id: String,
+    slot: String,
+    completion: singulari_world::VisualJobCompletion,
+    fetched_url: String,
+    final_url: String,
+    fetched_bytes: usize,
+    staged_path: String,
     staged_file_removed: bool,
     source_note: Option<String>,
 }
@@ -774,39 +820,237 @@ fn worldsim_complete_visual_job_from_base64(
                 params.slot
             )
         })?;
-    let paths = resolve_store_paths(store_root.as_deref())?;
+    let staged = complete_visual_job_from_web_image_bytes(WebImageCompletionBytesOptions {
+        store_root,
+        world_id: world_id.clone(),
+        slot: params.slot.clone(),
+        claim_id: params.claim_id,
+        image_bytes: image_bytes.as_slice(),
+        staging_reason: "base64",
+    })?;
+    Ok(WorldsimCompleteVisualJobFromBase64Response {
+        status: "completed",
+        world_id,
+        slot: params.slot,
+        completion: staged.completion,
+        staged_path: staged.staged_path,
+        staged_bytes: staged.staged_bytes,
+        staged_file_removed: staged.staged_file_removed,
+        source_note: params.source_note,
+    })
+}
+
+fn worldsim_complete_visual_job_from_url(
+    params: WorldsimCompleteVisualJobFromUrlParams,
+) -> Result<WorldsimCompleteVisualJobFromUrlResponse> {
+    validate_fetchable_image_url(params.image_url.as_str())?;
+    let response = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(WEB_IMAGE_FETCH_TIMEOUT_SECS))
+        .redirect(reqwest::redirect::Policy::limited(3))
+        .build()
+        .context("failed to build image URL fetch client")?
+        .get(params.image_url.as_str())
+        .header(reqwest::header::ACCEPT, "image/png")
+        .send()
+        .with_context(|| {
+            format!(
+                "worldsim_complete_visual_job_from_url fetch failed: slot={}, url={}",
+                params.slot, params.image_url
+            )
+        })?
+        .error_for_status()
+        .with_context(|| {
+            format!(
+                "worldsim_complete_visual_job_from_url non-success status: slot={}, url={}",
+                params.slot, params.image_url
+            )
+        })?;
+    let final_url = response.url().to_string();
+    validate_fetchable_image_url(final_url.as_str())?;
+    if let Some(content_type) = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        && !content_type
+            .split(';')
+            .next()
+            .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("image/png"))
+    {
+        bail!("worldsim_complete_visual_job_from_url only accepts image/png, got {content_type}");
+    }
+    if let Some(content_length) = response.content_length()
+        && content_length > WEB_IMAGE_COMPLETION_MAX_URL_BYTES
+    {
+        bail!(
+            "worldsim_complete_visual_job_from_url payload too large: bytes={content_length}, max={WEB_IMAGE_COMPLETION_MAX_URL_BYTES}"
+        );
+    }
+    let image_bytes = response
+        .bytes()
+        .context("failed to read fetched image body")?;
+    if image_bytes.len() as u64 > WEB_IMAGE_COMPLETION_MAX_URL_BYTES {
+        bail!(
+            "worldsim_complete_visual_job_from_url payload too large: bytes={}, max={WEB_IMAGE_COMPLETION_MAX_URL_BYTES}",
+            image_bytes.len()
+        );
+    }
+    let store_root = store_root(params.store_root);
+    let world_id = resolve_world_id(store_root.as_deref(), params.world_id.as_deref())?;
+    let staged = complete_visual_job_from_web_image_bytes(WebImageCompletionBytesOptions {
+        store_root,
+        world_id: world_id.clone(),
+        slot: params.slot.clone(),
+        claim_id: params.claim_id,
+        image_bytes: image_bytes.as_ref(),
+        staging_reason: "url",
+    })?;
+    Ok(WorldsimCompleteVisualJobFromUrlResponse {
+        status: "completed",
+        world_id,
+        slot: params.slot,
+        completion: staged.completion,
+        fetched_url: params.image_url,
+        final_url,
+        fetched_bytes: image_bytes.len(),
+        staged_path: staged.staged_path,
+        staged_file_removed: staged.staged_file_removed,
+        source_note: params.source_note,
+    })
+}
+
+struct WebImageCompletionBytesOptions<'a> {
+    store_root: Option<PathBuf>,
+    world_id: String,
+    slot: String,
+    claim_id: Option<String>,
+    image_bytes: &'a [u8],
+    staging_reason: &'static str,
+}
+
+struct WebImageCompletionStagedResult {
+    completion: singulari_world::VisualJobCompletion,
+    staged_path: String,
+    staged_bytes: usize,
+    staged_file_removed: bool,
+}
+
+fn complete_visual_job_from_web_image_bytes(
+    options: WebImageCompletionBytesOptions<'_>,
+) -> Result<WebImageCompletionStagedResult> {
+    let paths = resolve_store_paths(options.store_root.as_deref())?;
     let staged_dir = paths
         .worlds_dir
-        .join(world_id.as_str())
+        .join(options.world_id.as_str())
         .join("visual_jobs")
         .join(WEB_IMAGE_COMPLETION_STAGING_DIR);
     fs::create_dir_all(staged_dir.as_path())
         .with_context(|| format!("failed to create {}", staged_dir.display()))?;
     let staged_path = staged_dir.join(format!(
-        "{}-{}.png",
+        "{}-{}-{}.png",
         Utc::now().to_rfc3339().replace([':', '.'], "-"),
-        safe_probe_component(params.slot.as_str())
+        options.staging_reason,
+        safe_probe_component(options.slot.as_str())
     ));
-    fs::write(staged_path.as_path(), image_bytes.as_slice())
+    let staged_bytes = options.image_bytes.len();
+    fs::write(staged_path.as_path(), options.image_bytes)
         .with_context(|| format!("failed to write {}", staged_path.display()))?;
     let completion = complete_visual_job(&CompleteVisualJobOptions {
-        store_root,
-        world_id: world_id.clone(),
-        slot: params.slot.clone(),
-        claim_id: params.claim_id,
+        store_root: options.store_root,
+        world_id: options.world_id,
+        slot: options.slot,
+        claim_id: options.claim_id,
         generated_path: Some(staged_path.clone()),
     })?;
     let staged_file_removed = fs::remove_file(staged_path.as_path()).is_ok();
-    Ok(WorldsimCompleteVisualJobFromBase64Response {
-        status: "completed",
-        world_id,
-        slot: params.slot,
+    Ok(WebImageCompletionStagedResult {
         completion,
         staged_path: staged_path.display().to_string(),
-        staged_bytes: image_bytes.len(),
+        staged_bytes,
         staged_file_removed,
-        source_note: params.source_note,
     })
+}
+
+fn validate_fetchable_image_url(raw: &str) -> Result<()> {
+    let normalized_host = validate_fetchable_image_url_shape(raw)?;
+    validate_fetchable_image_url_dns(raw, normalized_host.as_str())?;
+    Ok(())
+}
+
+fn validate_fetchable_image_url_shape(raw: &str) -> Result<String> {
+    let url = reqwest::Url::parse(raw)
+        .with_context(|| format!("worldsim_complete_visual_job_from_url invalid URL: {raw}"))?;
+    if url.scheme() != "https" {
+        bail!("worldsim_complete_visual_job_from_url only accepts https URLs");
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        bail!("worldsim_complete_visual_job_from_url rejects URLs with embedded credentials");
+    }
+    let Some(host) = url.host_str() else {
+        bail!("worldsim_complete_visual_job_from_url URL host is missing");
+    };
+    let normalized_host = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if normalized_host == "localhost" || normalized_host.ends_with(".localhost") {
+        bail!("worldsim_complete_visual_job_from_url rejects localhost URLs");
+    }
+    if let Ok(ip) = normalized_host.parse::<IpAddr>()
+        && is_private_or_local_ip(ip)
+    {
+        bail!("worldsim_complete_visual_job_from_url rejects private or local IP URLs");
+    }
+    Ok(normalized_host)
+}
+
+fn validate_fetchable_image_url_dns(raw: &str, normalized_host: &str) -> Result<()> {
+    if normalized_host.parse::<IpAddr>().is_ok() {
+        return Ok(());
+    }
+    let url = reqwest::Url::parse(raw)
+        .with_context(|| format!("worldsim_complete_visual_job_from_url invalid URL: {raw}"))?;
+    let port = url.port_or_known_default().unwrap_or(443);
+    let addrs = (normalized_host, port).to_socket_addrs().with_context(|| {
+        format!(
+            "worldsim_complete_visual_job_from_url DNS resolution failed: host={normalized_host}"
+        )
+    })?;
+    let mut saw_addr = false;
+    for addr in addrs {
+        saw_addr = true;
+        if is_private_or_local_ip(addr.ip()) {
+            bail!(
+                "worldsim_complete_visual_job_from_url rejects host resolving to private or local IP: host={normalized_host}, ip={}",
+                addr.ip()
+            );
+        }
+    }
+    if !saw_addr {
+        bail!(
+            "worldsim_complete_visual_job_from_url DNS resolution returned no addresses: host={normalized_host}"
+        );
+    }
+    Ok(())
+}
+
+fn is_private_or_local_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_broadcast()
+                || ip.is_documentation()
+                || ip.is_unspecified()
+        }
+        IpAddr::V6(ip) => {
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.segments()[0] & 0xfe00 == 0xfc00
+                || ip.segments()[0] & 0xffc0 == 0xfe80
+        }
+    }
 }
 
 struct ParsedPngBase64Payload<'a> {
@@ -1050,9 +1294,23 @@ mod tests {
         assert!(server.tool_allowed("worldsim_submit_player_input"));
         assert!(server.tool_allowed("worldsim_probe_image_ingest"));
         assert!(server.tool_allowed("worldsim_complete_visual_job_from_base64"));
+        assert!(server.tool_allowed("worldsim_complete_visual_job_from_url"));
         assert!(!server.tool_allowed("worldsim_next_pending_turn"));
         assert!(!server.tool_allowed("worldsim_commit_agent_turn"));
         assert!(!server.tool_allowed("worldsim_repair_db"));
+    }
+
+    #[test]
+    fn url_completion_accepts_only_https_nonlocal_hosts() {
+        assert!(validate_fetchable_image_url_shape("https://example.com/image.png").is_ok());
+        assert!(validate_fetchable_image_url_shape("http://example.com/image.png").is_err());
+        assert!(validate_fetchable_image_url_shape("https://localhost/image.png").is_err());
+        assert!(validate_fetchable_image_url_shape("https://127.0.0.1/image.png").is_err());
+        assert!(validate_fetchable_image_url_shape("https://10.0.0.4/image.png").is_err());
+        assert!(validate_fetchable_image_url_shape("https://[::1]/image.png").is_err());
+        assert!(
+            validate_fetchable_image_url_shape("https://user:pass@example.com/image.png").is_err()
+        );
     }
 
     #[test]

@@ -75,11 +75,11 @@ Use a trusted HTTPS tunnel or reverse proxy in front of the local listener, then
 configure ChatGPT with the public `/mcp` URL. The default `play` profile exposes
 player-visible reads, player input submission, current CG image output, and an
 image-ingest probe, plus `worldsim_complete_visual_job_from_base64` for
-host-provided PNG payloads. It deliberately withholds hidden pending-turn
-context, direct commit, repair, and generic visual-job completion from local
-paths. `--profile read-only` removes player input submission and base64
-completion. `--profile trusted-local` is for private operator-controlled
-surfaces only.
+host-provided PNG payloads and `worldsim_complete_visual_job_from_url` for
+HTTPS `image/png` URLs. It deliberately withholds hidden pending-turn context,
+direct commit, repair, and generic visual-job completion from local paths.
+`--profile read-only` removes player input submission and image completion.
+`--profile trusted-local` is for private operator-controlled surfaces only.
 
 Image generation remains host-owned. `worldsim_current_cg_image` can return an
 already saved PNG as MCP image content. `worldsim_probe_image_ingest` is the
@@ -87,7 +87,10 @@ compatibility probe for ChatGPT/App hosts that may be able to pass generated
 image references back; it records only reference shape and byte counts, not the
 image payload. If the host can pass PNG bytes, use
 `worldsim_complete_visual_job_from_base64` with raw base64 or a
-`data:image/png;base64,...` URL.
+`data:image/png;base64,...` URL. If the host can pass a temporary URL, use
+`worldsim_complete_visual_job_from_url`; the server accepts only HTTPS
+`image/png`, rejects local/private hosts, private DNS resolution targets, and
+credentials, follows at most three redirects, and caps the body at 16 MiB.
 
 ## Local VN Runtime
 
