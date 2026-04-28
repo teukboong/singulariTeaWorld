@@ -1,5 +1,6 @@
 use crate::extra_memory::{
-    ExtraMemoryProjectionStatus, load_extra_memory_projection_records, load_remembered_extras,
+    failed_projection_records_after_latest_repair, load_extra_memory_projection_records,
+    load_remembered_extras,
 };
 use crate::job_ledger::{ReadWorldJobsOptions, WorldJobKind, WorldJobStatus, read_world_jobs};
 use crate::models::{CanonEvent, TurnSnapshot};
@@ -292,10 +293,17 @@ fn extra_memory_health(world_id: &str, world_dir: &Path) -> ProjectionComponentH
         Ok(records) => records,
         Err(error) => return failed_component("extra_memory", format!("{error:#}")),
     };
-    let failed_records = records
+    let repair_start = records
         .iter()
-        .filter(|record| record.status == ExtraMemoryProjectionStatus::Failed)
+        .rposition(|record| {
+            record.status == crate::extra_memory::ExtraMemoryProjectionStatus::Repaired
+        })
+        .map_or(0, |index| index + 1);
+    let failed_records = records[repair_start..]
+        .iter()
+        .filter(|record| record.status == crate::extra_memory::ExtraMemoryProjectionStatus::Failed)
         .collect::<Vec<_>>();
+    let failed_count = failed_projection_records_after_latest_repair(&records);
     let errors = failed_records
         .iter()
         .map(|record| {
@@ -312,7 +320,7 @@ fn extra_memory_health(world_id: &str, world_dir: &Path) -> ProjectionComponentH
             "remembered_extras={}, projection_records={}, failed_projection_records={}",
             store.extras.len(),
             records.len(),
-            failed_records.len()
+            failed_count
         ),
         Vec::new(),
         errors,

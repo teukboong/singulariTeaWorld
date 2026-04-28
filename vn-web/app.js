@@ -11,6 +11,7 @@ const saveWorldApiUrl = "/api/vn/worlds/save";
 const loadWorldApiUrl = "/api/vn/worlds/load";
 const cgRetryApiUrl = "/api/vn/cg/retry";
 const repairWorldDbApiUrl = "/api/vn/repair/world-db";
+const repairExtraMemoryApiUrl = "/api/vn/repair/extra-memory";
 const launchSeenKey = "singulari.vn.launchSeen";
 const launchTransitionMs = 520;
 const LOG_PAGE_SIZE = 5;
@@ -1339,6 +1340,16 @@ function projectionHealthRow(component) {
     actions.append(repairButton);
     row.append(actions);
   }
+  if (component.component === "extra_memory" && component.status !== "healthy") {
+    const actions = document.createElement("div");
+    actions.className = "projection-health-actions";
+    const repairButton = document.createElement("button");
+    repairButton.type = "button";
+    repairButton.textContent = "기억 재구축";
+    repairButton.addEventListener("click", requestExtraMemoryRepair);
+    actions.append(repairButton);
+    row.append(actions);
+  }
   return row;
 }
 
@@ -1379,6 +1390,25 @@ async function requestWorldDbRepair() {
     );
   } catch (error) {
     setWorldOperationStatus(`world.db 재구축 실패: ${error.message}`);
+  } finally {
+    state.busy = false;
+  }
+}
+
+async function requestExtraMemoryRepair() {
+  if (state.busy || !state.apiAvailable || explicitPacketUrl) {
+    return;
+  }
+  state.busy = true;
+  setWorldOperationStatus("extra memory 재구축 중");
+  try {
+    const response = await fetchJson(repairExtraMemoryApiUrl, { method: "POST" });
+    await refreshRuntimeStatus();
+    setWorldOperationStatus(
+      `extra memory 재구축 완료: remembered=${response.repair?.remembered_extras_rebuilt ?? 0}`,
+    );
+  } catch (error) {
+    setWorldOperationStatus(`extra memory 재구축 실패: ${error.message}`);
   } finally {
     state.busy = false;
   }

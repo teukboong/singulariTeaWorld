@@ -4,7 +4,7 @@ use crate::store::{append_jsonl, read_json, write_json};
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -143,6 +143,7 @@ pub struct ExtraMemoryProjectionPlan {
 pub enum ExtraMemoryProjectionStatus {
     Committed,
     Failed,
+    Repaired,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -157,6 +158,16 @@ pub struct ExtraMemoryProjectionRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub recorded_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtraMemoryRepairReport {
+    pub world_id: String,
+    pub traces_read: usize,
+    pub remembered_extras_rebuilt: usize,
+    pub projection_records_read: usize,
+    pub repaired_failed_records: usize,
+    pub repaired_at: String,
 }
 
 /// Preflight agent-authored extra contact records before the turn state advances.
@@ -256,6 +267,53 @@ pub fn load_extra_memory_projection_records(
         .collect()
 }
 
+/// Rebuild remembered extras from trace evidence and close failed projection records.
+///
+/// # Errors
+///
+/// Returns an error when trace/projection records cannot be parsed or when the
+/// rebuilt remembered-extra store cannot be written.
+pub fn repair_extra_memory_projection(
+    world_dir: &Path,
+    world_id: &str,
+) -> Result<ExtraMemoryRepairReport> {
+    let traces = load_extra_traces(world_dir)?;
+    for trace in &traces {
+        if trace.world_id != world_id {
+            bail!(
+                "extra trace world mismatch: expected={}, actual={}, trace_id={}",
+                world_id,
+                trace.world_id,
+                trace.trace_id
+            );
+        }
+    }
+    let records = load_extra_memory_projection_records(world_dir)?;
+    let repaired_failed_records = failed_projection_records_after_latest_repair(&records);
+    let repaired_at = Utc::now().to_rfc3339();
+    let store = rebuild_remembered_extras_from_traces(world_id, &traces, repaired_at.as_str());
+    write_json(&remembered_extras_path(world_dir), &store)?;
+    let repair_record = ExtraMemoryProjectionRecord {
+        schema_version: EXTRA_MEMORY_PROJECTION_RECORD_SCHEMA_VERSION.to_owned(),
+        world_id: world_id.to_owned(),
+        turn_id: "__repair__".to_owned(),
+        status: ExtraMemoryProjectionStatus::Repaired,
+        traces_planned: traces.len(),
+        remembered_extras_planned: Some(store.extras.len()),
+        error: None,
+        recorded_at: repaired_at.clone(),
+    };
+    append_jsonl(&extra_memory_projections_path(world_dir), &repair_record)?;
+    Ok(ExtraMemoryRepairReport {
+        world_id: world_id.to_owned(),
+        traces_read: traces.len(),
+        remembered_extras_rebuilt: store.extras.len(),
+        projection_records_read: records.len(),
+        repaired_failed_records,
+        repaired_at,
+    })
+}
+
 /// Apply agent-authored extra contact records after a turn commit.
 ///
 /// # Errors
@@ -294,6 +352,20 @@ impl ExtraMemoryProjectionPlan {
             recorded_at: Utc::now().to_rfc3339(),
         }
     }
+}
+
+#[must_use]
+pub fn failed_projection_records_after_latest_repair(
+    records: &[ExtraMemoryProjectionRecord],
+) -> usize {
+    let start = records
+        .iter()
+        .rposition(|record| record.status == ExtraMemoryProjectionStatus::Repaired)
+        .map_or(0, |index| index + 1);
+    records[start..]
+        .iter()
+        .filter(|record| record.status == ExtraMemoryProjectionStatus::Failed)
+        .count()
 }
 
 /// Retrieve the compact extra memory packet for the next pending turn.
@@ -569,6 +641,66 @@ fn contact_memory_from_traces(
     memory
 }
 
+fn rebuild_remembered_extras_from_traces(
+    world_id: &str,
+    traces: &[ExtraTrace],
+    updated_at: &str,
+) -> RememberedExtrasStore {
+    let mut grouped: BTreeMap<(String, String), Vec<&ExtraTrace>> = BTreeMap::new();
+    for trace in traces {
+        grouped
+            .entry((trace.location_id.clone(), trace.surface_label.clone()))
+            .or_default()
+            .push(trace);
+    }
+    let extras = grouped
+        .into_iter()
+        .filter_map(|((location_id, surface_label), traces)| {
+            if traces.len() < 2 {
+                return None;
+            }
+            let first = traces.first()?;
+            let last = traces.last()?;
+            let mut memory = Vec::new();
+            for trace in &traces {
+                push_limited_unique(
+                    &mut memory,
+                    trace.contact_summary.as_str(),
+                    MAX_EXTRA_MEMORY_ITEMS,
+                );
+            }
+            Some(RememberedExtra {
+                schema_version: REMEMBERED_EXTRA_SCHEMA_VERSION.to_owned(),
+                world_id: world_id.to_owned(),
+                extra_id: format!(
+                    "extra:{}:{}",
+                    stable_slug(location_id.as_str()),
+                    stable_slug(surface_label.as_str())
+                ),
+                display_name: surface_label,
+                known_name: None,
+                role: first.scene_role.clone(),
+                home_location_id: location_id,
+                visibility: "player_visible".to_owned(),
+                first_seen_turn: first.turn_id.clone(),
+                last_seen_turn: last.turn_id.clone(),
+                contact_count: u32::try_from(traces.len()).unwrap_or(u32::MAX),
+                disposition: "unsettled".to_owned(),
+                memory,
+                text_design: CharacterVoiceAnchor::default(),
+                open_hooks: Vec::new(),
+                promotion_score: u32::try_from(traces.len()).unwrap_or(u32::MAX),
+            })
+        })
+        .collect();
+    RememberedExtrasStore {
+        schema_version: REMEMBERED_EXTRAS_SCHEMA_VERSION.to_owned(),
+        world_id: world_id.to_owned(),
+        extras,
+        updated_at: updated_at.to_owned(),
+    }
+}
+
 fn select_remembered_extras(
     extras: &[RememberedExtra],
     location_id: &str,
@@ -828,6 +960,76 @@ mod tests {
         assert_eq!(remembered.extras.len(), 1);
         assert_eq!(remembered.extras[0].contact_count, 2);
         assert_eq!(remembered.extras[0].first_seen_turn, "turn_0001");
+        assert_eq!(
+            remembered.extras[0].memory,
+            vec![
+                "saw the protagonist hide a bloodied sleeve",
+                "later blocked the side door after recognizing the same sleeve"
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn repair_extra_memory_rebuilds_from_traces_and_closes_failed_records() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let first = AgentExtraContact {
+            surface_label: "gate porter".to_owned(),
+            known_name: None,
+            role: Some("porter near the west gate".to_owned()),
+            location_id: Some("place:west_gate".to_owned()),
+            scene_role: Some("witness".to_owned()),
+            contact_summary: "saw the protagonist hide a bloodied sleeve".to_owned(),
+            pressure_tags: vec!["social".to_owned()],
+            promotion_hint: Some("witnessed risky action".to_owned()),
+            memory_action: None,
+            disposition: Some("wary".to_owned()),
+            text_design: None,
+            open_hooks: Vec::new(),
+        };
+        apply_extra_memory_projection(
+            temp.path(),
+            "stw_extra",
+            "turn_0001",
+            "place:west_gate",
+            std::slice::from_ref(&first),
+        )?;
+        let second = AgentExtraContact {
+            contact_summary: "later blocked the side door after recognizing the same sleeve"
+                .to_owned(),
+            ..first
+        };
+        apply_extra_memory_projection(
+            temp.path(),
+            "stw_extra",
+            "turn_0002",
+            "place:west_gate",
+            &[second],
+        )?;
+        std::fs::write(remembered_extras_path(temp.path()), "{")?;
+        append_jsonl(
+            &extra_memory_projections_path(temp.path()),
+            &ExtraMemoryProjectionRecord {
+                schema_version: EXTRA_MEMORY_PROJECTION_RECORD_SCHEMA_VERSION.to_owned(),
+                world_id: "stw_extra".to_owned(),
+                turn_id: "turn_0002".to_owned(),
+                status: ExtraMemoryProjectionStatus::Failed,
+                traces_planned: 1,
+                remembered_extras_planned: None,
+                error: Some("simulated failure".to_owned()),
+                recorded_at: Utc::now().to_rfc3339(),
+            },
+        )?;
+
+        let report = repair_extra_memory_projection(temp.path(), "stw_extra")?;
+
+        assert_eq!(report.traces_read, 2);
+        assert_eq!(report.remembered_extras_rebuilt, 1);
+        assert_eq!(report.repaired_failed_records, 1);
+        let records = load_extra_memory_projection_records(temp.path())?;
+        assert_eq!(failed_projection_records_after_latest_repair(&records), 0);
+        let remembered = load_remembered_extras(temp.path(), "stw_extra")?;
+        assert_eq!(remembered.extras[0].contact_count, 2);
         assert_eq!(
             remembered.extras[0].memory,
             vec![

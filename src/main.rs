@@ -13,8 +13,9 @@ use singulari_world::{
     recent_relationship_updates, refresh_world_docs, render_advanced_turn_report,
     render_chat_route, render_codex_view_section_markdown, render_host_supervisor_plan,
     render_packet_markdown, render_projection_health_report, render_resume_pack_markdown,
-    render_started_world_report, repair_world_db, resolve_store_paths, resolve_world_id,
-    route_chat_input, search_world_db, start_world, validate_world, world_db_stats,
+    render_started_world_report, repair_extra_memory_projection, repair_world_db,
+    resolve_store_paths, resolve_world_id, route_chat_input, search_world_db, start_world,
+    validate_world, world_db_stats,
 };
 use singulari_world::{
     BuildCodexViewOptions, BuildResumePackOptions, BuildVnPacketOptions,
@@ -425,6 +426,15 @@ enum Commands {
         json: bool,
     },
 
+    /// Rebuild remembered extra memory from trace evidence.
+    RepairExtraMemory {
+        #[arg(long)]
+        world_id: Option<String>,
+
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Classify a worldsim chat message into the next simulator command.
     ChatRoute {
         #[arg(long)]
@@ -781,6 +791,9 @@ fn dispatch(cli: Cli) -> Result<()> {
         )?,
         Commands::RepairDb { world_id, json } => {
             handle_repair_db(store_root.as_deref(), world_id.as_deref(), json)?;
+        }
+        Commands::RepairExtraMemory { world_id, json } => {
+            handle_repair_extra_memory(store_root.as_deref(), world_id.as_deref(), json)?;
         }
         Commands::ChatRoute {
             message,
@@ -1424,6 +1437,36 @@ fn handle_repair_db(store_root: Option<&Path>, world_id: Option<&str>, json: boo
         println!("snapshots: {}", report.snapshots);
         println!("render_packets: {}", report.render_packets);
         println!("search_documents: {}", report.search_documents);
+    }
+    Ok(())
+}
+
+fn handle_repair_extra_memory(
+    store_root: Option<&Path>,
+    world_id: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    let world_id = resolve_world_id(store_root, world_id)?;
+    let paths = singulari_world::resolve_store_paths(store_root)?;
+    let world_dir = paths.worlds_dir.join(world_id.as_str());
+    let report = repair_extra_memory_projection(&world_dir, world_id.as_str())?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("world: {}", report.world_id);
+        println!("traces_read: {}", report.traces_read);
+        println!(
+            "remembered_extras_rebuilt: {}",
+            report.remembered_extras_rebuilt
+        );
+        println!(
+            "projection_records_read: {}",
+            report.projection_records_read
+        );
+        println!(
+            "repaired_failed_records: {}",
+            report.repaired_failed_records
+        );
     }
     Ok(())
 }

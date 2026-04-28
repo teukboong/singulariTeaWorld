@@ -10,6 +10,7 @@ use crate::host_supervisor::{HostSupervisorPlan, build_host_supervisor_plan};
 use crate::job_ledger::{ReadWorldJobsOptions, WorldJobKind, WorldJobStatus, read_world_jobs};
 use crate::models::FREEFORM_CHOICE_SLOT;
 use crate::projection_health::{ProjectionHealthReport, build_projection_health_report};
+use crate::repair_extra_memory_projection;
 use crate::start::{StartWorldOptions, start_world};
 use crate::store::{
     WORLD_FILENAME, read_json, resolve_store_paths, resolve_world_id, save_active_world,
@@ -255,6 +256,14 @@ struct VnWorldDbRepairResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct VnExtraMemoryRepairResponse {
+    schema_version: String,
+    world_id: String,
+    repair: crate::ExtraMemoryRepairReport,
+    projection_health: ProjectionHealthReport,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct VnCgGalleryResponse {
     schema_version: String,
     world_id: String,
@@ -356,6 +365,7 @@ fn route_request(state: &VnServerState, request: &HttpRequest) -> HttpResponse {
         ("POST", "/api/vn/agent/commit") => commit_agent_turn_response(state, &request.body),
         ("POST", "/api/vn/cg/retry") => cg_retry_response(state, &request.body),
         ("POST", "/api/vn/repair/world-db") => repair_world_db_response(state),
+        ("POST", "/api/vn/repair/extra-memory") => repair_extra_memory_response(state),
         ("POST", "/api/vn/choose") => choose_response(state, &request.body),
         _ => error_response("404 Not Found", format!("unknown route: {}", request.path)),
     }
@@ -408,6 +418,13 @@ fn runtime_status_response(state: &VnServerState) -> HttpResponse {
 
 fn repair_world_db_response(state: &VnServerState) -> HttpResponse {
     match repair_world_db_for_active_world(state) {
+        Ok(response) => json_response(&response),
+        Err(error) => error_response("400 Bad Request", error.to_string()),
+    }
+}
+
+fn repair_extra_memory_response(state: &VnServerState) -> HttpResponse {
+    match repair_extra_memory_for_active_world(state) {
         Ok(response) => json_response(&response),
         Err(error) => error_response("400 Bad Request", error.to_string()),
     }
@@ -782,6 +799,23 @@ fn repair_world_db_for_active_world(state: &VnServerState) -> Result<VnWorldDbRe
         build_projection_health_report(state.store_root.as_deref(), world_id.as_str())?;
     Ok(VnWorldDbRepairResponse {
         schema_version: "singulari.vn_world_db_repair.v1".to_owned(),
+        world_id,
+        repair,
+        projection_health,
+    })
+}
+
+fn repair_extra_memory_for_active_world(
+    state: &VnServerState,
+) -> Result<VnExtraMemoryRepairResponse> {
+    let world_id = state.world_id()?;
+    let store_paths = resolve_store_paths(state.store_root.as_deref())?;
+    let files = world_file_paths(&store_paths, world_id.as_str());
+    let repair = repair_extra_memory_projection(&files.dir, world_id.as_str())?;
+    let projection_health =
+        build_projection_health_report(state.store_root.as_deref(), world_id.as_str())?;
+    Ok(VnExtraMemoryRepairResponse {
+        schema_version: "singulari.vn_extra_memory_repair.v1".to_owned(),
         world_id,
         repair,
         projection_health,
