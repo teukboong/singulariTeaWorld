@@ -149,6 +149,16 @@ with `worldsim_complete_visual_job_from_base64` using raw base64 or a
 `image/png`, rejects local/private hosts, private DNS resolution targets, and
 credentials, limits redirects, and caps the download size.
 
+When ChatGPT calls `worldsim_current` or `worldsim_submit_player_input`, the
+web profile also advertises a compact Apps SDK VN panel at
+`ui://singulari-world/vn-panel.html`. The panel is not a second backend: it
+hydrates from the same `VnPacket` structured content and uses
+`window.openai.callTool` to call `worldsim_current` and
+`worldsim_submit_player_input` against the same world store. It provides a
+ChatGPT-native compact client for scene text, choices, freeform slot 7, and
+narrative level 1-3 while the local `vn-serve` UI remains the full-screen VN
+client.
+
 ### Stable Cloudflare Front Door
 
 For a free stable URL, use the same front-door pattern as Railbot:

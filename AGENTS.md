@@ -178,6 +178,13 @@ hidden pending-turn packets, direct commits, generic visual claim completion
 from local paths, DB repair, or other trusted local-agent tools. Use
 `--profile trusted-local` only behind an operator-controlled private boundary.
 
+The web profile includes a compact ChatGPT Apps SDK VN panel resource at
+`ui://singulari-world/vn-panel.html`. `worldsim_current` and
+`worldsim_submit_player_input` advertise it through Apps metadata, and the panel
+calls the same MCP tools through `window.openai.callTool`. Treat it as a
+compact ChatGPT client over the existing backend/world store, not as a second
+runtime. The local `vn-serve` UI remains the full-screen VN client.
+
 Image direction is probe-first. `worldsim_current_cg_image` returns an existing
 stored PNG as MCP image content. `worldsim_probe_image_ingest` records only the
 shape of image references a host can pass back (`image_base64`, `image_url`,

@@ -81,6 +81,13 @@ direct commit, repair, and generic visual-job completion from local paths.
 `--profile read-only` removes player input submission and image completion.
 `--profile trusted-local` is for private operator-controlled surfaces only.
 
+The web profile also declares a compact ChatGPT Apps SDK component:
+`ui://singulari-world/vn-panel.html`. `worldsim_current` and
+`worldsim_submit_player_input` point at that template with Apps metadata, and
+the component calls the same MCP tools through `window.openai.callTool`. This
+keeps one backend and one world store while giving ChatGPT a compact VN client;
+the local `vn-serve` browser UI remains the full-screen client.
+
 Image generation remains host-owned. `worldsim_current_cg_image` can return an
 already saved PNG as MCP image content. `worldsim_probe_image_ingest` is the
 compatibility probe for ChatGPT/App hosts that may be able to pass generated

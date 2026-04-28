@@ -1,0 +1,442 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #101114;
+        --panel: #181a20;
+        --line: #31343d;
+        --text: #f3efe7;
+        --muted: #b8afa2;
+        --accent: #d8b46a;
+        --accent-strong: #f0cf84;
+        --danger: #ef8f79;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-width: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 14px/1.55 ui-serif, Georgia, "Apple SD Gothic Neo", "Noto Serif KR",
+          serif;
+      }
+
+      button,
+      input,
+      select {
+        font: inherit;
+      }
+
+      .app {
+        display: grid;
+        gap: 12px;
+        padding: 14px;
+      }
+
+      .top {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+        border-bottom: 1px solid var(--line);
+        padding-bottom: 10px;
+      }
+
+      .title {
+        margin: 0;
+        font-size: 18px;
+        line-height: 1.25;
+      }
+
+      .meta {
+        margin-top: 4px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .toolbar {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+      }
+
+      .level {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      select,
+      input {
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        background: #0d0e11;
+        color: var(--text);
+      }
+
+      select {
+        padding: 7px 9px;
+      }
+
+      .scene {
+        display: grid;
+        gap: 10px;
+      }
+
+      .badge-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+
+      .badge {
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        color: var(--muted);
+        padding: 3px 8px;
+        font-size: 12px;
+      }
+
+      .story {
+        display: grid;
+        gap: 8px;
+      }
+
+      .story p {
+        margin: 0;
+        white-space: pre-wrap;
+      }
+
+      .choices {
+        display: grid;
+        gap: 8px;
+      }
+
+      .choice {
+        width: 100%;
+        display: grid;
+        gap: 3px;
+        text-align: left;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        color: var(--text);
+        padding: 10px 11px;
+        cursor: pointer;
+      }
+
+      .choice:hover,
+      .choice:focus-visible {
+        border-color: var(--accent);
+        outline: none;
+      }
+
+      .choice-title {
+        color: var(--accent-strong);
+        font-weight: 700;
+      }
+
+      .choice-intent {
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .freeform {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 8px;
+      }
+
+      input {
+        min-width: 0;
+        padding: 9px 10px;
+      }
+
+      .btn {
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        background: #222630;
+        color: var(--text);
+        padding: 8px 10px;
+        cursor: pointer;
+      }
+
+      .btn:hover,
+      .btn:focus-visible {
+        border-color: var(--accent);
+        outline: none;
+      }
+
+      .status {
+        min-height: 20px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .status.error {
+        color: var(--danger);
+      }
+
+      .empty {
+        border: 1px dashed var(--line);
+        border-radius: 8px;
+        color: var(--muted);
+        padding: 16px;
+      }
+
+      @media (max-width: 520px) {
+        .top {
+          display: grid;
+        }
+
+        .toolbar {
+          justify-content: flex-start;
+        }
+
+        .freeform {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="app" id="app">
+      <section class="empty">Singulari World 패널을 여는 중.</section>
+    </main>
+    <script>
+      const app = document.getElementById("app");
+      const state = {
+        packet: null,
+        waiting: null,
+        busy: false,
+        error: "",
+        narrativeLevel: "3",
+      };
+
+      function openaiHost() {
+        return window.openai || null;
+      }
+
+      function initialToolOutput() {
+        const host = openaiHost();
+        return host?.toolOutput || host?.toolResponse?.structuredContent || null;
+      }
+
+      function unwrapToolResult(result) {
+        const candidates = [
+          result?.structuredContent,
+          result?.structured_content,
+          result?.result?.structuredContent,
+          result?.result?.structured_content,
+          result?.output,
+          result,
+        ];
+        for (const candidate of candidates) {
+          if (candidate && typeof candidate === "object") {
+            return candidate;
+          }
+        }
+        const text =
+          result?.content?.[0]?.text ||
+          result?.result?.content?.[0]?.text ||
+          result?.text ||
+          "";
+        if (typeof text === "string" && text.trim().startsWith("{")) {
+          try {
+            return JSON.parse(text);
+          } catch (_error) {
+            return null;
+          }
+        }
+        return null;
+      }
+
+      function applyToolOutput(raw) {
+        const output = unwrapToolResult(raw);
+        if (!output) {
+          return;
+        }
+        if (output.schema_version === "singulari.vn_packet.v1") {
+          state.packet = output;
+          state.waiting = null;
+          return;
+        }
+        if (output.status === "committed" && output.packet) {
+          state.packet = output.packet;
+          state.waiting = null;
+          return;
+        }
+        if (output.status === "waiting_agent" && output.pending) {
+          state.waiting = output.pending;
+          return;
+        }
+        if (output.packet?.schema_version === "singulari.vn_packet.v1") {
+          state.packet = output.packet;
+          state.waiting = null;
+        }
+      }
+
+      function packetTextBlocks(packet) {
+        const blocks = packet?.scene?.text_blocks || [];
+        if (blocks.length) {
+          return blocks;
+        }
+        const markdown = packet?.codex_surface?.full_markdown || "";
+        return markdown ? [markdown] : [];
+      }
+
+      function html(value) {
+        return String(value ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;");
+      }
+
+      function render() {
+        const packet = state.packet;
+        if (!packet) {
+          app.innerHTML = `<section class="empty">worldsim_current를 먼저 호출해줘.</section>`;
+          return;
+        }
+
+        const blocks = packetTextBlocks(packet)
+          .map((block) => `<p>${html(block)}</p>`)
+          .join("");
+        const choices = (packet.choices || [])
+          .map((choice) => {
+            const isFreeform = choice.requires_inline_text;
+            const title = isFreeform ? `${choice.label} · 직접 입력` : choice.label;
+            return `<button class="choice" data-choice="${html(choice.input_template)}" data-freeform="${isFreeform ? "1" : "0"}">
+              <span class="choice-title">${html(title)}</span>
+              <span class="choice-intent">${html(choice.intent)}</span>
+            </button>`;
+          })
+          .join("");
+        const waiting = state.waiting
+          ? `대기 중: ${html(state.waiting.turn_id)} · ChatGPT/Codex 에이전트가 서사를 커밋하면 새로고침해줘.`
+          : "";
+        const statusClass = state.error ? "status error" : "status";
+        const status = state.error || waiting || (state.busy ? "처리 중." : "");
+
+        app.innerHTML = `
+          <header class="top">
+            <div>
+              <h1 class="title">${html(packet.title)}</h1>
+              <div class="meta">${html(packet.world_id)} · ${html(packet.turn_id)}</div>
+            </div>
+            <div class="toolbar">
+              <label class="level">서사
+                <select id="narrativeLevel">
+                  <option value="1">1</option>
+                  <option value="2">2</option>
+                  <option value="3">3</option>
+                </select>
+              </label>
+              <button class="btn" id="refresh">새로고침</button>
+            </div>
+          </header>
+          <section class="scene">
+            <div class="badge-row">
+              <span class="badge">${html(packet.scene?.location || "장소 미정")}</span>
+              <span class="badge">${html(packet.scene?.current_event || "사건 미정")}</span>
+              <span class="badge">${html(packet.scene?.adjudication?.outcome || packet.mode)}</span>
+            </div>
+            <article class="story">${blocks || "<p>아직 표시할 서사가 없어.</p>"}</article>
+          </section>
+          <section class="choices">${choices}</section>
+          <section class="freeform">
+            <input id="freeform" placeholder="7 자유서술을 여기에 입력" />
+            <button class="btn" id="sendFreeform">보내기</button>
+          </section>
+          <div class="${statusClass}" id="status">${html(status)}</div>
+        `;
+        const level = document.getElementById("narrativeLevel");
+        level.value = state.narrativeLevel;
+        level.addEventListener("change", () => {
+          state.narrativeLevel = level.value;
+        });
+        document.getElementById("refresh").addEventListener("click", refreshCurrent);
+        document.getElementById("sendFreeform").addEventListener("click", sendFreeform);
+        for (const button of Array.from(document.querySelectorAll("[data-choice]"))) {
+          button.addEventListener("click", () => {
+            if (button.dataset.freeform === "1") {
+              document.getElementById("freeform").focus();
+              return;
+            }
+            submitInput(button.dataset.choice);
+          });
+        }
+        openaiHost()?.notifyIntrinsicHeight?.(document.body.scrollHeight);
+      }
+
+      async function callTool(name, args) {
+        const host = openaiHost();
+        if (!host?.callTool) {
+          throw new Error("ChatGPT widget host에서 callTool을 찾지 못했어.");
+        }
+        return host.callTool(name, args);
+      }
+
+      async function refreshCurrent() {
+        await withBusy(async () => {
+          const result = await callTool("worldsim_current", {});
+          applyToolOutput(result);
+        });
+      }
+
+      async function submitInput(input) {
+        await withBusy(async () => {
+          const result = await callTool("worldsim_submit_player_input", {
+            input,
+            narrative_level: Number(state.narrativeLevel),
+          });
+          applyToolOutput(result);
+        });
+      }
+
+      async function sendFreeform() {
+        const input = document.getElementById("freeform").value.trim();
+        if (!input) {
+          state.error = "자유서술 내용을 입력해줘.";
+          render();
+          return;
+        }
+        await submitInput(input.startsWith("7 ") ? input : `7 ${input}`);
+      }
+
+      async function withBusy(work) {
+        state.busy = true;
+        state.error = "";
+        render();
+        try {
+          await work();
+        } catch (error) {
+          state.error = error?.message || String(error);
+        } finally {
+          state.busy = false;
+          render();
+        }
+      }
+
+      applyToolOutput(initialToolOutput());
+      render();
+      window.addEventListener("openai:set_globals", () => {
+        applyToolOutput(initialToolOutput());
+        render();
+      });
+    </script>
+  </body>
+</html>

@@ -2,8 +2,10 @@ use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::Utc;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, Content, ListToolsResult, PaginatedRequestParams,
-    ServerCapabilities, ServerInfo, Tool,
+    Annotated, CallToolRequestParams, CallToolResult, Content, ListResourcesResult,
+    ListToolsResult, Meta, PaginatedRequestParams, RawResource, ReadResourceRequestParams,
+    ReadResourceResult, Resource, ResourceContents, ServerCapabilities, ServerInfo, Tool,
+    ToolAnnotations,
 };
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler, handler::server::tool,
@@ -34,6 +36,8 @@ const WEB_IMAGE_COMPLETION_MAX_BASE64_CHARS: usize = 32 * 1024 * 1024;
 const WEB_IMAGE_COMPLETION_MAX_URL_BYTES: u64 = 16 * 1024 * 1024;
 const WEB_IMAGE_FETCH_TIMEOUT_SECS: u64 = 30;
 const WEB_IMAGE_COMPLETION_STAGING_DIR: &str = "web_mcp_image_ingest";
+const CHATGPT_VN_WIDGET_URI: &str = "ui://singulari-world/vn-panel.html";
+const CHATGPT_VN_WIDGET_HTML: &str = include_str!("chatgpt_vn_widget.html");
 
 #[derive(Clone)]
 pub struct WorldsimMcpServer {
@@ -62,101 +66,102 @@ impl WorldsimMcpServer {
     }
 
     pub fn with_profile(profile: WorldsimMcpToolProfile) -> Self {
-        Self {
-            tools: vec![
-                Tool::new(
-                    "worldsim_start_world",
-                    "Create and activate a world from compact seed text. Returns the world record, active binding, and initial packet refs.",
-                    tool::schema_for_type::<WorldsimStartWorldParams>(),
-                ),
-                Tool::new(
-                    "worldsim_current",
-                    "Return the current player-visible VN packet for the active or explicit world.",
-                    tool::schema_for_type::<WorldsimWorldParams>(),
-                ),
-                Tool::new(
-                    "worldsim_submit_player_input",
-                    "Submit a player choice or freeform action. Defaults to agent-authored mode and returns a pending turn.",
-                    tool::schema_for_type::<WorldsimSubmitPlayerInputParams>(),
-                ),
-                Tool::new(
-                    "worldsim_next_pending_turn",
-                    "Return the trusted local-agent pending turn packet, including private adjudication context.",
-                    tool::schema_for_type::<WorldsimWorldParams>(),
-                ),
-                Tool::new(
-                    "worldsim_commit_agent_turn",
-                    "Commit an agent-authored response object, validate hidden-truth redaction, and return the updated VN packet.",
-                    tool::schema_for_type::<WorldsimCommitAgentTurnParams>(),
-                ),
-                Tool::new(
-                    "worldsim_visual_assets",
-                    "Return player-visible visual asset manifest and Codex App image generation jobs. The MCP server does not call image providers; Codex App runs the codex_app_call and saves to destination_path.",
-                    tool::schema_for_type::<WorldsimWorldParams>(),
-                ),
-                Tool::new(
-                    "worldsim_current_cg_image",
-                    "Return the current turn CG as MCP image content when a generated PNG already exists.",
-                    tool::schema_for_type::<WorldsimCurrentCgImageParams>(),
-                ),
-                Tool::new(
-                    "worldsim_probe_image_ingest",
-                    "Record the exact image reference shape ChatGPT/App hosts can pass to this MCP server. This probe does not fetch remote URLs or complete visual jobs.",
-                    tool::schema_for_type::<WorldsimProbeImageIngestParams>(),
-                ),
-                Tool::new(
-                    "worldsim_complete_visual_job_from_base64",
-                    "Complete a pending visual job from a host-provided PNG base64 payload or data URL. This is the narrow ChatGPT web image-ingest path.",
-                    tool::schema_for_type::<WorldsimCompleteVisualJobFromBase64Params>(),
-                ),
-                Tool::new(
-                    "worldsim_complete_visual_job_from_url",
-                    "Complete a pending visual job from an HTTPS image/png URL. The URL is fetched with size, redirect, and host-shape limits before the normal PNG completion verifier runs.",
-                    tool::schema_for_type::<WorldsimCompleteVisualJobFromUrlParams>(),
-                ),
-                Tool::new(
-                    "worldsim_claim_visual_job",
-                    "Atomically claim one pending player-visible Codex App image generation job. Codex App should call its image generation host capability with the returned prompt and save to destination_path.",
-                    tool::schema_for_type::<WorldsimClaimVisualJobParams>(),
-                ),
-                Tool::new(
-                    "worldsim_complete_visual_job",
-                    "Mark a visual generation job complete after Codex App has saved a PNG to the returned destination_path, or copy a generated PNG into that destination.",
-                    tool::schema_for_type::<WorldsimCompleteVisualJobParams>(),
-                ),
-                Tool::new(
-                    "worldsim_release_visual_job",
-                    "Release a claimed visual generation job without accepting an asset, for host worker failure or user retry recovery.",
-                    tool::schema_for_type::<WorldsimReleaseVisualJobParams>(),
-                ),
-                Tool::new(
-                    "worldsim_resume_pack",
-                    "Return compact world continuity for context recovery.",
-                    tool::schema_for_type::<WorldsimResumePackParams>(),
-                ),
-                Tool::new(
-                    "worldsim_search",
-                    "Search player-visible world memory and DB projections.",
-                    tool::schema_for_type::<WorldsimSearchParams>(),
-                ),
-                Tool::new(
-                    "worldsim_codex_view",
-                    "Return the DB-backed player-visible Archive View with hidden truth filtered.",
-                    tool::schema_for_type::<WorldsimCodexViewParams>(),
-                ),
-                Tool::new(
-                    "worldsim_validate",
-                    "Validate JSON/JSONL/world.db consistency for a world.",
-                    tool::schema_for_type::<WorldsimWorldParams>(),
-                ),
-                Tool::new(
-                    "worldsim_repair_db",
-                    "Rebuild world.db projections from persisted JSON/JSONL evidence files.",
-                    tool::schema_for_type::<WorldsimWorldParams>(),
-                ),
-            ],
-            profile,
+        let mut tools = vec![
+            Tool::new(
+                "worldsim_start_world",
+                "Create and activate a world from compact seed text. Returns the world record, active binding, and initial packet refs.",
+                tool::schema_for_type::<WorldsimStartWorldParams>(),
+            ),
+            Tool::new(
+                "worldsim_current",
+                "Return the current player-visible VN packet for the active or explicit world.",
+                tool::schema_for_type::<WorldsimWorldParams>(),
+            ),
+            Tool::new(
+                "worldsim_submit_player_input",
+                "Submit a player choice or freeform action. Defaults to agent-authored mode and returns a pending turn.",
+                tool::schema_for_type::<WorldsimSubmitPlayerInputParams>(),
+            ),
+            Tool::new(
+                "worldsim_next_pending_turn",
+                "Return the trusted local-agent pending turn packet, including private adjudication context.",
+                tool::schema_for_type::<WorldsimWorldParams>(),
+            ),
+            Tool::new(
+                "worldsim_commit_agent_turn",
+                "Commit an agent-authored response object, validate hidden-truth redaction, and return the updated VN packet.",
+                tool::schema_for_type::<WorldsimCommitAgentTurnParams>(),
+            ),
+            Tool::new(
+                "worldsim_visual_assets",
+                "Return player-visible visual asset manifest and Codex App image generation jobs. The MCP server does not call image providers; Codex App runs the codex_app_call and saves to destination_path.",
+                tool::schema_for_type::<WorldsimWorldParams>(),
+            ),
+            Tool::new(
+                "worldsim_current_cg_image",
+                "Return the current turn CG as MCP image content when a generated PNG already exists.",
+                tool::schema_for_type::<WorldsimCurrentCgImageParams>(),
+            ),
+            Tool::new(
+                "worldsim_probe_image_ingest",
+                "Record the exact image reference shape ChatGPT/App hosts can pass to this MCP server. This probe does not fetch remote URLs or complete visual jobs.",
+                tool::schema_for_type::<WorldsimProbeImageIngestParams>(),
+            ),
+            Tool::new(
+                "worldsim_complete_visual_job_from_base64",
+                "Complete a pending visual job from a host-provided PNG base64 payload or data URL. This is the narrow ChatGPT web image-ingest path.",
+                tool::schema_for_type::<WorldsimCompleteVisualJobFromBase64Params>(),
+            ),
+            Tool::new(
+                "worldsim_complete_visual_job_from_url",
+                "Complete a pending visual job from an HTTPS image/png URL. The URL is fetched with size, redirect, and host-shape limits before the normal PNG completion verifier runs.",
+                tool::schema_for_type::<WorldsimCompleteVisualJobFromUrlParams>(),
+            ),
+            Tool::new(
+                "worldsim_claim_visual_job",
+                "Atomically claim one pending player-visible Codex App image generation job. Codex App should call its image generation host capability with the returned prompt and save to destination_path.",
+                tool::schema_for_type::<WorldsimClaimVisualJobParams>(),
+            ),
+            Tool::new(
+                "worldsim_complete_visual_job",
+                "Mark a visual generation job complete after Codex App has saved a PNG to the returned destination_path, or copy a generated PNG into that destination.",
+                tool::schema_for_type::<WorldsimCompleteVisualJobParams>(),
+            ),
+            Tool::new(
+                "worldsim_release_visual_job",
+                "Release a claimed visual generation job without accepting an asset, for host worker failure or user retry recovery.",
+                tool::schema_for_type::<WorldsimReleaseVisualJobParams>(),
+            ),
+            Tool::new(
+                "worldsim_resume_pack",
+                "Return compact world continuity for context recovery.",
+                tool::schema_for_type::<WorldsimResumePackParams>(),
+            ),
+            Tool::new(
+                "worldsim_search",
+                "Search player-visible world memory and DB projections.",
+                tool::schema_for_type::<WorldsimSearchParams>(),
+            ),
+            Tool::new(
+                "worldsim_codex_view",
+                "Return the DB-backed player-visible Archive View with hidden truth filtered.",
+                tool::schema_for_type::<WorldsimCodexViewParams>(),
+            ),
+            Tool::new(
+                "worldsim_validate",
+                "Validate JSON/JSONL/world.db consistency for a world.",
+                tool::schema_for_type::<WorldsimWorldParams>(),
+            ),
+            Tool::new(
+                "worldsim_repair_db",
+                "Rebuild world.db projections from persisted JSON/JSONL evidence files.",
+                tool::schema_for_type::<WorldsimWorldParams>(),
+            ),
+        ];
+        if profile.chatgpt_app_enabled() {
+            attach_chatgpt_app_tool_metadata(&mut tools);
         }
+        Self { tools, profile }
     }
 
     fn tool_allowed(&self, name: &str) -> bool {
@@ -194,7 +199,10 @@ impl ServerHandler for WorldsimMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(MCP_INSTRUCTIONS.to_owned()),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
+            capabilities: ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .build(),
             ..Default::default()
         }
     }
@@ -235,11 +243,15 @@ impl ServerHandler for WorldsimMcpServer {
             }
             "worldsim_current" => {
                 let params: WorldsimWorldParams = tool::parse_json_object(arguments)?;
-                blocking_tool(move || worldsim_current(params)).await
+                blocking_tool_with_widget(move || worldsim_current(params), self.profile).await
             }
             "worldsim_submit_player_input" => {
                 let params: WorldsimSubmitPlayerInputParams = tool::parse_json_object(arguments)?;
-                blocking_tool(move || worldsim_submit_player_input(params)).await
+                blocking_tool_with_widget(
+                    move || worldsim_submit_player_input(params),
+                    self.profile,
+                )
+                .await
             }
             "worldsim_next_pending_turn" => {
                 let params: WorldsimWorldParams = tool::parse_json_object(arguments)?;
@@ -319,6 +331,43 @@ impl ServerHandler for WorldsimMcpServer {
             .find(|tool| tool.name.as_ref() == name)
             .cloned()
     }
+
+    fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<ListResourcesResult, McpError>> + Send + '_ {
+        let resources = if self.profile.chatgpt_app_enabled() {
+            vec![chatgpt_vn_widget_resource()]
+        } else {
+            Vec::new()
+        };
+        std::future::ready(Ok(ListResourcesResult::with_all_items(resources)))
+    }
+
+    fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<ReadResourceResult, McpError>> + Send + '_ {
+        let result = if self.profile.chatgpt_app_enabled()
+            && request.uri.as_str() == CHATGPT_VN_WIDGET_URI
+        {
+            Ok(chatgpt_vn_widget_contents())
+        } else {
+            Err(McpError::invalid_params(
+                format!("unknown singulari-world resource: {}", request.uri),
+                None,
+            ))
+        };
+        std::future::ready(result)
+    }
+}
+
+impl WorldsimMcpToolProfile {
+    const fn chatgpt_app_enabled(self) -> bool {
+        matches!(self, Self::WebPlay | Self::WebReadOnly)
+    }
 }
 
 async fn blocking_tool<F, T>(operation: F) -> Result<CallToolResult, McpError>
@@ -333,6 +382,21 @@ where
         })?
         .map_err(|error| McpError::internal_error(error.to_string(), None))?;
     json_tool_result(&value)
+}
+
+async fn blocking_tool_with_widget<F, T>(
+    operation: F,
+    profile: WorldsimMcpToolProfile,
+) -> Result<CallToolResult, McpError>
+where
+    F: FnOnce() -> Result<T> + Send + 'static,
+    T: Serialize + Send + 'static,
+{
+    let mut result = blocking_tool(operation).await?;
+    if profile.chatgpt_app_enabled() {
+        result.meta = Some(chatgpt_app_tool_result_meta());
+    }
+    Ok(result)
 }
 
 async fn blocking_tool_result<F>(operation: F) -> Result<CallToolResult, McpError>
@@ -354,6 +418,167 @@ where
     let value = serde_json::to_value(value)
         .map_err(|error| McpError::internal_error(error.to_string(), None))?;
     Ok(CallToolResult::structured(value))
+}
+
+fn attach_chatgpt_app_tool_metadata(tools: &mut [Tool]) {
+    for tool in tools {
+        match tool.name.as_ref() {
+            "worldsim_current" => {
+                tool.annotations = Some(ToolAnnotations::new().read_only(true));
+                tool.meta = Some(chatgpt_app_tool_meta(
+                    "Loading world…",
+                    "World ready",
+                    true,
+                    true,
+                ));
+            }
+            "worldsim_submit_player_input" => {
+                tool.annotations = Some(
+                    ToolAnnotations::new()
+                        .read_only(false)
+                        .destructive(false)
+                        .idempotent(false)
+                        .open_world(false),
+                );
+                tool.meta = Some(chatgpt_app_tool_meta(
+                    "Sending choice…",
+                    "Choice sent",
+                    true,
+                    true,
+                ));
+            }
+            "worldsim_visual_assets"
+            | "worldsim_current_cg_image"
+            | "worldsim_resume_pack"
+            | "worldsim_search"
+            | "worldsim_codex_view"
+            | "worldsim_validate" => {
+                tool.annotations = Some(ToolAnnotations::new().read_only(true));
+                tool.meta = Some(chatgpt_app_tool_meta(
+                    "Checking world…",
+                    "World data ready",
+                    true,
+                    false,
+                ));
+            }
+            "worldsim_complete_visual_job_from_base64"
+            | "worldsim_complete_visual_job_from_url" => {
+                tool.annotations = Some(
+                    ToolAnnotations::new()
+                        .read_only(false)
+                        .destructive(false)
+                        .idempotent(false)
+                        .open_world(false),
+                );
+                tool.meta = Some(chatgpt_app_tool_meta("Saving CG…", "CG saved", true, false));
+            }
+            _ => {}
+        }
+    }
+}
+
+fn chatgpt_app_tool_meta(
+    invoking: &str,
+    invoked: &str,
+    widget_accessible: bool,
+    renders_widget: bool,
+) -> Meta {
+    let mut meta = Meta::new();
+    meta.0.insert(
+        "securitySchemes".to_owned(),
+        serde_json::json!([{ "type": "noauth" }]),
+    );
+    meta.0.insert(
+        "ui".to_owned(),
+        serde_json::json!({
+            "visibility": ["model", "app"],
+            "resourceUri": CHATGPT_VN_WIDGET_URI,
+        }),
+    );
+    meta.0.insert(
+        "openai/widgetAccessible".to_owned(),
+        serde_json::json!(widget_accessible),
+    );
+    meta.0.insert(
+        "openai/toolInvocation/invoking".to_owned(),
+        serde_json::json!(invoking),
+    );
+    meta.0.insert(
+        "openai/toolInvocation/invoked".to_owned(),
+        serde_json::json!(invoked),
+    );
+    if renders_widget {
+        meta.0.insert(
+            "openai/outputTemplate".to_owned(),
+            serde_json::json!(CHATGPT_VN_WIDGET_URI),
+        );
+    }
+    meta
+}
+
+fn chatgpt_app_tool_result_meta() -> Meta {
+    let mut meta = Meta::new();
+    meta.0.insert(
+        "openai/outputTemplate".to_owned(),
+        serde_json::json!(CHATGPT_VN_WIDGET_URI),
+    );
+    meta
+}
+
+fn chatgpt_vn_widget_resource() -> Resource {
+    let mut raw = RawResource::new(CHATGPT_VN_WIDGET_URI, "Singulari World VN Panel");
+    raw.title = Some("Singulari World".to_owned());
+    raw.description = Some(
+        "Compact VN client for reading the current world state and submitting player choices."
+            .to_owned(),
+    );
+    raw.mime_type = Some("text/html".to_owned());
+    raw.size = u32::try_from(CHATGPT_VN_WIDGET_HTML.len()).ok();
+    raw.meta = Some(chatgpt_vn_widget_resource_meta());
+    Annotated::new(raw, None)
+}
+
+fn chatgpt_vn_widget_contents() -> ReadResourceResult {
+    ReadResourceResult {
+        contents: vec![ResourceContents::TextResourceContents {
+            uri: CHATGPT_VN_WIDGET_URI.to_owned(),
+            mime_type: Some("text/html".to_owned()),
+            text: CHATGPT_VN_WIDGET_HTML.to_owned(),
+            meta: Some(chatgpt_vn_widget_resource_meta()),
+        }],
+    }
+}
+
+fn chatgpt_vn_widget_resource_meta() -> Meta {
+    let mut meta = Meta::new();
+    meta.0.insert(
+        "ui".to_owned(),
+        serde_json::json!({
+            "prefersBorder": true,
+            "csp": {
+                "connectDomains": [],
+                "resourceDomains": []
+            }
+        }),
+    );
+    meta.0.insert(
+        "openai/widgetDescription".to_owned(),
+        serde_json::json!(
+            "A compact Singulari World visual-novel panel. It shows the current scene, choices, freeform input, and narrative level controls."
+        ),
+    );
+    meta.0.insert(
+        "openai/widgetPrefersBorder".to_owned(),
+        serde_json::json!(true),
+    );
+    meta.0.insert(
+        "openai/widgetCSP".to_owned(),
+        serde_json::json!({
+            "connect_domains": [],
+            "resource_domains": []
+        }),
+    );
+    meta
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -1298,6 +1523,58 @@ mod tests {
         assert!(!server.tool_allowed("worldsim_next_pending_turn"));
         assert!(!server.tool_allowed("worldsim_commit_agent_turn"));
         assert!(!server.tool_allowed("worldsim_repair_db"));
+    }
+
+    #[test]
+    fn web_play_profile_attaches_chatgpt_vn_widget_metadata() -> anyhow::Result<()> {
+        let server = WorldsimMcpServer::with_profile(WorldsimMcpToolProfile::WebPlay);
+        let current_tool = server
+            .get_tool("worldsim_current")
+            .context("worldsim_current tool missing")?;
+        let meta = current_tool.meta.context("worldsim_current meta missing")?;
+        assert_eq!(
+            meta.0["openai/outputTemplate"],
+            serde_json::json!(CHATGPT_VN_WIDGET_URI)
+        );
+        assert_eq!(meta.0["openai/widgetAccessible"], serde_json::json!(true));
+        assert_eq!(
+            meta.0["ui"]["resourceUri"],
+            serde_json::json!(CHATGPT_VN_WIDGET_URI)
+        );
+
+        let submit_tool = server
+            .get_tool("worldsim_submit_player_input")
+            .context("worldsim_submit_player_input tool missing")?;
+        assert_eq!(
+            submit_tool.meta.context("submit meta missing")?.0["openai/widgetAccessible"],
+            serde_json::json!(true)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn chatgpt_vn_widget_resource_contains_inline_client() {
+        let resource = chatgpt_vn_widget_resource();
+        assert_eq!(resource.raw.uri, CHATGPT_VN_WIDGET_URI);
+        assert_eq!(resource.raw.mime_type.as_deref(), Some("text/html"));
+        assert!(
+            resource
+                .raw
+                .meta
+                .as_ref()
+                .is_some_and(|meta| meta.0.contains_key("openai/widgetDescription"))
+        );
+
+        let contents = chatgpt_vn_widget_contents();
+        let ResourceContents::TextResourceContents {
+            text, mime_type, ..
+        } = &contents.contents[0]
+        else {
+            panic!("ChatGPT VN widget should be served as text/html");
+        };
+        assert_eq!(mime_type.as_deref(), Some("text/html"));
+        assert!(text.contains("worldsim_submit_player_input"));
+        assert!(text.contains("notifyIntrinsicHeight"));
     }
 
     #[test]
