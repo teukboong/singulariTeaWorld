@@ -3,7 +3,7 @@ use crate::models::{
     DEFAULT_CHOICE_COUNT, ENTITY_RECORDS_SCHEMA_VERSION, EntityRecords, FREEFORM_CHOICE_SLOT,
     FREEFORM_CHOICE_TAG, HIDDEN_STATE_SCHEMA_VERSION, HiddenState, PLAYER_KNOWLEDGE_SCHEMA_VERSION,
     PlayerKnowledge, SINGULARI_WORLD_SCHEMA_VERSION, TURN_SNAPSHOT_SCHEMA_VERSION, TurnSnapshot,
-    WorldRecord,
+    WorldRecord, is_guide_choice_tag,
 };
 use crate::store::{read_json, resolve_store_paths, world_file_paths};
 use crate::world_db::validate_world_db;
@@ -372,9 +372,9 @@ fn validate_snapshot_choices(snapshot: &TurnSnapshot, errors: &mut Vec<String>) 
     if !snapshot
         .last_choices
         .iter()
-        .any(|choice| choice.slot == 4 && choice.tag == "안내자의 선택")
+        .any(|choice| choice.slot == 4 && is_guide_choice_tag(choice.tag.as_str()))
     {
-        errors.push("latest_snapshot missing slot 4 안내자의 선택".to_owned());
+        errors.push("latest_snapshot missing slot 4 판단 위임".to_owned());
     }
     if !snapshot
         .last_choices
@@ -450,7 +450,7 @@ world_id: stw_validate
 title: "검증 세계"
 premise:
   genre: "중세 판타지"
-  protagonist: "현대인의 전생, 남자 주인공"
+  protagonist: "변경 순찰자, 남자 주인공"
 "#
     }
 

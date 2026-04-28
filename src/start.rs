@@ -15,7 +15,8 @@ const GENERATED_WORLD_ID_PREFIX: &str = "stw";
 const MAX_TITLE_CHARS: usize = 32;
 const DEFAULT_NON_GOALS: &[&str] = &[
     "초반부터 세계관 백과를 전부 공개하지 않는다",
-    "앵커 인물을 자동 구조나 만능 해결 장치로 쓰지 않는다",
+    "시드가 명시하지 않은 전생/치트/시스템/숨은 안내자를 자동 구조로 쓰지 않는다",
+    "매 턴 최소 하나의 세계 압력을 움직여 건조한 로그가 되지 않게 한다",
 ];
 const GENRE_HINTS: &[&str] = &[
     "판타지",
@@ -76,6 +77,8 @@ const PROTAGONIST_HINTS: &[&str] = &[
     "wizard",
     "기사",
     "knight",
+    "순찰자",
+    "patrol",
     "상인",
     "merchant",
 ];
@@ -90,6 +93,8 @@ const SPECIAL_CONDITION_HINTS: &[&str] = &[
     "blessing",
     "저주",
     "curse",
+    "봉인",
+    "seal",
     "시스템",
     "system",
     "성좌",
@@ -297,16 +302,37 @@ mod tests {
     #[test]
     fn compact_seed_sets_anchor_character_invariant() -> anyhow::Result<()> {
         let seed = world_seed_from_compact_text(
-            "중세 판타지, 현대인 전생 남주, 치트 보유",
+            "중세 변경 마을, 남자 순찰자, 봉인된 길표식",
             Some("stw_seed_test"),
             Some("테스트 세계"),
         )?;
         assert_eq!(seed.world_id, "stw_seed_test");
         assert_eq!(seed.title, "테스트 세계");
         assert_eq!(seed.anchor_character.invariant, ANCHOR_CHARACTER_INVARIANT);
-        assert_eq!(seed.premise.genre, "중세 판타지");
-        assert_eq!(seed.premise.protagonist, "현대인 전생 남주");
-        assert_eq!(seed.premise.special_condition.as_deref(), Some("치트 보유"));
+        assert_eq!(seed.premise.genre, "중세 변경 마을");
+        assert_eq!(seed.premise.protagonist, "남자 순찰자");
+        assert_eq!(
+            seed.premise.special_condition.as_deref(),
+            Some("봉인된 길표식")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sparse_medieval_male_seed_does_not_inject_isekai_tropes() -> anyhow::Result<()> {
+        let seed = world_seed_from_compact_text("중세 남자주인공", None, None)?;
+        let joined = [
+            seed.premise.genre,
+            seed.premise.protagonist,
+            seed.premise.special_condition.unwrap_or_default(),
+        ]
+        .join(" ");
+        for forbidden in ["현대", "전생", "환생", "빙의", "회귀", "치트", "시스템"] {
+            assert!(
+                !joined.contains(forbidden),
+                "sparse seed injected forbidden trope {forbidden}: {joined}"
+            );
+        }
         Ok(())
     }
 
@@ -314,7 +340,7 @@ mod tests {
     fn start_world_persists_compact_seed() -> anyhow::Result<()> {
         let temp = tempdir()?;
         let started = start_world(&StartWorldOptions {
-            seed_text: "중세 판타지, 현대인 전생 남주, 치트 보유".to_owned(),
+            seed_text: "중세 변경 마을, 남자 순찰자, 봉인된 길표식".to_owned(),
             world_id: Some("stw_start_test".to_owned()),
             title: None,
             store_root: Some(temp.path().join("store")),

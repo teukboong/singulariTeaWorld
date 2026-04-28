@@ -1330,7 +1330,7 @@ world_id: stw_vn_packet
 title: "VN 세계"
 premise:
   genre: "중세 판타지"
-  protagonist: "현대인의 전생, 남자 주인공"
+  protagonist: "변경 순찰자, 남자 주인공"
 "#,
         )?;
         init_world(&InitWorldOptions {
@@ -1452,7 +1452,7 @@ world_id: stw_vn_budget
 title: "예산 세계"
 premise:
   genre: "중세 판타지"
-  protagonist: "현대인의 전생, 남자 주인공"
+  protagonist: "변경 순찰자, 남자 주인공"
 "#,
         )?;
         let initialized = init_world(&InitWorldOptions {
@@ -1515,7 +1515,7 @@ world_id: stw_vn_webgpt_visual
 title: "웹 이미지 세계"
 premise:
   genre: "중세 판타지"
-  protagonist: "현대인의 전생, 남자 주인공"
+  protagonist: "변경 순찰자, 남자 주인공"
 "#,
         )?;
         init_world(&InitWorldOptions {

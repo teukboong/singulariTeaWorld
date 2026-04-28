@@ -1808,7 +1808,7 @@ world_id: stw_vn_server
 title: "VN 서버 세계"
 premise:
   genre: "중세 판타지"
-  protagonist: "현대인의 전생, 남자 주인공"
+  protagonist: "변경 순찰자, 남자 주인공"
 "#,
         )?;
         init_world(&InitWorldOptions {
@@ -1846,7 +1846,7 @@ world_id: stw_vn_cg_retry
 title: "CG 재시도 세계"
 premise:
   genre: "중세 판타지"
-  protagonist: "현대인의 전생, 남자 주인공"
+  protagonist: "변경 순찰자, 남자 주인공"
 "#,
         )?;
         init_world(&InitWorldOptions {
@@ -1892,7 +1892,7 @@ world_id: stw_launcher_base
 title: "런처 기본 세계"
 premise:
   genre: "중세 판타지"
-  protagonist: "현대인의 전생, 남자 주인공"
+  protagonist: "변경 순찰자, 남자 주인공"
 "#,
         )?;
         init_world(&InitWorldOptions {
@@ -1912,7 +1912,7 @@ premise:
         let response = new_world(
             &state,
             VnNewWorldRequest {
-                seed_text: "판타지, 현대인 전생, 남주".to_owned(),
+                seed_text: "중세 변경 마을, 남자 순찰자, 봉인된 길표식".to_owned(),
                 title: Some("런처 새 세계".to_owned()),
                 text_backend: Some(WorldTextBackend::CodexAppServer),
                 visual_backend: Some(WorldVisualBackend::Webgpt),
@@ -1950,7 +1950,7 @@ world_id: stw_vn_runtime_status
 title: "런타임 상태 세계"
 premise:
   genre: "중세 판타지"
-  protagonist: "현대인의 전생, 남자 주인공"
+  protagonist: "변경 순찰자, 남자 주인공"
 "#,
         )?;
         init_world(&InitWorldOptions {
@@ -2003,7 +2003,7 @@ world_id: stw_vn_gallery
 title: "갤러리 세계"
 premise:
   genre: "중세 판타지"
-  protagonist: "현대인의 전생, 남자 주인공"
+  protagonist: "변경 순찰자, 남자 주인공"
 "#,
         )?;
         init_world(&InitWorldOptions {
@@ -2055,7 +2055,7 @@ world_id: stw_vn_current
 title: "현재 세계"
 premise:
   genre: "중세 판타지"
-  protagonist: "현대인의 전생, 남자 주인공"
+  protagonist: "변경 순찰자, 남자 주인공"
 "#,
         )?;
         std::fs::write(
@@ -2066,7 +2066,7 @@ world_id: stw_vn_imported
 title: "불러온 세계"
 premise:
   genre: "서정 판타지"
-  protagonist: "현대인의 전생, 남자 주인공"
+  protagonist: "변경 순찰자, 남자 주인공"
 "#,
         )?;
         init_world(&InitWorldOptions {
@@ -2119,7 +2119,7 @@ world_id: stw_vn_asset
 title: "에셋 세계"
 premise:
   genre: "중세 판타지"
-  protagonist: "현대인의 전생, 남자 주인공"
+  protagonist: "변경 순찰자, 남자 주인공"
 "#,
         )?;
         let initialized = init_world(&InitWorldOptions {

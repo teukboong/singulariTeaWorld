@@ -156,7 +156,7 @@ Create a world:
 
 ```bash
 cargo run --locked --bin singulari-world -- start \
-  --seed-text "fantasy, modern reincarnation, gifted protagonist" \
+  --seed-text "medieval border village, young patrol, sealed road marker" \
   --json
 ```
 

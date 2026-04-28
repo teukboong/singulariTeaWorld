@@ -1149,7 +1149,7 @@ world_id: stw_visual_assets
 title: "빛 없는 첫 메뉴"
 premise:
   genre: "서정 판타지"
-  protagonist: "현대인의 전생, 남자 주인공"
+  protagonist: "변경 순찰자, 남자 주인공"
   opening_state: "아직 아무 장면도 정해지지 않은 문턱"
 "#,
         )?;
@@ -1214,7 +1214,7 @@ world_id: stw_visual_claim
 title: "이미지 클레임"
 premise:
   genre: "해무 낀 항구 판타지"
-  protagonist: "현대인의 전생, 남자 주인공"
+  protagonist: "변경 순찰자, 남자 주인공"
 "#,
         )?;
         init_world(&InitWorldOptions {
@@ -1297,7 +1297,7 @@ world_id: stw_visual_turn_cg
 title: "턴 CG 클레임"
 premise:
   genre: "해무 낀 항구 판타지"
-  protagonist: "현대인의 전생, 남자 주인공"
+  protagonist: "변경 순찰자, 남자 주인공"
 "#,
         )?;
         let initialized = init_world(&InitWorldOptions {
@@ -1405,7 +1405,7 @@ world_id: stw_major_design_gate
 title: "디자인 게이트"
 premise:
   genre: "중세 판타지"
-  protagonist: "현대인의 전생, 남자 주인공"
+  protagonist: "변경 순찰자, 남자 주인공"
 "#,
         )?;
         let initialized = init_world(&InitWorldOptions {

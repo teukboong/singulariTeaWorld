@@ -158,7 +158,7 @@ pub fn initialize_world_db(
         world.world_id.as_str(),
         ANCHOR_CHARACTER_ID,
         SYSTEM_VISIBLE,
-        "앵커 인물의 정체와 역할은 아직 베일 뒤에 있다",
+        "초기 극점은 아직 인물, 장소, 물건, 세력, 위협 중 어디에도 고정되지 않았다",
         initial_event.event_id.as_str(),
         world.updated_at.as_str(),
     )?;
@@ -2073,7 +2073,7 @@ world_id: stw_db_test
 title: "DB 세계"
 premise:
   genre: "중세 판타지"
-  protagonist: "현대인의 전생, 남자 주인공"
+  protagonist: "변경 순찰자, 남자 주인공"
 "#,
         )?;
         let initialized = init_world(&InitWorldOptions {
@@ -2104,7 +2104,7 @@ world_id: stw_chapter_test
 title: "챕터 세계"
 premise:
   genre: "중세 판타지"
-  protagonist: "현대인의 전생, 남자 주인공"
+  protagonist: "변경 순찰자, 남자 주인공"
 "#,
         )?;
         let initialized = init_world(&InitWorldOptions {
@@ -2136,7 +2136,7 @@ world_id: stw_search_test
 title: "검색 세계"
 premise:
   genre: "중세 판타지"
-  protagonist: "현대인의 전생, 남자 주인공"
+  protagonist: "변경 순찰자, 남자 주인공"
 "#,
         )?;
         let initialized = init_world(&InitWorldOptions {
@@ -2149,7 +2149,7 @@ premise:
             world_id: "stw_search_test".to_owned(),
             input: "4".to_owned(),
         })?;
-        let hits = search_world_db(&initialized.world_dir, "stw_search_test", "안내자", 10)?;
+        let hits = search_world_db(&initialized.world_dir, "stw_search_test", "판단 위임", 10)?;
         assert!(!hits.is_empty());
         Ok(())
     }
@@ -2167,7 +2167,7 @@ world_id: stw_repair_test
 title: "수리 세계"
 premise:
   genre: "중세 판타지"
-  protagonist: "현대인의 전생, 남자 주인공"
+  protagonist: "변경 순찰자, 남자 주인공"
 "#,
         )?;
         let initialized = init_world(&InitWorldOptions {

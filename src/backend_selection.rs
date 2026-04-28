@@ -160,7 +160,7 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let store = temp.path().join("store");
         let seed = world_seed_from_compact_text(
-            "중세 판타지, 현대인 전생 남주",
+            "중세 판타지, 변경 순찰자 남주",
             Some("stw_backend_lock"),
             None,
         )?;

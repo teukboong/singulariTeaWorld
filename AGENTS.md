@@ -56,7 +56,7 @@ Create a world:
 
 ```bash
 cargo run --locked --bin singulari-world -- start \
-  --seed-text "fantasy, modern reincarnation, gifted protagonist" \
+  --seed-text "medieval border village, young patrol, sealed road marker" \
   --json
 ```
 
@@ -249,6 +249,16 @@ Narrative defaults must not inject genre priors. Compact seeds like `중세
 modern reincarnation, isekai transfer, possession, regression, system windows,
 cheat powers, hospitals, electricity, addresses, or other genre tropes unless
 they are explicit in seed premise or player-visible canon.
+
+World simulator V2 is pressure-first, not trope-first. Keep every turn lively by
+moving at least one visible pressure vector: survival, social, material, threat,
+mystery, desire, moral cost, or time pressure. Removing genre bias must not turn
+the output into dry logs.
+
+Slot 4 is `판단 위임`: a meta-GM judgment slot, not an in-world guide or hidden
+character. Keep its visible intent redacted as `맡긴다. 세부 내용은 선택 후
+드러난다.` Legacy `안내자의 선택` rows may be read for old worlds, but new output
+uses `판단 위임`.
 
 Image direction is probe-first. `worldsim_current_cg_image` returns an existing
 stored PNG as MCP image content. `worldsim_probe_image_ingest` records only the

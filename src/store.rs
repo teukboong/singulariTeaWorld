@@ -478,7 +478,7 @@ world_id: stw_test
 title: "테스트 세계"
 premise:
   genre: "중세 판타지"
-  protagonist: "현대인의 전생, 남자 주인공"
+  protagonist: "변경 순찰자, 남자 주인공"
 "#,
         )?;
         let initialized = init_world(&InitWorldOptions {
@@ -509,7 +509,7 @@ world_id: stw_test
 title: "테스트 세계"
 premise:
   genre: "중세 판타지"
-  protagonist: "현대인의 전생, 남자 주인공"
+  protagonist: "변경 순찰자, 남자 주인공"
 anchor_character:
   invariant: "ordinary_companion"
 "#,
@@ -539,7 +539,7 @@ world_id: stw_active_test
 title: "활성 세계"
 premise:
   genre: "중세 판타지"
-  protagonist: "현대인의 전생, 남자 주인공"
+  protagonist: "변경 순찰자, 남자 주인공"
 "#,
         )?;
         let initialized = init_world(&InitWorldOptions {

@@ -1,14 +1,14 @@
 use crate::models::{
-    ANCHOR_CHARACTER_ID, AdjudicationReport, CanonEvent, EntityRecords, EntityUpdateRecord,
-    OPENING_LOCATION_ID, PROTAGONIST_CHARACTER_ID, RelationshipUpdateRecord,
-    StructuredEntityUpdates, TurnInputKind,
+    AdjudicationReport, CanonEvent, EntityRecords, EntityUpdateRecord, OPENING_LOCATION_ID,
+    PROTAGONIST_CHARACTER_ID, RelationshipUpdateRecord, StructuredEntityUpdates, TurnInputKind,
 };
 
 const PLAYER_VISIBLE: &str = "player_visible";
 const UPDATE_KIND_HISTORY: &str = "personal_history";
 const UPDATE_KIND_PLACE_STATE: &str = "place_state";
 const UPDATE_KIND_FACTION_PRESSURE: &str = "faction_pressure";
-const RELATION_KIND_STORY_TENSION: &str = "story_tension";
+const RELATION_KIND_DELEGATED_JUDGMENT: &str = "delegated_judgment_trace";
+const DELEGATED_JUDGMENT_TARGET_ID: &str = "meta:delegated_judgment";
 
 #[derive(Debug)]
 pub struct EntityUpdateInput<'a> {
@@ -31,7 +31,9 @@ pub fn apply_structured_entity_updates(
         StructuredEntityUpdates::empty(input.event.world_id.as_str(), input.event.turn_id.as_str());
     apply_protagonist_history(&mut updates, &mut input);
     apply_location_state(&mut updates, &mut input);
-    apply_guide_relationship(&mut updates, &mut input);
+    if matches!(input.input_kind, TurnInputKind::GuideChoice) {
+        apply_delegated_judgment_trace(&mut updates, &input);
+    }
     if matches!(input.input_kind, TurnInputKind::MacroTimeFlow) {
         apply_faction_pressure(&mut updates, &input);
     }
@@ -98,38 +100,22 @@ fn apply_location_state(updates: &mut StructuredEntityUpdates, input: &mut Entit
     });
 }
 
-fn apply_guide_relationship(
+fn apply_delegated_judgment_trace(
     updates: &mut StructuredEntityUpdates,
-    input: &mut EntityUpdateInput<'_>,
+    input: &EntityUpdateInput<'_>,
 ) {
-    let relation_summary = match input.input_kind {
-        TurnInputKind::GuideChoice => "주인공이 안내자의 숨은 안내에 맡긴 기록",
-        TurnInputKind::CodexQuery => "주인공이 세계 기록을 통해 안내자의 기록자 권한에 닿은 기록",
-        TurnInputKind::FreeformAction | TurnInputKind::NumericChoice => {
-            "주인공과 앵커 인물 사이의 이야기 장력이 한 박자 누적됨"
-        }
-        TurnInputKind::MacroTimeFlow => "거시 흐름 속에서 앵커 인물 가능성이 다시 고정됨",
-        TurnInputKind::CcCanvas => "장면 표면 전환 중에도 앵커 인물 상수가 유지됨",
-    };
-    if let Some(anchor_character) = input
-        .entities
-        .characters
-        .iter_mut()
-        .find(|character| character.id == ANCHOR_CHARACTER_ID)
-    {
-        push_limited_unique(
-            &mut anchor_character.relationships,
-            &format!("protagonist: {relation_summary}"),
-            24,
-        );
-    }
+    let relation_summary =
+        "주인공이 세계 안 인물이 아니라 메타 GM 판단 슬롯인 판단 위임에 한 박자를 맡긴 기록";
     updates.relationship_updates.push(RelationshipUpdateRecord {
-        update_id: format!("{}:{}", input.event.event_id, RELATION_KIND_STORY_TENSION),
+        update_id: format!(
+            "{}:{}",
+            input.event.event_id, RELATION_KIND_DELEGATED_JUDGMENT
+        ),
         world_id: input.event.world_id.clone(),
         turn_id: input.event.turn_id.clone(),
         source_entity_id: PROTAGONIST_CHARACTER_ID.to_owned(),
-        target_entity_id: ANCHOR_CHARACTER_ID.to_owned(),
-        relation_kind: RELATION_KIND_STORY_TENSION.to_owned(),
+        target_entity_id: DELEGATED_JUDGMENT_TARGET_ID.to_owned(),
+        relation_kind: RELATION_KIND_DELEGATED_JUDGMENT.to_owned(),
         visibility: PLAYER_VISIBLE.to_owned(),
         summary: relation_summary.to_owned(),
         source_event_id: input.event.event_id.clone(),
@@ -138,7 +124,7 @@ fn apply_guide_relationship(
 }
 
 fn apply_faction_pressure(updates: &mut StructuredEntityUpdates, input: &EntityUpdateInput<'_>) {
-    let summary = "아직 이름 없는 세력/도시 압력이 거시 흐름 후보로 기록됨".to_owned();
+    let summary = "아직 이름 없는 시간/장소/세력 압력이 흐름 후보로 기록됨".to_owned();
     updates.entity_updates.push(EntityUpdateRecord {
         update_id: format!("{}:{}", input.event.event_id, UPDATE_KIND_FACTION_PRESSURE),
         world_id: input.event.world_id.clone(),
@@ -183,7 +169,7 @@ mod tests {
                 runtime_contract: RuntimeContract::default(),
                 premise: WorldPremise {
                     genre: "중세 판타지".to_owned(),
-                    protagonist: "현대인 전생".to_owned(),
+                    protagonist: "변경 순찰자".to_owned(),
                     special_condition: None,
                     opening_state: "interlude".to_owned(),
                 },
@@ -197,14 +183,14 @@ mod tests {
     }
 
     #[test]
-    fn helper_updates_protagonist_history_and_relationships() {
+    fn helper_updates_protagonist_history_and_delegated_judgment_trace() {
         let world = world();
         let snapshot = TurnSnapshot::initial(&world, "session".to_owned());
         let hidden = HiddenState::initial(world.world_id.as_str());
         let mut event = initial_canon_event(&world);
         event.turn_id = "turn_0001".to_owned();
         event.event_id = "evt_000001".to_owned();
-        event.summary = "4번 [안내자의 선택] 선택이 접수됐다".to_owned();
+        event.summary = "4번 [판단 위임] 선택이 접수됐다".to_owned();
         let adjudication = adjudicate_turn(&AdjudicationInput {
             world: &world,
             snapshot: &snapshot,

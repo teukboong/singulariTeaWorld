@@ -249,7 +249,7 @@ world_id: stw_transfer
 title: "전송 세계"
 premise:
   genre: "중세 판타지"
-  protagonist: "현대인의 전생, 남자 주인공"
+  protagonist: "변경 순찰자, 남자 주인공"
 "#,
         )?;
         init_world(&InitWorldOptions {

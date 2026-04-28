@@ -23,6 +23,8 @@ pub const INITIAL_EVENT_ID: &str = "evt_000000";
 pub const DEFAULT_CHOICE_COUNT: usize = 7;
 pub const FREEFORM_CHOICE_SLOT: u8 = 7;
 pub const FREEFORM_CHOICE_TAG: &str = "자유서술";
+pub const GUIDE_CHOICE_TAG: &str = "판단 위임";
+pub const LEGACY_GUIDE_CHOICE_TAG: &str = "안내자의 선택";
 pub const GUIDE_CHOICE_REDACTED_INTENT: &str = "맡긴다. 세부 내용은 선택 후 드러난다.";
 
 const DEPRECATED_GUIDE_CHOICE_HINTS: &[(&str, &str)] = &[
@@ -32,13 +34,15 @@ const DEPRECATED_GUIDE_CHOICE_HINTS: &[(&str, &str)] = &[
     ),
     (
         "안내자의 선택은 현재 상태에서 가장 덜 무모한 길을 가리킨다",
-        "안내자의 선택은 선택 전에는 세부 내용이 드러나지 않는다",
+        "판단 위임은 선택 전에는 세부 내용이 드러나지 않는다",
     ),
     (
         "주인공이 안내자의 최선 후보를 따른 기록",
-        "주인공이 안내자의 숨은 안내를 따른 기록",
+        "주인공이 판단 위임에 맡긴 기록",
     ),
-    ("안내자의 최선 후보", "안내자의 숨은 안내"),
+    ("안내자의 최선 후보", "판단 위임"),
+    ("안내자의 선택", GUIDE_CHOICE_TAG),
+    ("앵커 인물", "아직 정해지지 않은 극점"),
 ];
 
 /// Remove pre-redaction Guide-choice hints from player-facing projections.
@@ -131,15 +135,12 @@ impl AnchorCharacter {
     #[must_use]
     pub fn normalized(mut self) -> Self {
         apply_default_when_empty(&mut self.invariant, ANCHOR_CHARACTER_INVARIANT);
-        apply_default_when_empty(&mut self.display_role, "핵심 인물");
+        apply_default_when_empty(&mut self.display_role, "미정 극점");
         apply_default_when_empty(
             &mut self.relationship_to_world,
-            "시드가 정한 핵심 서사 인물",
+            "플레이어-visible 사건에서 정해지는 극점 후보",
         );
-        apply_default_when_empty(
-            &mut self.relationship_to_guide,
-            "seed-defined fiction-local anchor",
-        );
+        apply_default_when_empty(&mut self.relationship_to_guide, "unresolved dramatic focus");
         self
     }
 }
@@ -487,12 +488,17 @@ pub struct TurnChoice {
 impl TurnChoice {
     #[must_use]
     pub fn player_visible_intent(&self) -> &str {
-        if self.tag == "안내자의 선택" {
+        if is_guide_choice_tag(self.tag.as_str()) {
             GUIDE_CHOICE_REDACTED_INTENT
         } else {
             self.intent.as_str()
         }
     }
+}
+
+#[must_use]
+pub fn is_guide_choice_tag(tag: &str) -> bool {
+    tag == GUIDE_CHOICE_TAG || tag == LEGACY_GUIDE_CHOICE_TAG
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -767,12 +773,12 @@ impl EntityRecords {
             factions: Vec::new(),
             items: Vec::new(),
             concepts: vec![NamedEntity {
-                id: "concept:anchor_character".to_owned(),
-                name: "Anchor character invariant".to_owned(),
+                id: "concept:dramatic_focus".to_owned(),
+                name: "Unresolved dramatic focus".to_owned(),
                 known_to_protagonist: false,
                 notes: vec![
-                    "시드가 정한 앵커 인물은 핵심 서사 인물이다".to_owned(),
-                    "구체적 정체와 역할은 시드와 서사 안에서 정해진다".to_owned(),
+                    "첫 극점은 인물, 장소, 물건, 세력, 맹세, 위협, 질문 중 플레이어-visible 사건에서 떠오른다".to_owned(),
+                    "시드가 명시하지 않은 숨은 인물이나 운명적 안내자를 자동 생성하지 않는다".to_owned(),
                 ],
             }],
         }
@@ -786,16 +792,16 @@ impl HiddenState {
             schema_version: HIDDEN_STATE_SCHEMA_VERSION.to_owned(),
             world_id: world_id.to_owned(),
             secrets: vec![HiddenStateSecret {
-                secret_id: "sec_anchor_character_manifestation_001".to_owned(),
+                secret_id: "sec_dramatic_focus_unresolved_001".to_owned(),
                 status: "veiled".to_owned(),
-                truth: "The anchor character is a seed-defined story constant, but identity, role, memory, and limits are world-local and undiscovered.".to_owned(),
+                truth: "The initial dramatic focus is unresolved. It may become a character, place, object, faction, oath, threat, or question only after player-visible evidence establishes it.".to_owned(),
                 reveal_conditions: vec![
-                    "the world seed or early scenes establish the anchor role".to_owned(),
-                    "the protagonist encounters credible story evidence".to_owned(),
+                    "the seed explicitly declares a focus".to_owned(),
+                    "player-visible scenes establish a repeated pressure center".to_owned(),
                 ],
                 forbidden_leaks: vec![
-                    "do not expose the anchor identity or limits before discovery".to_owned(),
-                    "do not let anchor identity grant automatic rescue".to_owned(),
+                    "do not assume the focus is a hidden character".to_owned(),
+                    "do not turn sparse seeds into reincarnation, system, cheat, or destined-guide stories".to_owned(),
                 ],
             }],
             timers: Vec::new(),
@@ -814,8 +820,9 @@ impl PlayerKnowledge {
                 OPENING_LOCATION_ID.to_owned(),
             ],
             open_questions: vec![
-                "앵커 인물의 정체와 역할은 아직 정해지지 않았다".to_owned(),
-                "주인공은 앵커 인물을 아직 알아보지 못한다".to_owned(),
+                "첫 장면의 즉시 압력은 아직 구체화되지 않았다".to_owned(),
+                "중요한 인물, 장소, 물건, 세력, 위협은 플레이어-visible 사건에서 정해진다"
+                    .to_owned(),
             ],
         }
     }
@@ -839,7 +846,8 @@ impl TurnSnapshot {
             },
             open_questions: vec![
                 "첫 사건은 아직 시작되지 않았다".to_owned(),
-                "앵커 인물의 정체와 역할은 아직 베일 뒤에 있다".to_owned(),
+                "이 세계의 극점은 아직 인물, 장소, 물건, 세력, 위협 중 어디에도 고정되지 않았다"
+                    .to_owned(),
             ],
             last_choices: default_turn_choices(),
         }
@@ -851,22 +859,22 @@ pub fn default_turn_choices() -> Vec<TurnChoice> {
     vec![
         TurnChoice {
             slot: 1,
-            tag: "정로".to_owned(),
-            intent: "가장 자연스러운 다음 사건의 전조로 한 박자 들어간다".to_owned(),
+            tag: "움직임".to_owned(),
+            intent: "현재 장소에서 가장 직접적으로 가능한 이동이나 접근을 시도한다".to_owned(),
         },
         TurnChoice {
             slot: 2,
-            tag: "관찰".to_owned(),
-            intent: "지금 위치, 몸, 주변 단서를 차분히 살핀다".to_owned(),
+            tag: "살핌".to_owned(),
+            intent: "몸, 장소, 물건, 흔적 중 지금 실제로 보이는 것을 살핀다".to_owned(),
         },
         TurnChoice {
             slot: 3,
-            tag: "관계".to_owned(),
-            intent: "가까운 사람이나 의미 있는 징후에 말을 건다".to_owned(),
+            tag: "접촉".to_owned(),
+            intent: "현장에 있는 사람, 기척, 사회적 신호에 조심스럽게 반응한다".to_owned(),
         },
         TurnChoice {
             slot: 4,
-            tag: "안내자의 선택".to_owned(),
+            tag: GUIDE_CHOICE_TAG.to_owned(),
             intent: GUIDE_CHOICE_REDACTED_INTENT.to_owned(),
         },
         TurnChoice {
@@ -877,7 +885,7 @@ pub fn default_turn_choices() -> Vec<TurnChoice> {
         TurnChoice {
             slot: 6,
             tag: "흐름".to_owned(),
-            intent: "시간의 관찰자 시점으로 다음 흐름을 본다".to_owned(),
+            intent: "시간, 위험, 주변 움직임이 한 박자 뒤 어떻게 밀려오는지 본다".to_owned(),
         },
         default_freeform_choice(),
     ]
@@ -888,7 +896,7 @@ pub fn default_freeform_choice() -> TurnChoice {
     TurnChoice {
         slot: FREEFORM_CHOICE_SLOT,
         tag: FREEFORM_CHOICE_TAG.to_owned(),
-        intent: "7 뒤에 직접 행동을 서술한다. 예: 7 세아에게 낮게 묻는다".to_owned(),
+        intent: "7 뒤에 직접 행동, 말, 내면 판단을 이어서 서술한다".to_owned(),
     }
 }
 
@@ -915,14 +923,8 @@ pub fn initial_canon_event(world: &WorldRecord) -> CanonEvent {
         occurred_at_world_time: "prelude".to_owned(),
         visibility: "system".to_owned(),
         kind: "note".to_owned(),
-        summary: format!(
-            "World initialized from seed. Anchor character invariant active: {}.",
-            world.anchor_character.invariant
-        ),
-        entities: vec![
-            PROTAGONIST_CHARACTER_ID.to_owned(),
-            ANCHOR_CHARACTER_ID.to_owned(),
-        ],
+        summary: "World initialized from seed. Dramatic focus starts unresolved.".to_owned(),
+        entities: vec![PROTAGONIST_CHARACTER_ID.to_owned()],
         location: Some(OPENING_LOCATION_ID.to_owned()),
         evidence: EventEvidence {
             source: "world_init".to_owned(),
@@ -968,20 +970,22 @@ fn initial_anchor_character(world: &WorldRecord) -> CharacterRecord {
             visible: "미정".to_owned(),
             native: None,
         },
-        role: format!("{} / 앵커 인물", world.anchor_character.display_role),
+        role: format!(
+            "{} / unresolved dramatic focus",
+            world.anchor_character.display_role
+        ),
         knowledge_state: "veiled".to_owned(),
         traits: TraitSet {
             confirmed: vec![
-                "시드가 정한 앵커 인물은 핵심 서사 인물이다".to_owned(),
-                "구체적 정체와 역할은 시드와 서사 안에서 정해진다".to_owned(),
+                "초기 극점은 아직 인물로 고정되지 않았다".to_owned(),
+                "플레이어-visible 사건이 반복 압력 중심을 만들 때만 구체화된다".to_owned(),
                 format!("anchor invariant: {}", world.anchor_character.invariant),
             ],
             rumored: Vec::new(),
             hidden: vec![
-                "정체와 역할".to_owned(),
-                "기억 보유량".to_owned(),
-                "능력과 한계".to_owned(),
-                "주인공과의 첫 접점".to_owned(),
+                "극점 종류".to_owned(),
+                "반복 압력의 원인".to_owned(),
+                "세계와 주인공에게 생기는 대가".to_owned(),
             ],
         },
         voice_anchor: CharacterVoiceAnchor::anchor_default(),
@@ -993,8 +997,8 @@ fn initial_anchor_character(world: &WorldRecord) -> CharacterRecord {
                 fatigue: "world-dependent".to_owned(),
             },
         },
-        history: vec!["앵커 인물로 세계 안에 잠재한다".to_owned()],
-        relationships: vec!["protagonist: story-dependent".to_owned()],
+        history: vec!["극점 후보 슬롯으로 비활성 대기한다".to_owned()],
+        relationships: Vec::new(),
     }
 }
 
@@ -1033,15 +1037,15 @@ fn default_anchor_invariant() -> String {
 }
 
 fn default_anchor_display_role() -> String {
-    "핵심 인물".to_owned()
+    "미정 극점".to_owned()
 }
 
 fn default_anchor_world_relation() -> String {
-    "시드가 정한 핵심 서사 인물".to_owned()
+    "플레이어-visible 사건에서 정해지는 극점 후보".to_owned()
 }
 
 fn default_anchor_relation() -> String {
-    "seed-defined fiction-local anchor".to_owned()
+    "unresolved dramatic focus".to_owned()
 }
 
 fn default_user_language() -> String {
@@ -1088,7 +1092,7 @@ mod tests {
         );
 
         assert!(redacted.contains(GUIDE_CHOICE_REDACTED_INTENT));
-        assert!(redacted.contains("주인공이 안내자의 숨은 안내를 따른 기록"));
+        assert!(redacted.contains("주인공이 판단 위임에 맡긴 기록"));
         assert!(!redacted.contains("가장 덜 무모"));
         assert!(!redacted.contains("최선 후보"));
     }

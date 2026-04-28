@@ -6,7 +6,7 @@ use crate::models::{
     EntityRecords, EventEvidence, FREEFORM_CHOICE_SLOT, FREEFORM_CHOICE_TAG, HiddenState,
     PROTAGONIST_CHARACTER_ID, RENDER_PACKET_SCHEMA_VERSION, RenderPacket, ScanTarget,
     TURN_LOG_ENTRY_SCHEMA_VERSION, TurnChoice, TurnInputKind, TurnLogEntry, TurnSnapshot,
-    VisibleState, WorldRecord, default_freeform_choice, default_turn_choices,
+    VisibleState, WorldRecord, default_freeform_choice, default_turn_choices, is_guide_choice_tag,
 };
 use crate::store::{
     TURN_LOG_FILENAME, WorldFilePaths, append_canon_event, append_jsonl, read_json,
@@ -306,9 +306,11 @@ fn classify_input(input: &str, snapshot: &TurnSnapshot) -> Result<ClassifiedInpu
     }
     if let Some(choice) = &selection {
         if choice.tag == FREEFORM_CHOICE_TAG {
-            bail!("자유서술은 7 뒤에 행동 서술을 같이 써야 한다: 예) 7 세아에게 낮게 묻는다");
+            bail!(
+                "자유서술은 7 뒤에 행동 서술을 같이 써야 한다: 예) 7 문 아래의 흙을 손끝으로 문질러 본다"
+            );
         }
-        if choice.tag == "안내자의 선택" {
+        if is_guide_choice_tag(choice.tag.as_str()) {
             return Ok(ClassifiedInput {
                 kind: TurnInputKind::GuideChoice,
                 mode: "normal".to_owned(),
@@ -449,10 +451,8 @@ fn next_current_event(previous: &TurnSnapshot, input: &ClassifiedInput) -> Optio
         .as_ref()
         .map(|choice| choice.tag.as_str());
     if previous.current_event.is_none()
-        && matches!(
-            selected_tag,
-            Some("정로" | "안내자의 선택" | FREEFORM_CHOICE_TAG)
-        )
+        && (matches!(selected_tag, Some("움직임" | FREEFORM_CHOICE_TAG))
+            || input.kind == TurnInputKind::GuideChoice)
     {
         return Some(CurrentEvent {
             event_id: "event_opening_prelude".to_owned(),
@@ -462,10 +462,9 @@ fn next_current_event(previous: &TurnSnapshot, input: &ClassifiedInput) -> Optio
     }
     previous.current_event.as_ref().map(|event| CurrentEvent {
         event_id: event.event_id.clone(),
-        progress: if matches!(
-            selected_tag,
-            Some("정로" | "안내자의 선택" | FREEFORM_CHOICE_TAG)
-        ) {
+        progress: if matches!(selected_tag, Some("움직임" | FREEFORM_CHOICE_TAG))
+            || input.kind == TurnInputKind::GuideChoice
+        {
             "다음 의미 있는 박자로 전진함".to_owned()
         } else {
             event.progress.clone()
@@ -588,7 +587,7 @@ fn event_consequences(
 ) -> Vec<String> {
     let mut consequences = match input.kind {
         TurnInputKind::GuideChoice => vec![
-            "guide_choice_selected".to_owned(),
+            "delegated_judgment_selected".to_owned(),
             "advance_without_overriding_world_law".to_owned(),
         ],
         TurnInputKind::CodexQuery => vec!["codex_view_requested".to_owned()],
@@ -603,7 +602,7 @@ fn event_consequences(
 
 fn mind_note(input: &ClassifiedInput) -> String {
     match input.kind {
-        TurnInputKind::GuideChoice => "안내자의 선택을 따르기로 마음이 기운다".to_owned(),
+        TurnInputKind::GuideChoice => "판단 위임에 한 박자를 맡기기로 한다".to_owned(),
         TurnInputKind::CodexQuery => "세계 기록을 열어보려는 주의가 선다".to_owned(),
         TurnInputKind::MacroTimeFlow => "시간의 흐름을 멀리서 보려 한다".to_owned(),
         TurnInputKind::CcCanvas => "장면을 다른 표면으로 펼칠 준비가 된다".to_owned(),
@@ -632,7 +631,7 @@ fn next_turn_number(turn_id: &str) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::{AdvanceTurnOptions, advance_turn};
-    use crate::models::{ANCHOR_CHARACTER_ID, TurnInputKind};
+    use crate::models::{GUIDE_CHOICE_TAG, TurnInputKind};
     use crate::store::{InitWorldOptions, init_world};
     use crate::validate::{ValidationStatus, validate_world};
     use tempfile::tempdir;
@@ -644,7 +643,7 @@ world_id: stw_turn
 title: "턴 세계"
 premise:
   genre: "중세 판타지"
-  protagonist: "현대인의 전생, 남자 주인공"
+  protagonist: "변경 순찰자, 남자 주인공"
 "#
     }
 
@@ -666,18 +665,13 @@ premise:
         })?;
         assert_eq!(turn.snapshot.turn_id, "turn_0001");
         assert_eq!(turn.canon_event.kind, TurnInputKind::GuideChoice.as_wire());
-        assert!(
-            turn.canon_event
-                .entities
-                .contains(&ANCHOR_CHARACTER_ID.to_owned())
-        );
         assert_eq!(turn.render_packet.visible_state.choices.len(), 7);
         assert!(
             turn.render_packet
                 .visible_state
                 .choices
                 .iter()
-                .any(|choice| { choice.slot == 4 && choice.tag == "안내자의 선택" })
+                .any(|choice| { choice.slot == 4 && choice.tag == GUIDE_CHOICE_TAG })
         );
         let report = validate_world(Some(&store), "stw_turn")?;
         assert_eq!(report.status, ValidationStatus::Passed);

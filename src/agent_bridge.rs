@@ -1,7 +1,7 @@
 use crate::models::{
     AdjudicationGate, CharacterVoiceAnchor, FREEFORM_CHOICE_SLOT, HiddenState,
     NARRATIVE_SCENE_SCHEMA_VERSION, NarrativeScene, TurnChoice, TurnSnapshot,
-    default_freeform_choice, default_turn_choices, normalize_turn_choices,
+    default_freeform_choice, default_turn_choices, is_guide_choice_tag, normalize_turn_choices,
 };
 use crate::store::{WorldFilePaths, read_json, resolve_store_paths, world_file_paths, write_json};
 use crate::turn::{AdvanceTurnOptions, advance_turn};
@@ -540,10 +540,10 @@ fn validate_agent_next_choices(response: &AgentTurnResponse) -> Result<()> {
         .iter()
         .find(|choice| choice.slot == 4)
         .context("agent response next_choices missing slot 4")?;
-    if guide_choice.tag != "안내자의 선택"
+    if !is_guide_choice_tag(guide_choice.tag.as_str())
         || guide_choice.intent != "맡긴다. 세부 내용은 선택 후 드러난다."
     {
-        bail!("agent response slot 4 must keep hidden guide-choice wording");
+        bail!("agent response slot 4 must keep hidden delegated-judgment wording");
     }
     let freeform_choice = response
         .next_choices
@@ -861,7 +861,8 @@ mod tests {
     };
     use crate::agent_bridge::commit_agent_turn;
     use crate::models::{
-        NARRATIVE_SCENE_SCHEMA_VERSION, NarrativeScene, TurnChoice, default_turn_choices,
+        GUIDE_CHOICE_TAG, NARRATIVE_SCENE_SCHEMA_VERSION, NarrativeScene, TurnChoice,
+        default_turn_choices,
     };
     use crate::store::{InitWorldOptions, init_world};
     use crate::vn::{BuildVnPacketOptions, build_vn_packet};
@@ -900,7 +901,7 @@ premise:
             },
             TurnChoice {
                 slot: 4,
-                tag: "안내자의 선택".to_owned(),
+                tag: GUIDE_CHOICE_TAG.to_owned(),
                 intent: "맡긴다. 세부 내용은 선택 후 드러난다.".to_owned(),
             },
             TurnChoice {

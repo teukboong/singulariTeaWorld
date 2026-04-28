@@ -4606,7 +4606,7 @@ const AGENT_TURN_RESPONSE_SCHEMA_GUIDE: &str = r#"AgentTurnResponse 스키마:
     {"slot":1,"tag":"현재 장면에 맞춘 짧은 선택명","intent":"현재 장면 단서와 player_input에서 이어지는 구체 행동"},
     {"slot":2,"tag":"현재 장면에 맞춘 짧은 선택명","intent":"몸, 장소, 물건, 흔적 중 이번 장면에 실제로 나온 단서를 살핀다"},
     {"slot":3,"tag":"현재 장면에 맞춘 짧은 선택명","intent":"이번 장면에 실제로 있는 인물, 기척, 관계 신호에 반응한다"},
-    {"slot":4,"tag":"안내자의 선택","intent":"맡긴다. 세부 내용은 선택 후 드러난다."},
+    {"slot":4,"tag":"판단 위임","intent":"맡긴다. 세부 내용은 선택 후 드러난다."},
     {"slot":5,"tag":"현재 장면에 맞춘 기록 선택명","intent":"이번 장면에서 드러난 기록/단서/세계 지식을 확인한다"},
     {"slot":6,"tag":"현재 장면에 맞춘 흐름 선택명","intent":"이번 사건의 시간 흐름이나 주변 움직임을 한 박자 멀리서 본다"},
     {"slot":7,"tag":"자유서술","intent":"플레이어가 원하는 행동과 말, 내면 독백을 직접 서술한다"}
@@ -4616,7 +4616,7 @@ const AGENT_TURN_RESPONSE_SCHEMA_GUIDE: &str = r#"AgentTurnResponse 스키마:
 - next_choices는 서사 생성과 같은 응답에서 반드시 함께 작성한다. 별도 선택지 재생성 턴을 만들지 않는다.
 - slot 1,2,3,5,6의 tag/intent는 템플릿 문구가 아니라 이번 visible_scene에서 바로 이어지는 구체 선택지여야 한다.
 - next_choices 안에는 label/preview/choices 필드를 쓰지 않는다. 오직 slot/tag/intent만 쓴다.
-- slot 번호가 기능 계약이다. tag는 UI 문구이므로 장면에 맞게 짧게 바꿔도 된다."#;
+- slot 번호가 기능 계약이다. tag는 UI 문구이므로 장면에 맞게 짧게 바꿔도 된다. 단 slot 4 tag는 "판단 위임"으로 유지한다."#;
 
 fn build_codex_realtime_prompt(
     store_root: Option<&Path>,
@@ -4803,7 +4803,9 @@ fn build_webgpt_turn_prompt(
 - player_input이 "세계 개막"이면 그것은 선택지가 아니라 시드에서 첫 서사를 여는 bootstrap turn이다.
 - 시드나 visible facts에 명시되지 않은 장르 문법을 추론해서 주입하지 마라. 특히 현대인 전생, 환생, 빙의, 회귀, 이세계 전이, 시스템/치트/상태창은 seed premise나 player-visible canon에 명시된 경우에만 쓴다.
 - protagonist가 낯선 환경을 모른다는 사실만으로 현대 기억, 병원/전기/주소 같은 현대 대비, 전생물 독백, 이름 상실 클리셰를 만들지 마라.
-- slot 4는 항상 안내자의 선택이고 preview는 숨긴다: "맡긴다. 세부 내용은 선택 후 드러난다."
+- 매 턴 survival/social/material/threat/mystery/desire/moral_cost/time_pressure 중 최소 하나의 장면 압력을 visible_scene과 next_choices에 반영한다. 편향을 지우더라도 무미건조한 로그로 쓰지 마라.
+- `anchor_character` 저장 필드는 호환용이다. 시드나 visible canon이 명시하지 않으면 숨은 인물, 운명적 안내자, 히로인, 흑막으로 해석하지 마라. 극점은 인물/장소/물건/세력/맹세/위협/질문 중 visible evidence가 만든다.
+- slot 4는 항상 판단 위임이고 preview는 숨긴다: "맡긴다. 세부 내용은 선택 후 드러난다."
 - slot 7은 항상 자유서술이며 inline prose를 요구하는 선택지로 둔다.
 - 이 WebGPT conversation의 이전 turn들은 말맛, 직전 감정선, 장면 리듬을 잇는 working context다.
 - ChatGPT Project의 새 세션이나 기존 conversation history는 기억 저장소가 아니다. 세계 연속성은 revival packet으로만 회생한다.
@@ -4860,9 +4862,12 @@ fn build_bounded_packet_realtime_prompt(
 - 출력량은 pending turn JSON의 output_contract.narrative_level과 narrative_budget을 따른다. 레벨 간 차이는 확연해야 한다.
 - 레벨 1은 표준 VN 밀도, 레벨 2는 장면 확장 밀도, 레벨 3은 장편 연재 밀도다. 레벨 2/3에서는 같은 사건도 감각, 행동, 반응, 여운, 압박을 더 길게 쌓는다.
 - player_input이 "세계 개막"이면 그것은 선택지가 아니라 시드에서 첫 서사를 여는 bootstrap turn이다. 첫 장소, 첫 감각, 첫 사건의 hook을 visible_scene에 바로 작성한다.
+- 시드나 visible facts에 명시되지 않은 장르 문법을 추론해서 주입하지 마라. 특히 현대인 전생, 환생, 빙의, 회귀, 이세계 전이, 시스템/치트/상태창은 seed premise나 player-visible canon에 명시된 경우에만 쓴다.
+- 매 턴 survival/social/material/threat/mystery/desire/moral_cost/time_pressure 중 최소 하나의 장면 압력을 visible_scene과 next_choices에 반영한다. 편향을 지우더라도 무미건조한 로그로 쓰지 마라.
+- `anchor_character` 저장 필드는 호환용이다. 시드나 visible canon이 명시하지 않으면 숨은 인물, 운명적 안내자, 히로인, 흑막으로 해석하지 마라. 극점은 인물/장소/물건/세력/맹세/위협/질문 중 visible evidence가 만든다.
 - 이 Codex thread의 이전 대화 맥락은 말맛과 리듬을 위한 working context다. 세계의 사실/상태/source of truth는 아래 pending turn JSON과 world store다.
 - thread context가 compact 되었거나 pending packet과 충돌하면 pending packet을 우선한다.
-- slot 4는 항상 안내자의 선택이고 preview는 숨긴다: "맡긴다. 세부 내용은 선택 후 드러난다."
+- slot 4는 항상 판단 위임이고 preview는 숨긴다: "맡긴다. 세부 내용은 선택 후 드러난다."
 - slot 7은 항상 자유서술이며 inline prose를 요구하는 선택지로 둔다.
 - 소스 파일을 읽거나 repo를 탐색하지 마라. 필요한 스키마와 pending packet은 이 프롬프트 안에 있다.
 - 허용된 외부 명령은 마지막 commit 명령뿐이다. commit이 next_choices 스키마 에러를 내면 visible_scene을 다시 쓰지 말고 기존 JSON의 next_choices만 고쳐 한 번 더 commit한다.
@@ -4921,7 +4926,10 @@ fn build_native_thread_realtime_prompt(
 - hidden/private context는 판정에만 쓰고, visible_scene/canon_event/choice text에는 절대 누출하지 않는다.
 - 출력 서사는 한국어 VN prose다. 대화, 제스처, 말버릇을 살리고, 게임식 수치 계산처럼 보이게 쓰지 않는다.
 - player_input이 "세계 개막"이면 첫 장소, 첫 감각, 첫 사건의 hook을 visible_scene에 바로 작성한다.
-- slot 4는 항상 안내자의 선택이고 preview는 숨긴다: "맡긴다. 세부 내용은 선택 후 드러난다."
+- 시드나 visible facts에 명시되지 않은 장르 문법을 추론해서 주입하지 마라. 특히 현대인 전생, 환생, 빙의, 회귀, 이세계 전이, 시스템/치트/상태창은 seed premise나 player-visible canon에 명시된 경우에만 쓴다.
+- 매 턴 survival/social/material/threat/mystery/desire/moral_cost/time_pressure 중 최소 하나의 장면 압력을 visible_scene과 next_choices에 반영한다. 편향을 지우더라도 무미건조한 로그로 쓰지 마라.
+- `anchor_character` 저장 필드는 호환용이다. 시드나 visible canon이 명시하지 않으면 숨은 인물, 운명적 안내자, 히로인, 흑막으로 해석하지 마라. 극점은 인물/장소/물건/세력/맹세/위협/질문 중 visible evidence가 만든다.
+- slot 4는 항상 판단 위임이고 preview는 숨긴다: "맡긴다. 세부 내용은 선택 후 드러난다."
 - slot 7은 항상 자유서술이며 inline prose를 요구하는 선택지로 둔다.
 - 소스 파일을 읽거나 repo를 탐색하지 마라. 필요한 상태와 응답 계약은 이 프롬프트 안에 있다.
 - 허용된 외부 명령은 마지막 commit 명령뿐이다. commit이 next_choices 스키마 에러를 내면 visible_scene을 다시 쓰지 말고 기존 JSON의 next_choices만 고쳐 한 번 더 commit한다.
@@ -4934,7 +4942,7 @@ fn build_native_thread_realtime_prompt(
 - next_choices의 1,2,3,5,6번은 현재 장면 단서와 player_input에 맞춰 새로 써라. 템플릿 기본 선택지를 그대로 쓰면 commit이 실패한다.
 - next_choices는 visible_scene과 같은 응답에서 함께 만든다. 별도 선택지 생성 턴을 기다리지 않는다.
 - visible_scene 안에 choices를 넣지 말고, top-level next_choices에 slot/tag/intent만 넣는다. label/preview 필드는 commit 스키마가 아니다.
-- slot 4 preview는 숨김 문구, slot 7은 자유서술 안내다.
+- slot 4는 "판단 위임"과 숨김 문구, slot 7은 자유서술 안내다.
 - hidden_truth는 visible_scene, canon_event, next_choices, final chat text에 쓰지 않는다.
 - adjudication, canon_event, entity_updates, relationship_updates는 필요한 경우에만 넣는다.
 - 최종 채팅 답변에는 JSON 본문을 붙이지 않는다.

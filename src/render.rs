@@ -1,7 +1,7 @@
 use crate::codex_view::render_codex_view_markdown;
 use crate::models::{
     AdjudicationReport, DashboardSummary, FREEFORM_CHOICE_TAG, RenderPacket, TurnChoice,
-    normalize_turn_choices,
+    is_guide_choice_tag, normalize_turn_choices,
 };
 use crate::store::{read_json, resolve_store_paths, world_file_paths};
 use anyhow::{Context, Result};
@@ -119,10 +119,10 @@ fn render_macro_time_flow(packet: &RenderPacket) -> String {
         [
             "### 다가오는 운명의 갈피들",
             "1. 아직 이름 붙지 않은 첫 사건의 문턱",
-            "2. 앵커 인물의 정체와 역할이 드러날 가능성",
-            "3. 주인공의 몸과 기억이 세계 법칙에 눌리는 순간",
-            "4. 가까운 장소가 구체적인 위험이나 인연으로 변하는 순간",
-            "5. 안내자의 선택이 정로와 갈라지거나 겹치는 순간",
+            "2. 몸, 자원, 시간 중 하나가 비용으로 떠오를 가능성",
+            "3. 가까운 장소가 구체적인 위험이나 기회로 변하는 순간",
+            "4. 아직 정해지지 않은 인물, 장소, 물건, 세력 중 하나가 극점이 되는 순간",
+            "5. 판단 위임이 보이는 증거 안에서 가장 강한 장면 압력을 고르는 순간",
         ]
         .join("\n"),
     );
@@ -271,7 +271,7 @@ fn choice_icon(tag: &str) -> &'static str {
         "정로" => "🛤️",
         "관찰" => "🔎",
         "관계" => "🕯️",
-        "안내자의 선택" => "✦",
+        tag if is_guide_choice_tag(tag) => "✦",
         "기록" => "📖",
         "흐름" => "⏳",
         tag if tag == FREEFORM_CHOICE_TAG => "✍",
@@ -306,7 +306,7 @@ world_id: stw_render
 title: "렌더 세계"
 premise:
   genre: "중세 판타지"
-  protagonist: "현대인의 전생, 남자 주인공"
+  protagonist: "변경 순찰자, 남자 주인공"
 "#,
         )?;
         init_world(&InitWorldOptions {
@@ -322,10 +322,10 @@ premise:
         let rendered = render_packet_markdown(&turn.render_packet);
         assert!(rendered.contains("### 상태"));
         assert!(rendered.contains("대상 (Target)"));
-        assert!(rendered.contains("안내자의 선택"));
+        assert!(rendered.contains("판단 위임"));
         assert!(rendered.contains("맡긴다. 세부 내용은 선택 후 드러난다."));
         assert!(rendered.contains("자유서술"));
-        assert!(rendered.contains("7 뒤에 직접 행동을 서술한다"));
+        assert!(rendered.contains("7 뒤에 직접 행동"));
         Ok(())
     }
 }

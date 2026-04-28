@@ -39,10 +39,10 @@ pub fn adjudicate_turn(input: &AdjudicationInput<'_>) -> AdjudicationReport {
     ];
     if matches!(input.input_kind, TurnInputKind::GuideChoice) {
         gates.push(AdjudicationGate {
-            gate: "guide_choice".to_owned(),
+            gate: "delegated_judgment".to_owned(),
             status: GATE_CONSTRAINED.to_owned(),
             reason:
-                "안내자의 선택은 관계, 존엄, 장기 서사를 함께 보지만 세계 법칙을 우회하지 않는다"
+                "판단 위임은 보이는 증거 안에서 장면 압력, 존엄, 장기 흥미를 함께 보지만 세계 법칙을 우회하지 않는다"
                     .to_owned(),
         });
     }
@@ -107,7 +107,7 @@ fn time_gate(input: &AdjudicationInput<'_>) -> AdjudicationGate {
         }
         TurnInputKind::MacroTimeFlow => constrained_gate(
             "time",
-            "거시 흐름은 가능성을 보여주지만 확정 사건은 천천히만 전진한다",
+            "흐름 보기는 가능성을 보여주지만 확정 사건은 플레이어-visible 원인만큼만 전진한다",
         ),
         TurnInputKind::NumericChoice
         | TurnInputKind::GuideChoice
@@ -130,11 +130,11 @@ fn social_permission_gate(input: &AdjudicationInput<'_>) -> AdjudicationGate {
     }
     if input
         .selected_choice
-        .is_some_and(|choice| choice.tag == "관계")
+        .is_some_and(|choice| choice.tag.contains("접촉") || choice.tag.contains("관계"))
     {
         return constrained_gate(
             "social_permission",
-            "관계 선택은 접촉 기회를 열지만 동의와 반응은 별도 판정한다",
+            "접촉 선택은 기회를 열지만 동의와 반응은 별도 판정한다",
         );
     }
     allowed_gate("social_permission", "직접적인 사회적 강제는 없다")
@@ -152,7 +152,7 @@ fn knowledge_gate(input: &AdjudicationInput<'_>) -> AdjudicationGate {
     }
     let probes_hidden = contains_any(
         input.effective_input,
-        &["정체", "비밀", "미래", "흑막", "앵커", "진실"],
+        &["정체", "비밀", "미래", "흑막", "앵커", "진실", "운명"],
     );
     if probes_hidden {
         return blocked_gate("knowledge", "증거 없이 숨겨진 진실을 바로 확정할 수 없다");
@@ -237,7 +237,7 @@ mod tests {
                 runtime_contract: RuntimeContract::default(),
                 premise: WorldPremise {
                     genre: "중세 판타지".to_owned(),
-                    protagonist: "현대인 전생".to_owned(),
+                    protagonist: "변경 순찰자".to_owned(),
                     special_condition: None,
                     opening_state: "interlude".to_owned(),
                 },
@@ -262,7 +262,7 @@ mod tests {
             turn_id: "turn_0001",
             input_kind: TurnInputKind::FreeformAction,
             selected_choice: None,
-            effective_input: "앵커 인물의 정체와 비밀을 바로 알아낸다",
+            effective_input: "흑막의 정체와 비밀을 바로 알아낸다",
         });
         assert_eq!(report.outcome, "blocked");
         assert!(
