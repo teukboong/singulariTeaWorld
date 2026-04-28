@@ -102,6 +102,15 @@ choice pressure, then aftertaste. The agent should not explain the style to the
 player; it should surface through dialogue endings, repeated habits, paragraph
 rhythm, and scene pressure.
 
+The WebGPT text prompt carries a compact Korean style contract rather than a
+second correction pass. It asks for natural Korean VN prose, rejects
+translationese/report prose/overlong sentences, keeps most sentences around
+25-55 Korean characters, and tells the model to split long causal chains into
+sensory clue, reaction, and delayed judgment. Avoid-list wording such as
+`해당`, `진행`, `확인`, `수행`, `위치하다`, `존재하다`, `~하는 것이 필요했다`,
+`~하는 것으로 보였다`, and `~할 수 있었다` is prompt guidance, not a runtime
+fallback filter.
+
 ## Runtime
 
 After prep, the browser-facing runtime is just the VN server:
