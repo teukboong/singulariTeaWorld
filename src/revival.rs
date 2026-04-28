@@ -132,3 +132,63 @@ pub fn build_agent_revival_packet(options: &AgentRevivalCompileOptions<'_>) -> R
         }
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_bridge::{AgentSubmitTurnOptions, enqueue_agent_turn};
+    use crate::store::{InitWorldOptions, init_world};
+
+    #[test]
+    fn agent_revival_packet_orders_source_of_truth_over_session_context() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(
+            &seed_path,
+            r#"
+schema_version: singulari.world_seed.v1
+world_id: stw_revival_packet
+title: "revival packet test"
+premise:
+  genre: "중세 판타지"
+  protagonist: "국경 숲의 남자 순찰자"
+"#,
+        )?;
+        init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+        let pending = enqueue_agent_turn(&AgentSubmitTurnOptions {
+            store_root: Some(store.clone()),
+            world_id: "stw_revival_packet".to_owned(),
+            input: "2".to_owned(),
+            narrative_level: Some(2),
+        })?;
+
+        let packet = build_agent_revival_packet(&AgentRevivalCompileOptions {
+            store_root: Some(store.as_path()),
+            pending: &pending,
+            engine_session_kind: "webgpt-text",
+        })?;
+
+        assert_eq!(
+            packet["schema_version"],
+            AGENT_REVIVAL_PACKET_SCHEMA_VERSION
+        );
+        assert_eq!(packet["engine_session_kind"], "webgpt-text");
+        assert_eq!(packet["current_turn"]["player_input"], "2");
+        assert_eq!(
+            packet["source_of_truth_policy"]["conflict_rule"],
+            "revival_packet_wins"
+        );
+        assert_eq!(packet["retrieval_profile"]["name"], "webgpt_active_memory");
+        assert!(packet["memory_revival"]["resume_pack"].is_object());
+        assert!(
+            packet["memory_revival"]["active_memory_revival"]["player_visible_archive_view"]
+                .is_object()
+        );
+        Ok(())
+    }
+}

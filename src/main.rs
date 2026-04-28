@@ -329,6 +329,18 @@ enum Commands {
         json: bool,
     },
 
+    /// Print the deterministic `WebGPT` revival packet for the pending text turn.
+    RevivalPacket {
+        #[arg(long)]
+        world_id: Option<String>,
+
+        #[arg(long, default_value = "webgpt-text")]
+        backend: String,
+
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Print the real player-visible DB-backed Archive View.
     CodexView {
         #[arg(long)]
@@ -724,6 +736,16 @@ fn dispatch(cli: Cli) -> Result<()> {
             recent_events,
             recent_memories,
             chapters,
+            json,
+        )?,
+        Commands::RevivalPacket {
+            world_id,
+            backend,
+            json,
+        } => handle_revival_packet(
+            store_root.as_deref(),
+            world_id.as_deref(),
+            backend.as_str(),
             json,
         )?,
         Commands::CodexView {
@@ -3725,6 +3747,23 @@ fn handle_resume_pack(
     } else {
         println!("{}", render_resume_pack_markdown(&pack));
     }
+    Ok(())
+}
+
+fn handle_revival_packet(
+    store_root: Option<&Path>,
+    world_id: Option<&str>,
+    backend: &str,
+    _json: bool,
+) -> Result<()> {
+    let world_id = resolve_world_id(store_root, world_id)?;
+    let pending = load_pending_agent_turn(store_root, world_id.as_str())?;
+    let packet = build_agent_revival_packet(&AgentRevivalCompileOptions {
+        store_root,
+        pending: &pending,
+        engine_session_kind: backend,
+    })?;
+    println!("{}", serde_json::to_string_pretty(&packet)?);
     Ok(())
 }
 
