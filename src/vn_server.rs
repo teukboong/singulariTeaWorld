@@ -246,6 +246,7 @@ struct VnRuntimeDetails {
     backend_selection: VnBackendSelectionStatus,
     latest_text_dispatch: Option<serde_json::Value>,
     latest_visual_dispatch: Option<serde_json::Value>,
+    world_jobs: Vec<WorldJob>,
     projection_health: ProjectionHealthReport,
     host_supervisor: HostSupervisorPlan,
 }
@@ -731,8 +732,18 @@ fn runtime_status(state: &VnServerState) -> Result<VnRuntimeStatusResponse> {
         build_host_supervisor_plan(state.store_root.as_deref(), world_id.as_str())?;
     let projection_health = host_supervisor.projection_health.clone();
     let packet = current_packet(state)?;
-    let visual =
-        visual_runtime_status(state, &packet, &selection, latest_visual_dispatch.as_ref())?;
+    let extra_visual_jobs = visual_runtime_extra_jobs(state, &packet)?;
+    let world_jobs = read_world_jobs(&ReadWorldJobsOptions {
+        store_root: state.store_root.clone(),
+        world_id: packet.world_id.clone(),
+        extra_visual_jobs,
+    })?;
+    let visual = visual_runtime_status(
+        &packet,
+        &selection,
+        latest_visual_dispatch.as_ref(),
+        &world_jobs,
+    );
     let agent_bridge_enabled = agent_bridge_enabled(state);
     let narrative_backend = selection.text_backend.as_str();
     let label = narrative_runtime_label(
@@ -786,6 +797,7 @@ fn runtime_status(state: &VnServerState) -> Result<VnRuntimeStatusResponse> {
             backend_selection: selection,
             latest_text_dispatch,
             latest_visual_dispatch,
+            world_jobs,
             projection_health,
             host_supervisor,
         },
@@ -919,31 +931,22 @@ fn narrative_runtime_detail(
 }
 
 fn visual_runtime_status(
-    state: &VnServerState,
     packet: &crate::vn::VnPacket,
     selection: &VnBackendSelectionStatus,
     latest_visual_dispatch: Option<&serde_json::Value>,
-) -> Result<VnVisualRuntimeStatus> {
-    let manifest = build_world_visual_assets(&BuildWorldVisualAssetsOptions {
-        store_root: state.store_root.clone(),
-        world_id: packet.world_id.clone(),
-    })?;
-    let mut pending_jobs = manifest.image_generation_jobs.clone();
-    if let Some(job) = packet.image.image_generation_job.clone() {
-        pending_jobs.push(job);
-    }
-    let world_jobs = read_world_jobs(&ReadWorldJobsOptions {
-        store_root: state.store_root.clone(),
-        world_id: packet.world_id.clone(),
-        extra_visual_jobs: pending_jobs.clone(),
-    })?;
+    world_jobs: &[WorldJob],
+) -> VnVisualRuntimeStatus {
+    let pending_jobs = world_jobs
+        .iter()
+        .filter(|job| job.kind != WorldJobKind::TextTurn && job.status == WorldJobStatus::Pending)
+        .cloned()
+        .collect::<Vec<_>>();
     let visual_jobs = world_jobs
         .iter()
         .filter(|job| job.kind != WorldJobKind::TextTurn)
         .collect::<Vec<_>>();
-    let pending_slots = visual_jobs
+    let pending_slots = pending_jobs
         .iter()
-        .filter(|job| job.status == WorldJobStatus::Pending)
         .map(|job| job.slot.clone())
         .collect::<Vec<_>>();
     let claimed_slots = visual_jobs
@@ -957,6 +960,7 @@ fn visual_runtime_status(
         .map(|job| job.slot.clone())
         .collect::<Vec<_>>();
     let jobs = visual_jobs.into_iter().cloned().collect::<Vec<WorldJob>>();
+    let pending_job_count = pending_jobs.len();
     let turn_cg_status = if packet.image.image_generation_job.is_some() {
         "pending"
     } else if packet.image.exists {
@@ -972,20 +976,20 @@ fn visual_runtime_status(
     let label = visual_runtime_label(
         visual_backend,
         online,
-        &pending_jobs,
+        pending_job_count,
         &claimed_slots,
         &completed_slots,
     );
     let status = if !claimed_slots.is_empty() {
         "claimed"
-    } else if !pending_jobs.is_empty() {
+    } else if pending_job_count > 0 {
         "pending"
     } else if !online {
         "needs_connection"
     } else {
         "ready"
     };
-    Ok(VnVisualRuntimeStatus {
+    VnVisualRuntimeStatus {
         label: label.to_owned(),
         status: status.to_owned(),
         backend: visual_backend.to_owned(),
@@ -1004,20 +1008,35 @@ fn visual_runtime_status(
         jobs,
         turn_cg_status,
         latest_dispatch_status,
-    })
+    }
+}
+
+fn visual_runtime_extra_jobs(
+    state: &VnServerState,
+    packet: &crate::vn::VnPacket,
+) -> Result<Vec<ImageGenerationJob>> {
+    let manifest = build_world_visual_assets(&BuildWorldVisualAssetsOptions {
+        store_root: state.store_root.clone(),
+        world_id: packet.world_id.clone(),
+    })?;
+    let mut pending_jobs = manifest.image_generation_jobs.clone();
+    if let Some(job) = packet.image.image_generation_job.clone() {
+        pending_jobs.push(job);
+    }
+    Ok(pending_jobs)
 }
 
 fn visual_runtime_label(
     backend: &str,
     online: bool,
-    pending_jobs: &[ImageGenerationJob],
+    pending_job_count: usize,
     claimed_slots: &[String],
     completed_slots: &[String],
 ) -> &'static str {
     if !claimed_slots.is_empty() {
         return "CG 생성 중";
     }
-    if !pending_jobs.is_empty() {
+    if pending_job_count > 0 {
         return "CG 생성 대기";
     }
     if !online && backend == WorldVisualBackend::Webgpt.as_str() {
