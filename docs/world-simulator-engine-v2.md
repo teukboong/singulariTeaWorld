@@ -123,8 +123,8 @@ All text backends should receive the same conceptual packet:
 5. Output contract: `AgentTurnResponse`, narrative budget, scene-specific
    choices.
 
-WebGPT may revive memory more aggressively than Codex App, but evidence tiers
-must be explicit:
+WebGPT may revive more player-visible memory than a compact prompt would, but
+evidence tiers must be explicit:
 
 ```text
 CanonVisible > PlayerAction > EngineState > DerivedHypothesis > StyleHint
@@ -148,6 +148,10 @@ unrequested genre injection.
 
 ## Implementation Notes
 
+- Use [extra-memory-architecture.md](extra-memory-architecture.md) for
+  background people. Extras should leave traces, promote only on meaningful
+  contact, and be retrieved by scene relevance rather than dumped into every
+  prompt.
 - Keep compatibility fields, but change new-world default wording to dramatic
   focus rather than hidden anchor character.
 - Replace public examples and tests that repeatedly use "modern reincarnation /

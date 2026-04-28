@@ -187,31 +187,7 @@ are allowed; `0.0.0.0` and normal LAN addresses should fail closed.
 ## Background Worker Contract
 
 The browser writes durable pending jobs. It does not call an LLM directly.
-
-Codex App prep flow:
-
-```bash
-target/release/singulari-world --store-root .world-store host-worker \
-  --text-backend codex-app-server \
-  --interval-ms 750
-```
-
-This is what the Codex App agent should start when the operator says
-`싱귤러리 월드 준비해줘`. By default, the worker starts `codex app-server` on
-a managed loopback port, records the runtime URL in the store-root
-`agent_bridge` directory, and dispatches only when a pending world turn exists.
-It can be started before any world exists; it idles until the browser creates or
-loads the active world. Visual jobs close through the same app-server loop:
-claim -> Codex App `imageGeneration` -> saved PNG -> completion metadata.
-Keep Codex App open while playing. Hosts that already own the websocket may pass
-`--codex-app-server-url`.
-
-Text turns default to `--codex-thread-context-mode native-thread`: Codex App
-thread history carries narrative rhythm, and each dispatch injects only a
-compact authoritative world packet for current state. Use `bounded-packet` for
-the older full-packet reinjection mode.
-
-To keep the same browser frontend and replace the engine with WebGPT, start:
+WebGPT is the only runtime backend:
 
 ```bash
 target/release/singulari-world --store-root .world-store host-worker \
@@ -235,24 +211,17 @@ Configure the `SINGULARI_WORLD_WEBGPT_*_CDP_PORT` and
 `SINGULARI_WORLD_WEBGPT_*_PROFILE_DIR` variables only if those defaults collide
 with another local service.
 Worlds created through the VN launcher also store a locked backend pair at
-`agent_bridge/backend_selection.json`; that world file overrides worker flags
-for text and visual dispatch, and `vn-serve` uses it for WebGPT CG cadence.
-Worlds without that file keep using the process defaults and
-`SINGULARI_WORLD_VISUAL_BACKEND=webgpt` as the legacy WebGPT cadence switch. The
-WebGPT cadence defaults to 2 turns and can be overridden with
+`agent_bridge/backend_selection.json`. The valid pair is WebGPT/WebGPT, and old
+local Codex App selections must not revive a retired backend. The WebGPT cadence
+defaults to 2 turns and can be overridden with
 `SINGULARI_WORLD_WEBGPT_TURN_CG_CADENCE_MIN`. Use `--visual-backend none` only
 for text-only smoke tests.
 
-For macOS `launchctl` supervision, use absolute paths. If `codex` comes from npm,
-the launcher uses `/usr/bin/env node`; set PATH in the LaunchAgent so `node` is
-visible, or managed app-server startup will fail before listening.
-
 Automatic image jobs can also go through the installed `singulari-world-mcp`
 server. `worldsim_claim_visual_job` returns structured content containing
-`job.codex_app_call`; Codex App consumes that call with its built-in image
-generation capability and then calls `worldsim_complete_visual_job`. The
-long-lived host worker uses the same claim/complete contract for both
-`codex-app-server` and `webgpt` visual backends.
+`job.image_generation_call`; the image host generates from that call and then
+calls `worldsim_complete_visual_job`. The host worker uses the same
+claim/complete contract.
 
 ## Current Alpha Boundary
 
@@ -263,16 +232,14 @@ The standalone simulator owns:
 - MCP tools
 - ChatGPT web MCP Streamable HTTP adapter
 - text-turn pending/commit
-- Codex thread binding
+- WebGPT conversation bindings
 - host-worker event supervisor
-- image job app-server and MCP completion contracts
+- image job WebGPT and MCP completion contracts
 
 The embedding host still owns:
 
-- keeping Codex App open and authenticated when using Codex App backends
-- keeping WebGPT browser sessions authenticated when using WebGPT backends
+- keeping WebGPT browser sessions authenticated
 - starting/stopping `host-worker`
-- optionally passing `--codex-app-server-url` when it owns app-server itself
 - starting/stopping the VN server
 - consuming or supervising visual jobs through the selected backend, then
   completing or releasing the claim

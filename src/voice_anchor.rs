@@ -24,6 +24,8 @@ pub struct ApplyCharacterAnchorOptions {
     pub role: Option<String>,
     pub knowledge_state: Option<String>,
     pub speech: Vec<String>,
+    pub endings: Vec<String>,
+    pub tone: Vec<String>,
     pub gestures: Vec<String>,
     pub habits: Vec<String>,
     pub drift: Vec<String>,
@@ -208,6 +210,8 @@ fn apply_voice_anchor_values(
 ) {
     if options.replace {
         character.voice_anchor.speech.clone_from(&options.speech);
+        character.voice_anchor.endings.clone_from(&options.endings);
+        character.voice_anchor.tone.clone_from(&options.tone);
         character
             .voice_anchor
             .gestures
@@ -222,6 +226,18 @@ fn apply_voice_anchor_values(
         &options.speech,
         changed_fields,
         "speech",
+    );
+    append_unique_values(
+        &mut character.voice_anchor.endings,
+        &options.endings,
+        changed_fields,
+        "endings",
+    );
+    append_unique_values(
+        &mut character.voice_anchor.tone,
+        &options.tone,
+        changed_fields,
+        "tone",
     );
     append_unique_values(
         &mut character.voice_anchor.gestures,
@@ -341,6 +357,8 @@ premise:
             role: Some("아르벤 수도원 심부름꾼".to_owned()),
             knowledge_state: Some("known".to_owned()),
             speech: vec!["빠르고 구어체로 말한다".to_owned()],
+            endings: vec!["겁먹으면 문장을 끝까지 밀지 못하고 짧게 끊는다".to_owned()],
+            tone: vec!["가벼운 농담으로 긴장을 가리는 어투".to_owned()],
             gestures: vec!["손을 들고 끼어든다".to_owned()],
             habits: vec!["무서우면 농담이 늘어난다".to_owned()],
             drift: vec!["장난 사이에 판단력이 드러난다".to_owned()],
@@ -353,6 +371,8 @@ premise:
         let rendered = render_codex_view_markdown(&build_codex_view(&options)?);
         assert!(rendered.contains("라딘"));
         assert!(rendered.contains("빠르고 구어체로 말한다"));
+        assert!(rendered.contains("겁먹으면 문장을 끝까지 밀지 못하고 짧게 끊는다"));
+        assert!(rendered.contains("가벼운 농담으로 긴장을 가리는 어투"));
         Ok(())
     }
 }

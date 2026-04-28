@@ -4,6 +4,7 @@ pub mod backend_selection;
 pub mod chat;
 pub mod codex_view;
 pub mod entity_update;
+pub mod extra_memory;
 pub mod models;
 pub mod render;
 pub mod resume;
@@ -23,13 +24,11 @@ pub mod world_docs;
 pub use adjudication::{AdjudicationInput, adjudicate_turn};
 pub use agent_bridge::{
     AGENT_COMMIT_RECORD_SCHEMA_VERSION, AGENT_PENDING_TURN_SCHEMA_VERSION,
-    AGENT_TURN_RESPONSE_SCHEMA_VERSION, AgentCommitTurnOptions, AgentHiddenSecret,
-    AgentHiddenTimer, AgentOutputContract, AgentPrivateAdjudicationContext,
+    AGENT_TURN_RESPONSE_SCHEMA_VERSION, AgentCommitTurnOptions, AgentExtraContact,
+    AgentHiddenSecret, AgentHiddenTimer, AgentOutputContract, AgentPrivateAdjudicationContext,
     AgentResponseAdjudication, AgentResponseCanonEvent, AgentSubmitTurnOptions, AgentTurnResponse,
-    AgentVisibleContext, AgentVoiceAnchor, CODEX_THREAD_BINDING_SCHEMA_VERSION, CodexThreadBinding,
-    CommittedAgentTurn, PendingAgentChoice, PendingAgentTurn, SaveCodexThreadBindingOptions,
-    clear_codex_thread_binding, commit_agent_turn, enqueue_agent_turn, load_codex_thread_binding,
-    load_pending_agent_turn, save_codex_thread_binding,
+    AgentVisibleContext, AgentVoiceAnchor, CommittedAgentTurn, PendingAgentChoice,
+    PendingAgentTurn, commit_agent_turn, enqueue_agent_turn, load_pending_agent_turn,
 };
 pub use backend_selection::{
     WORLD_BACKEND_SELECTION_FILENAME, WORLD_BACKEND_SELECTION_SCHEMA_VERSION,
@@ -44,6 +43,13 @@ pub use codex_view::{
     render_codex_view_section_markdown,
 };
 pub use entity_update::{EntityUpdateInput, apply_structured_entity_updates};
+pub use extra_memory::{
+    EXTRA_TRACE_SCHEMA_VERSION, EXTRA_TRACES_FILENAME, ExtraMemoryPacket, ExtraMemoryPolicy,
+    ExtraMemoryRetrievalBudget, ExtraTrace, LocalFaceEntry, REMEMBERED_EXTRA_SCHEMA_VERSION,
+    REMEMBERED_EXTRAS_FILENAME, REMEMBERED_EXTRAS_SCHEMA_VERSION, RememberedExtra,
+    RememberedExtrasStore, apply_extra_memory_projection, commit_extra_memory_projection,
+    compile_extra_memory_projection, local_faces_for_codex_view, retrieve_extra_memory_packet,
+};
 pub use models::{
     ADJUDICATION_SCHEMA_VERSION, ANCHOR_CHARACTER_ID, ANCHOR_CHARACTER_INVARIANT, AdjudicationGate,
     AdjudicationReport, AnchorCharacter, CANON_EVENT_SCHEMA_VERSION, CODEX_VIEW_SCHEMA_VERSION,
@@ -81,9 +87,9 @@ pub use transfer::{
 pub use turn::{AdvanceTurnOptions, AdvancedTurn, advance_turn, render_advanced_turn_report};
 pub use validate::{ValidationReport, ValidationStatus, validate_world};
 pub use visual_assets::{
-    BuildWorldVisualAssetsOptions, CHARACTER_SHEETS_DIR, CODEX_APP_IMAGE_GENERATION_TOOL,
-    ClaimVisualJobOptions, CodexAppImageGenerationCall, CompiledVisualPrompt,
-    CompleteVisualJobOptions, ImageGenerationJob, LOCATION_SHEETS_DIR, MENU_BACKGROUND_FILENAME,
+    BuildWorldVisualAssetsOptions, CHARACTER_SHEETS_DIR, ClaimVisualJobOptions,
+    CompiledVisualPrompt, CompleteVisualJobOptions, HostImageGenerationCall, IMAGE_GENERATION_TOOL,
+    ImageGenerationJob, LOCATION_SHEETS_DIR, MENU_BACKGROUND_FILENAME,
     ReleaseVisualJobClaimOptions, VISUAL_ASSETS_FILENAME, VISUAL_JOB_CLAIM_RELEASE_SCHEMA_VERSION,
     VISUAL_JOB_CLAIM_SCHEMA_VERSION, VISUAL_JOB_COMPLETION_SCHEMA_VERSION, VN_ASSETS_DIR,
     VisualBudgetPolicy, VisualEntityAsset, VisualJobClaim, VisualJobClaimOutcome,

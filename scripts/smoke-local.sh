@@ -30,7 +30,7 @@ cargo build --locked
 
 "$BIN" --store-root "$STORE_ROOT" visual-assets \
   --world-id "$WORLD_ID" \
-  --json | grep -q '"codex_app_call"'
+  --json | grep -q '"image_generation_call"'
 
 "$BIN" --store-root "$STORE_ROOT" validate \
   --world-id "$WORLD_ID" \

@@ -19,7 +19,7 @@ pub const MENU_BACKGROUND_FILENAME: &str = "menu_background.png";
 pub const STAGE_BACKGROUND_FILENAME: &str = "stage_background.png";
 pub const CHARACTER_SHEETS_DIR: &str = "character_sheets";
 pub const LOCATION_SHEETS_DIR: &str = "location_sheets";
-pub const CODEX_APP_IMAGE_GENERATION_TOOL: &str = "codex_app.image.generate";
+pub const IMAGE_GENERATION_TOOL: &str = "worldsim.image.generate";
 const DEFAULT_TURN_CG_CADENCE_MIN: u32 = 5;
 const DEFAULT_AUTO_RETRY_LIMIT: u32 = 1;
 const DEFAULT_MAX_REFERENCE_IMAGES: u8 = 3;
@@ -144,7 +144,7 @@ pub struct VisualEntityAsset {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageGenerationJob {
     pub tool: String,
-    pub codex_app_call: CodexAppImageGenerationCall,
+    pub image_generation_call: HostImageGenerationCall,
     pub slot: String,
     pub prompt: String,
     pub destination_path: String,
@@ -157,7 +157,7 @@ pub struct ImageGenerationJob {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CodexAppImageGenerationCall {
+pub struct HostImageGenerationCall {
     pub capability: String,
     pub slot: String,
     pub prompt: String,
@@ -276,7 +276,7 @@ pub fn build_world_visual_assets(
     Ok(manifest)
 }
 
-/// Atomically claim one pending visual generation job for a Codex App host worker.
+/// Atomically claim one pending visual generation job for an image host worker.
 ///
 /// # Errors
 ///
@@ -330,7 +330,7 @@ pub fn claim_visual_job(options: &ClaimVisualJobOptions) -> Result<VisualJobClai
     })
 }
 
-/// Complete a visual generation job after the Codex App host saves the asset.
+/// Complete a visual generation job after the image host saves the asset.
 ///
 /// # Errors
 ///
@@ -492,8 +492,8 @@ pub fn visual_generation_job(
     register_policy: &str,
 ) -> ImageGenerationJob {
     ImageGenerationJob {
-        tool: CODEX_APP_IMAGE_GENERATION_TOOL.to_owned(),
-        codex_app_call: CodexAppImageGenerationCall {
+        tool: IMAGE_GENERATION_TOOL.to_owned(),
+        image_generation_call: HostImageGenerationCall {
             capability: "image_generation".to_owned(),
             slot: slot.clone(),
             prompt: prompt.clone(),
@@ -1122,8 +1122,8 @@ fn asset_file_stem(entity_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        BuildWorldVisualAssetsOptions, CHARACTER_SHEETS_DIR, CODEX_APP_IMAGE_GENERATION_TOOL,
-        ClaimVisualJobOptions, CompleteVisualJobOptions, ReleaseVisualJobClaimOptions,
+        BuildWorldVisualAssetsOptions, CHARACTER_SHEETS_DIR, ClaimVisualJobOptions,
+        CompleteVisualJobOptions, IMAGE_GENERATION_TOOL, ReleaseVisualJobClaimOptions,
         VN_ASSETS_DIR, VisualJobClaimOutcome, build_world_visual_assets, claim_visual_job,
         compile_turn_visual_prompt, complete_visual_job, release_visual_job_claim,
         turn_cg_scene_hint, visual_generation_job,
@@ -1173,11 +1173,14 @@ premise:
         );
         assert_eq!(manifest.visual_entities.len(), 2);
         for job in &manifest.image_generation_jobs {
-            assert_eq!(job.tool, CODEX_APP_IMAGE_GENERATION_TOOL);
-            assert_eq!(job.codex_app_call.capability, "image_generation");
-            assert_eq!(job.codex_app_call.slot, job.slot);
-            assert_eq!(job.codex_app_call.prompt, job.prompt);
-            assert_eq!(job.codex_app_call.destination_path, job.destination_path);
+            assert_eq!(job.tool, IMAGE_GENERATION_TOOL);
+            assert_eq!(job.image_generation_call.capability, "image_generation");
+            assert_eq!(job.image_generation_call.slot, job.slot);
+            assert_eq!(job.image_generation_call.prompt, job.prompt);
+            assert_eq!(
+                job.image_generation_call.destination_path,
+                job.destination_path
+            );
             for hidden_marker in [
                 "앵커 인물",
                 "anchor_character",

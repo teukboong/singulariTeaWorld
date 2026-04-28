@@ -1,7 +1,7 @@
 # Visual Canon and Budget Policy
 
-`singulari-world` treats image generation as stateless. Codex App owns the
-actual image generation capability; the world simulator owns player-visible job
+`singulari-world` treats image generation as host-owned. WebGPT owns the actual
+image generation capability; the world simulator owns player-visible job
 prompts, destination paths, reference lists, and asset manifests. Durable visual
 memory lives in world records, manifests, and asset metadata.
 
@@ -124,28 +124,30 @@ scene CG generation needs accepted reference assets, those files must be
 attached to the WebGPT image request as images, not merely mentioned by local
 path in the prompt.
 
-## Codex App Worker Contract
+## WebGPT Worker Contract
 
 The simulator does not call external image APIs and does not route image
-generation through `codex exec`. It exposes player-visible jobs for Codex App to
-consume through its host image-generation capability.
+generation through `codex exec`. It exposes player-visible jobs for WebGPT to
+consume through the host-worker image lane.
 
-For normal Codex App play, the `싱귤러리 월드 준비해줘` worker consumes both
-text turns and visual jobs through Codex App app-server:
+For normal play, the `싱귤러리 월드 준비해줘` worker consumes both text turns and
+visual jobs through WebGPT:
 
 ```bash
 target/release/singulari-world --store-root .world-store host-worker \
+  --text-backend webgpt \
+  --visual-backend webgpt \
   --interval-ms 750
 ```
 
-Image jobs are consumed only by Codex App's host image capability. The worker
-claims one job, requests exactly one `imageGeneration`, copies the returned
-saved file, and completes the job. The active Codex chat/session-level visual
-generation path is not a valid worker for this contract.
+Image jobs are consumed only by the WebGPT image lane. The worker claims one
+job, requests exactly one `webgpt_generate_image`, copies the extracted PNG, and
+completes the job. The active Codex chat/session-level visual generation path
+is not a valid worker for this contract.
 
-The primary Codex App path is MCP-driven: `worldsim_claim_visual_job` returns
-structured content with `job.codex_app_call`, Codex App runs its built-in image
-generation capability, and `worldsim_complete_visual_job` registers the PNG.
+The MCP path is host-neutral: `worldsim_claim_visual_job` returns structured
+content with `job.image_generation_call`, the image host generates the PNG, and
+`worldsim_complete_visual_job` registers it.
 
 ChatGPT web MCP uses a narrower image contract. `worldsim_current_cg_image`
 returns an already saved PNG as MCP image content so the host/model can inspect
@@ -162,7 +164,8 @@ and byte-count limits.
 Worker loop:
 
 1. `host-worker` or `worldsim_claim_visual_job` claims one job.
-2. Codex App runs image generation from `claim.job.codex_app_call`.
+2. WebGPT or the host image capability runs generation from
+   `claim.job.image_generation_call`.
 3. The returned saved PNG is copied to `destination_path`.
 4. Completion metadata is written through `complete_visual_job` /
    `worldsim_complete_visual_job`.

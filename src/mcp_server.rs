@@ -160,7 +160,7 @@ fn worldsim_mcp_tools() -> Vec<Tool> {
         ),
         Tool::new(
             "worldsim_visual_assets",
-            "Return player-visible visual asset manifest and Codex App image generation jobs. The MCP server does not call image providers; Codex App runs the codex_app_call and saves to destination_path.",
+            "Return player-visible visual asset manifest and host image generation jobs. The MCP server does not call image providers; the host runs image_generation_call and saves to destination_path.",
             tool::schema_for_type::<WorldsimWorldParams>(),
         ),
         Tool::new(
@@ -190,12 +190,12 @@ fn worldsim_mcp_tools() -> Vec<Tool> {
         ),
         Tool::new(
             "worldsim_claim_visual_job",
-            "Atomically claim one pending player-visible Codex App image generation job. Codex App should call its image generation host capability with the returned prompt and save to destination_path.",
+            "Atomically claim one pending player-visible host image generation job. The image host should generate from the returned prompt and save to destination_path.",
             tool::schema_for_type::<WorldsimClaimVisualJobParams>(),
         ),
         Tool::new(
             "worldsim_complete_visual_job",
-            "Mark a visual generation job complete after Codex App has saved a PNG to the returned destination_path, or copy a generated PNG into that destination.",
+            "Mark a visual generation job complete after the host has saved a PNG to the returned destination_path, or copy a generated PNG into that destination.",
             tool::schema_for_type::<WorldsimCompleteVisualJobParams>(),
         ),
         Tool::new(
@@ -1528,7 +1528,7 @@ fn store_root(raw: Option<String>) -> Option<PathBuf> {
 }
 
 fn default_visual_job_claimed_by() -> String {
-    "codex_app_image_worker".to_owned()
+    "webgpt_image_worker".to_owned()
 }
 
 #[cfg(test)]
@@ -1539,8 +1539,8 @@ mod tests {
     #[test]
     fn json_tool_result_exposes_structured_content() -> anyhow::Result<()> {
         let result = json_tool_result(&serde_json::json!({
-            "job": {
-                "codex_app_call": {
+                "job": {
+                "image_generation_call": {
                     "capability": "image_generation",
                     "destination_path": "/tmp/example.png"
                 }
@@ -1551,7 +1551,7 @@ mod tests {
             .as_ref()
             .context("structured content missing")?;
         assert_eq!(
-            structured["job"]["codex_app_call"]["capability"],
+            structured["job"]["image_generation_call"]["capability"],
             "image_generation"
         );
         Ok(())
@@ -1594,7 +1594,10 @@ mod tests {
             anyhow::bail!("turn CG job should be claimable through MCP");
         };
         assert_eq!(claim.slot, "turn_cg:turn_0005");
-        assert_eq!(claim.job.codex_app_call.capability, "image_generation");
+        assert_eq!(
+            claim.job.image_generation_call.capability,
+            "image_generation"
+        );
         Ok(())
     }
 

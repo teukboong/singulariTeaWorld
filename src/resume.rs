@@ -184,7 +184,9 @@ pub fn render_resume_pack_markdown(pack: &ResumePack) -> String {
     push_empty_state(&mut lines, &pack.voice_anchors, "no voice anchors yet");
     for anchor in &pack.voice_anchors {
         lines.push(format!("- `{}` {}", anchor.character_id, anchor.name));
-        push_prefixed_values(&mut lines, "  - 말투", &anchor.speech);
+        push_prefixed_values(&mut lines, "  - 화법", &anchor.speech);
+        push_prefixed_values(&mut lines, "  - 어미", &anchor.endings);
+        push_prefixed_values(&mut lines, "  - 어투", &anchor.tone);
         push_prefixed_values(&mut lines, "  - 제스처", &anchor.gestures);
         push_prefixed_values(&mut lines, "  - 버릇", &anchor.habits);
         push_prefixed_values(&mut lines, "  - 변화", &anchor.drift);
@@ -230,6 +232,8 @@ fn resume_voice_anchor_entry(character: &CharacterRecord) -> Option<CodexVoiceAn
         character_id: character.id.clone(),
         name: character.name.visible.clone(),
         speech: anchor.speech,
+        endings: anchor.endings,
+        tone: anchor.tone,
         gestures: anchor.gestures,
         habits: anchor.habits,
         drift: anchor.drift,

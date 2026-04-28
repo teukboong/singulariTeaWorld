@@ -1,8 +1,10 @@
+use crate::extra_memory::{LocalFaceEntry, local_faces_for_codex_view};
 use crate::models::{
     CODEX_VIEW_SCHEMA_VERSION, CharacterRecord, CharacterVoiceAnchor, CodexAnalysisEntry,
-    CodexEntityEntry, CodexFactEntry, CodexHiddenFilter, CodexRecommendation, CodexTimelineEntry,
-    CodexView, CodexVoiceAnchorEntry, EntityRecords, HiddenState, PROTAGONIST_CHARACTER_ID,
-    PlayerKnowledge, TurnSnapshot, WorldRecord, redact_guide_choice_public_hints,
+    CodexEntityEntry, CodexFactEntry, CodexHiddenFilter, CodexLocalFaceEntry, CodexRecommendation,
+    CodexTimelineEntry, CodexView, CodexVoiceAnchorEntry, EntityRecords, HiddenState,
+    PROTAGONIST_CHARACTER_ID, PlayerKnowledge, TurnSnapshot, WorldRecord,
+    redact_guide_choice_public_hints,
 };
 use crate::store::{
     HIDDEN_STATE_FILENAME, LATEST_SNAPSHOT_FILENAME, PLAYER_KNOWLEDGE_FILENAME, WORLD_FILENAME,
@@ -137,6 +139,15 @@ pub fn build_codex_view(options: &BuildCodexViewOptions) -> Result<CodexView> {
         world_almanac: facts,
         world_blueprint: entities,
         voice_anchors: visible_voice_anchors(&entity_records, limit),
+        local_faces: local_faces_for_codex_view(
+            files.dir.as_path(),
+            world.world_id.as_str(),
+            snapshot.protagonist_state.location.as_str(),
+            limit,
+        )?
+        .into_iter()
+        .map(codex_local_face_entry)
+        .collect(),
         realtime_analysis: realtime_analysis(&snapshot, &player_knowledge, search_hits.len()),
         related_recommendations: recommendations(&player_knowledge, &search_hits),
         hidden_filter: CodexHiddenFilter {
@@ -163,6 +174,7 @@ pub fn render_codex_view_markdown(view: &CodexView) -> String {
     write_codex_section(&mut markdown, view, CodexViewSection::Timeline);
     write_codex_section(&mut markdown, view, CodexViewSection::Almanac);
     write_codex_section(&mut markdown, view, CodexViewSection::Blueprint);
+    write_local_faces(&mut markdown, view);
     write_codex_section(&mut markdown, view, CodexViewSection::Analysis);
     write_codex_section(&mut markdown, view, CodexViewSection::Related);
     markdown
@@ -185,6 +197,9 @@ pub fn render_codex_view_section_markdown(view: &CodexView, section: CodexViewSe
     )
     .ok();
     write_codex_section(&mut markdown, view, section);
+    if section == CodexViewSection::Blueprint {
+        write_local_faces(&mut markdown, view);
+    }
     markdown
 }
 
@@ -258,7 +273,9 @@ fn write_blueprint(markdown: &mut String, view: &CodexView) {
     }
     for anchor in &view.voice_anchors {
         writeln!(markdown, "- `{}` {}", anchor.character_id, anchor.name).ok();
-        write_anchor_values(markdown, "말투", &anchor.speech);
+        write_anchor_values(markdown, "화법", &anchor.speech);
+        write_anchor_values(markdown, "어미", &anchor.endings);
+        write_anchor_values(markdown, "어투", &anchor.tone);
         write_anchor_values(markdown, "제스처", &anchor.gestures);
         write_anchor_values(markdown, "버릇", &anchor.habits);
         write_anchor_values(markdown, "변화", &anchor.drift);
@@ -270,6 +287,28 @@ fn write_analysis(markdown: &mut String, view: &CodexView) {
     writeln!(markdown, "## 실시간 분석").ok();
     for line in &view.realtime_analysis {
         writeln!(markdown, "- {}: {}", line.label, line.value).ok();
+    }
+}
+
+fn write_local_faces(markdown: &mut String, view: &CodexView) {
+    writeln!(markdown).ok();
+    writeln!(markdown, "## Local Faces").ok();
+    if view.local_faces.is_empty() {
+        writeln!(markdown, "- 이 장소에서 다시 떠오른 주변 인물이 아직 없다").ok();
+    }
+    for face in &view.local_faces {
+        writeln!(
+            markdown,
+            "- `{}` {} — {} / {} / last_seen={}",
+            face.extra_id, face.display_name, face.role, face.disposition, face.last_seen_turn
+        )
+        .ok();
+        if !face.last_contact.is_empty() {
+            writeln!(markdown, "  - last_contact: {}", face.last_contact).ok();
+        }
+        if !face.open_hooks.is_empty() {
+            writeln!(markdown, "  - open_hooks: {}", face.open_hooks.join(" / ")).ok();
+        }
     }
 }
 
@@ -321,10 +360,25 @@ fn codex_voice_anchor_entry(character: &CharacterRecord) -> Option<CodexVoiceAnc
         character_id: character.id.clone(),
         name: character.name.visible.clone(),
         speech: anchor.speech,
+        endings: anchor.endings,
+        tone: anchor.tone,
         gestures: anchor.gestures,
         habits: anchor.habits,
         drift: anchor.drift,
     })
+}
+
+fn codex_local_face_entry(face: LocalFaceEntry) -> CodexLocalFaceEntry {
+    CodexLocalFaceEntry {
+        extra_id: face.extra_id,
+        display_name: face.display_name,
+        role: face.role,
+        home_location_id: face.home_location_id,
+        last_seen_turn: face.last_seen_turn,
+        disposition: face.disposition,
+        last_contact: face.last_contact,
+        open_hooks: face.open_hooks,
+    }
 }
 
 fn effective_voice_anchor(character: &CharacterRecord) -> Option<CharacterVoiceAnchor> {

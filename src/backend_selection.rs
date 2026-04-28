@@ -10,7 +10,6 @@ pub const WORLD_BACKEND_SELECTION_FILENAME: &str = "backend_selection.json";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum WorldTextBackend {
-    CodexAppServer,
     Webgpt,
 }
 
@@ -18,7 +17,6 @@ impl WorldTextBackend {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::CodexAppServer => "codex-app-server",
             Self::Webgpt => "webgpt",
         }
     }
@@ -27,7 +25,6 @@ impl WorldTextBackend {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum WorldVisualBackend {
-    CodexAppServer,
     Webgpt,
 }
 
@@ -35,7 +32,6 @@ impl WorldVisualBackend {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::CodexAppServer => "codex-app-server",
             Self::Webgpt => "webgpt",
         }
     }
@@ -168,7 +164,7 @@ mod tests {
 
         let selection = WorldBackendSelection::new(
             "stw_backend_lock".to_owned(),
-            WorldTextBackend::CodexAppServer,
+            WorldTextBackend::Webgpt,
             WorldVisualBackend::Webgpt,
             "test",
         );
@@ -180,19 +176,30 @@ mod tests {
             anyhow::bail!("selection should exist after save");
         };
         assert!(loaded.locked);
-        assert_eq!(loaded.text_backend, WorldTextBackend::CodexAppServer);
+        assert_eq!(loaded.text_backend, WorldTextBackend::Webgpt);
         assert_eq!(loaded.visual_backend, WorldVisualBackend::Webgpt);
 
-        let conflicting = WorldBackendSelection::new(
+        let same_selection = WorldBackendSelection::new(
             "stw_backend_lock".to_owned(),
             WorldTextBackend::Webgpt,
             WorldVisualBackend::Webgpt,
             "test",
         );
-        let Err(error) = save_world_backend_selection(Some(store.as_path()), &conflicting) else {
-            anyhow::bail!("locked selection accepted backend changes");
+        save_world_backend_selection(Some(store.as_path()), &same_selection)?;
+
+        let legacy_selection = r#"{
+  "schema_version": "singulari.world_backend_selection.v1",
+  "world_id": "stw_backend_lock",
+  "text_backend": "codex-app-server",
+  "visual_backend": "codex-app-server",
+  "locked": true,
+  "source": "legacy-test",
+  "created_at": "2026-04-28T00:00:00Z"
+}"#;
+        let Err(error) = serde_json::from_str::<WorldBackendSelection>(legacy_selection) else {
+            anyhow::bail!("legacy Codex App backend selection parsed as active backend");
         };
-        assert!(error.to_string().contains("backend selection is locked"));
+        assert!(error.to_string().contains("unknown variant"));
         Ok(())
     }
 }

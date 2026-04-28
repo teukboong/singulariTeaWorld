@@ -1081,8 +1081,8 @@ async function refreshRuntimeStatus() {
     renderRuntimeStatus(status);
   } catch (error) {
     renderRuntimeStatus({
-      narrative: { label: "Codex 연결 필요", status: "needs_connection" },
-      visual: { label: "Codex 이미지 연결 필요", status: "needs_connection" },
+      narrative: { label: "WebGPT 연결 필요", status: "needs_connection" },
+      visual: { label: "WebGPT 이미지 연결 필요", status: "needs_connection" },
       details: { error: error.message },
     });
   }
@@ -1262,6 +1262,12 @@ function renderCodexView(view, redactionPolicy) {
     "세계 청사진",
     view.world_blueprint,
     (item) => `${item.entity_id} · ${item.entity_type} · ${item.name} · ${item.status}`,
+  );
+  appendCodexSection(
+    "Local Faces",
+    view.local_faces,
+    (item) =>
+      `${item.display_name} · ${item.role} · ${item.disposition} · ${item.last_contact}`,
   );
   appendCodexSection(
     "실시간 분석",

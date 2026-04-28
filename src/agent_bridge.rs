@@ -1,3 +1,7 @@
+use crate::extra_memory::{
+    ExtraMemoryPacket, commit_extra_memory_projection, compile_extra_memory_projection,
+    retrieve_extra_memory_packet,
+};
 use crate::models::{
     AdjudicationGate, CharacterVoiceAnchor, FREEFORM_CHOICE_SLOT, GUIDE_CHOICE_SLOT, HiddenState,
     NARRATIVE_SCENE_SCHEMA_VERSION, NarrativeScene, TurnChoice, TurnSnapshot,
@@ -17,13 +21,11 @@ use std::path::{Path, PathBuf};
 pub const AGENT_PENDING_TURN_SCHEMA_VERSION: &str = "singulari.agent_pending_turn.v1";
 pub const AGENT_TURN_RESPONSE_SCHEMA_VERSION: &str = "singulari.agent_turn_response.v1";
 pub const AGENT_COMMIT_RECORD_SCHEMA_VERSION: &str = "singulari.agent_commit_record.v1";
-pub const CODEX_THREAD_BINDING_SCHEMA_VERSION: &str = "singulari.codex_thread_binding.v1";
 
 const AGENT_BRIDGE_DIR: &str = "agent_bridge";
 const PENDING_AGENT_TURN_FILENAME: &str = "pending_turn.json";
 const COMMITTED_AGENT_TURNS_DIR: &str = "committed_turns";
 const AGENT_COMMIT_RECORD_FILENAME: &str = "commit_record.json";
-const CODEX_THREAD_BINDING_FILENAME: &str = "codex_thread_binding.json";
 
 #[derive(Debug, Clone)]
 pub struct AgentSubmitTurnOptions {
@@ -38,23 +40,6 @@ pub struct AgentCommitTurnOptions {
     pub store_root: Option<PathBuf>,
     pub world_id: String,
     pub response: AgentTurnResponse,
-}
-
-#[derive(Debug, Clone)]
-pub struct SaveCodexThreadBindingOptions {
-    pub store_root: Option<PathBuf>,
-    pub world_id: String,
-    pub thread_id: String,
-    pub source: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CodexThreadBinding {
-    pub schema_version: String,
-    pub world_id: String,
-    pub thread_id: String,
-    pub source: String,
-    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,6 +74,8 @@ pub struct AgentVisibleContext {
     pub known_facts: Vec<String>,
     #[serde(default)]
     pub voice_anchors: Vec<AgentVoiceAnchor>,
+    #[serde(default)]
+    pub extra_memory: ExtraMemoryPacket,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -169,9 +156,37 @@ pub struct AgentTurnResponse {
     #[serde(default)]
     pub relationship_updates: Vec<Value>,
     #[serde(default)]
+    pub extra_contacts: Vec<AgentExtraContact>,
+    #[serde(default)]
     pub hidden_state_delta: Vec<Value>,
     #[serde(default)]
     pub next_choices: Vec<TurnChoice>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentExtraContact {
+    pub surface_label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub known_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scene_role: Option<String>,
+    pub contact_summary: String,
+    #[serde(default)]
+    pub pressure_tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promotion_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_action: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disposition: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_design: Option<CharacterVoiceAnchor>,
+    #[serde(default)]
+    pub open_hooks: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -249,7 +264,13 @@ pub fn enqueue_agent_turn(options: &AgentSubmitTurnOptions) -> Result<PendingAge
         status: "pending".to_owned(),
         player_input: player_input.to_owned(),
         selected_choice: selected_choice(player_input, &snapshot),
-        visible_context: visible_context(&snapshot, &entities, &current_packet),
+        visible_context: visible_context(
+            &files,
+            &snapshot,
+            &entities,
+            &current_packet,
+            player_input,
+        )?,
         private_adjudication_context: private_context(&hidden_state),
         output_contract: AgentOutputContract {
             language: "ko".to_owned(),
@@ -344,82 +365,6 @@ pub fn load_pending_agent_turn(
     Ok(pending)
 }
 
-/// Save the Codex thread currently responsible for realtime narrative dispatch.
-///
-/// # Errors
-///
-/// Returns an error when the world cannot be resolved, the thread id is empty or
-/// control-character-tainted, or the binding file cannot be written.
-pub fn save_codex_thread_binding(
-    options: &SaveCodexThreadBindingOptions,
-) -> Result<CodexThreadBinding> {
-    ensure_human_safe_field("thread_id", options.thread_id.as_str())?;
-    ensure_human_safe_field("source", options.source.as_str())?;
-    let store_paths = resolve_store_paths(options.store_root.as_deref())?;
-    let files = world_file_paths(&store_paths, options.world_id.as_str());
-    if !files.world.exists() {
-        bail!(
-            "cannot bind Codex thread for missing world: world_id={}, path={}",
-            options.world_id,
-            files.world.display()
-        );
-    }
-    let binding = CodexThreadBinding {
-        schema_version: CODEX_THREAD_BINDING_SCHEMA_VERSION.to_owned(),
-        world_id: options.world_id.clone(),
-        thread_id: options.thread_id.trim().to_owned(),
-        source: options.source.trim().to_owned(),
-        updated_at: Utc::now().to_rfc3339(),
-    };
-    let binding_path = codex_thread_binding_path(&files);
-    ensure_parent_dir(&binding_path)?;
-    write_json(&binding_path, &binding)?;
-    Ok(binding)
-}
-
-/// Load the current Codex thread binding for a world.
-///
-/// # Errors
-///
-/// Returns an error when a present binding file is malformed or targets a
-/// different world.
-pub fn load_codex_thread_binding(
-    store_root: Option<&Path>,
-    world_id: &str,
-) -> Result<Option<CodexThreadBinding>> {
-    let store_paths = resolve_store_paths(store_root)?;
-    let files = world_file_paths(&store_paths, world_id);
-    let binding_path = codex_thread_binding_path(&files);
-    if !binding_path.exists() {
-        return Ok(None);
-    }
-    let binding: CodexThreadBinding = read_json(&binding_path)?;
-    validate_codex_thread_binding(&binding, world_id)?;
-    Ok(Some(binding))
-}
-
-/// Remove the current Codex thread binding for a world, if present.
-///
-/// # Errors
-///
-/// Returns an error when the binding is malformed or cannot be removed.
-pub fn clear_codex_thread_binding(
-    store_root: Option<&Path>,
-    world_id: &str,
-) -> Result<Option<CodexThreadBinding>> {
-    let store_paths = resolve_store_paths(store_root)?;
-    let files = world_file_paths(&store_paths, world_id);
-    let binding_path = codex_thread_binding_path(&files);
-    if !binding_path.exists() {
-        return Ok(None);
-    }
-    let binding: CodexThreadBinding = read_json(&binding_path)?;
-    validate_codex_thread_binding(&binding, world_id)?;
-    fs::remove_file(&binding_path)
-        .with_context(|| format!("failed to remove {}", binding_path.display()))?;
-    Ok(Some(binding))
-}
-
 /// Commit an agent-authored scene and advance the world by the queued input.
 ///
 /// # Errors
@@ -434,6 +379,13 @@ pub fn commit_agent_turn(options: &AgentCommitTurnOptions) -> Result<CommittedAg
         load_pending_agent_turn(options.store_root.as_deref(), options.world_id.as_str())?;
     let response = canonical_agent_turn_response(options.response.clone());
     validate_agent_response(&pending, &response)?;
+    let extra_memory_projection = compile_extra_memory_projection(
+        files.dir.as_path(),
+        options.world_id.as_str(),
+        pending.turn_id.as_str(),
+        pending.visible_context.location.as_str(),
+        &response.extra_contacts,
+    )?;
 
     let advanced = advance_turn(&AdvanceTurnOptions {
         store_root: options.store_root.clone(),
@@ -484,6 +436,7 @@ pub fn commit_agent_turn(options: &AgentCommitTurnOptions) -> Result<CommittedAg
         packet,
     };
     write_json(&commit_record_path, &committed)?;
+    commit_extra_memory_projection(&extra_memory_projection)?;
     fs::remove_file(&pending_path)
         .with_context(|| format!("failed to remove {}", pending_path.display()))?;
     Ok(committed)
@@ -704,11 +657,13 @@ fn inline_freeform_choice(input: &str, choices: &[TurnChoice]) -> Option<TurnCho
 }
 
 fn visible_context(
+    files: &WorldFilePaths,
     snapshot: &TurnSnapshot,
     entities: &crate::models::EntityRecords,
     current_packet: &VnPacket,
-) -> AgentVisibleContext {
-    AgentVisibleContext {
+    player_input: &str,
+) -> Result<AgentVisibleContext> {
+    Ok(AgentVisibleContext {
         location: snapshot.protagonist_state.location.clone(),
         recent_scene: current_packet.scene.text_blocks.clone(),
         known_facts: known_facts(snapshot),
@@ -722,7 +677,13 @@ fn visible_context(
                 anchor: character.voice_anchor.clone(),
             })
             .collect(),
-    }
+        extra_memory: retrieve_extra_memory_packet(
+            files.dir.as_path(),
+            current_packet.world_id.as_str(),
+            snapshot,
+            player_input,
+        )?,
+    })
 }
 
 fn known_facts(snapshot: &TurnSnapshot) -> Vec<String> {
@@ -802,13 +763,6 @@ fn pending_agent_turn_path(files: &WorldFilePaths) -> PathBuf {
         .join(PENDING_AGENT_TURN_FILENAME)
 }
 
-fn codex_thread_binding_path(files: &WorldFilePaths) -> PathBuf {
-    files
-        .dir
-        .join(AGENT_BRIDGE_DIR)
-        .join(CODEX_THREAD_BINDING_FILENAME)
-}
-
 fn committed_agent_turn_dir(files: &WorldFilePaths, turn_id: &str) -> PathBuf {
     files
         .dir
@@ -825,50 +779,16 @@ fn ensure_parent_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn validate_codex_thread_binding(
-    binding: &CodexThreadBinding,
-    expected_world_id: &str,
-) -> Result<()> {
-    if binding.schema_version != CODEX_THREAD_BINDING_SCHEMA_VERSION {
-        bail!(
-            "Codex thread binding schema_version mismatch: expected {}, got {}",
-            CODEX_THREAD_BINDING_SCHEMA_VERSION,
-            binding.schema_version
-        );
-    }
-    if binding.world_id != expected_world_id {
-        bail!(
-            "Codex thread binding world mismatch: expected {}, got {}",
-            expected_world_id,
-            binding.world_id
-        );
-    }
-    ensure_human_safe_field("thread_id", binding.thread_id.as_str())?;
-    ensure_human_safe_field("source", binding.source.as_str())?;
-    Ok(())
-}
-
-fn ensure_human_safe_field(field: &str, value: &str) -> Result<()> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        bail!("Codex thread binding {field} must not be empty");
-    }
-    if trimmed.chars().any(char::is_control) {
-        bail!("Codex thread binding {field} must not contain control characters");
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        AGENT_TURN_RESPONSE_SCHEMA_VERSION, AgentCommitTurnOptions, AgentSubmitTurnOptions,
-        AgentTurnResponse, SaveCodexThreadBindingOptions, canonical_agent_turn_response,
-        clear_codex_thread_binding, enqueue_agent_turn, load_codex_thread_binding,
-        narrative_budget_for_level, normalize_narrative_level, save_codex_thread_binding,
-        selected_choice,
+        AGENT_TURN_RESPONSE_SCHEMA_VERSION, AgentCommitTurnOptions, AgentExtraContact,
+        AgentSubmitTurnOptions, AgentTurnResponse, canonical_agent_turn_response,
+        enqueue_agent_turn, load_pending_agent_turn, narrative_budget_for_level,
+        normalize_narrative_level, selected_choice,
     };
     use crate::agent_bridge::commit_agent_turn;
+    use crate::extra_memory::load_remembered_extras;
     use crate::models::{
         GUIDE_CHOICE_TAG, NARRATIVE_SCENE_SCHEMA_VERSION, NarrativeScene, TurnChoice, TurnSnapshot,
         default_turn_choices,
@@ -975,6 +895,7 @@ premise:
             canon_event: None,
             entity_updates: Vec::new(),
             relationship_updates: Vec::new(),
+            extra_contacts: Vec::new(),
             hidden_state_delta: Vec::new(),
             next_choices: legacy_slot_contract_choices(),
         };
@@ -1057,6 +978,7 @@ premise:
                 canon_event: None,
                 entity_updates: Vec::new(),
                 relationship_updates: Vec::new(),
+                extra_contacts: Vec::new(),
                 hidden_state_delta: Vec::new(),
                 next_choices: scene_specific_choices(),
             },
@@ -1072,6 +994,79 @@ premise:
         assert_eq!(
             packet.scene.text_blocks,
             vec!["agent-authored visible scene"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn commits_extra_contacts_into_next_pending_context_and_archive() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(&seed_path, seed_body("stw_agent_extras"))?;
+        init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+
+        let pending = enqueue_agent_turn(&AgentSubmitTurnOptions {
+            store_root: Some(store.clone()),
+            world_id: "stw_agent_extras".to_owned(),
+            input: "1".to_owned(),
+            narrative_level: None,
+        })?;
+        commit_agent_turn(&AgentCommitTurnOptions {
+            store_root: Some(store.clone()),
+            world_id: "stw_agent_extras".to_owned(),
+            response: AgentTurnResponse {
+                schema_version: AGENT_TURN_RESPONSE_SCHEMA_VERSION.to_owned(),
+                world_id: pending.world_id.clone(),
+                turn_id: pending.turn_id.clone(),
+                visible_scene: NarrativeScene {
+                    schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
+                    speaker: None,
+                    text_blocks: vec!["문지기가 피 묻은 소매를 보았다.".to_owned()],
+                    tone_notes: Vec::new(),
+                },
+                adjudication: None,
+                canon_event: None,
+                entity_updates: Vec::new(),
+                relationship_updates: Vec::new(),
+                extra_contacts: vec![AgentExtraContact {
+                    surface_label: "gate porter".to_owned(),
+                    known_name: None,
+                    role: Some("porter near the west gate".to_owned()),
+                    location_id: Some("place:opening_location".to_owned()),
+                    scene_role: Some("witness".to_owned()),
+                    contact_summary: "saw the protagonist hide a bloodied sleeve".to_owned(),
+                    pressure_tags: vec!["social".to_owned(), "threat".to_owned()],
+                    promotion_hint: Some("witnessed risky action".to_owned()),
+                    memory_action: Some("remember".to_owned()),
+                    disposition: Some("wary".to_owned()),
+                    text_design: None,
+                    open_hooks: vec!["may report suspicious behavior".to_owned()],
+                }],
+                hidden_state_delta: Vec::new(),
+                next_choices: scene_specific_choices(),
+            },
+        })?;
+
+        let store_paths = resolve_store_paths(Some(store.as_path()))?;
+        let files = world_file_paths(&store_paths, "stw_agent_extras");
+        let remembered = load_remembered_extras(files.dir.as_path(), "stw_agent_extras")?;
+        assert_eq!(remembered.extras.len(), 1);
+        assert_eq!(remembered.extras[0].display_name, "gate porter");
+
+        let next_pending = enqueue_agent_turn(&AgentSubmitTurnOptions {
+            store_root: Some(store),
+            world_id: "stw_agent_extras".to_owned(),
+            input: "1".to_owned(),
+            narrative_level: None,
+        })?;
+        assert_eq!(
+            next_pending.visible_context.extra_memory.remembered_extras[0].display_name,
+            "gate porter"
         );
         Ok(())
     }
@@ -1111,6 +1106,7 @@ premise:
                 canon_event: None,
                 entity_updates: Vec::new(),
                 relationship_updates: Vec::new(),
+                extra_contacts: Vec::new(),
                 hidden_state_delta: Vec::new(),
                 next_choices: Vec::new(),
             },
@@ -1160,6 +1156,7 @@ premise:
                 canon_event: None,
                 entity_updates: Vec::new(),
                 relationship_updates: Vec::new(),
+                extra_contacts: Vec::new(),
                 hidden_state_delta: Vec::new(),
                 next_choices: default_turn_choices(),
             },
@@ -1175,38 +1172,75 @@ premise:
     }
 
     #[test]
-    fn codex_thread_binding_round_trips_and_clears() -> anyhow::Result<()> {
+    fn extra_contact_preflight_failure_does_not_advance_turn() -> anyhow::Result<()> {
         let temp = tempdir()?;
         let store = temp.path().join("store");
         let seed_path = temp.path().join("seed.yaml");
-        std::fs::write(&seed_path, seed_body("stw_codex_bind"))?;
+        std::fs::write(&seed_path, seed_body("stw_agent_extra_preflight"))?;
         init_world(&InitWorldOptions {
             seed_path,
             store_root: Some(store.clone()),
             session_id: None,
         })?;
 
-        let binding = save_codex_thread_binding(&SaveCodexThreadBindingOptions {
+        let pending = enqueue_agent_turn(&AgentSubmitTurnOptions {
             store_root: Some(store.clone()),
-            world_id: "stw_codex_bind".to_owned(),
-            thread_id: "codex-thread-test-001".to_owned(),
-            source: "test".to_owned(),
+            world_id: "stw_agent_extra_preflight".to_owned(),
+            input: "1".to_owned(),
+            narrative_level: None,
         })?;
-        assert_eq!(binding.world_id, "stw_codex_bind");
-        assert_eq!(binding.source, "test");
+        let store_paths = resolve_store_paths(Some(store.as_path()))?;
+        let files = world_file_paths(&store_paths, "stw_agent_extra_preflight");
+        let before: TurnSnapshot = read_json(&files.latest_snapshot)?;
 
-        let Some(loaded) = load_codex_thread_binding(Some(store.as_path()), "stw_codex_bind")?
-        else {
-            anyhow::bail!("binding should be present after save");
+        let Err(error) = commit_agent_turn(&AgentCommitTurnOptions {
+            store_root: Some(store.clone()),
+            world_id: "stw_agent_extra_preflight".to_owned(),
+            response: AgentTurnResponse {
+                schema_version: AGENT_TURN_RESPONSE_SCHEMA_VERSION.to_owned(),
+                world_id: pending.world_id.clone(),
+                turn_id: pending.turn_id.clone(),
+                visible_scene: NarrativeScene {
+                    schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
+                    speaker: None,
+                    text_blocks: vec!["문지기가 고개를 들었다.".to_owned()],
+                    tone_notes: Vec::new(),
+                },
+                adjudication: None,
+                canon_event: None,
+                entity_updates: Vec::new(),
+                relationship_updates: Vec::new(),
+                extra_contacts: vec![AgentExtraContact {
+                    surface_label: "player-visible 주변 인물 표지".to_owned(),
+                    known_name: None,
+                    role: Some("장소/사건 안 역할".to_owned()),
+                    location_id: Some("place:opening_location".to_owned()),
+                    scene_role: Some("witness".to_owned()),
+                    contact_summary: "이번 턴에서 플레이어-visible로 남은 접촉/목격/거래/감정 흔적"
+                        .to_owned(),
+                    pressure_tags: Vec::new(),
+                    promotion_hint: None,
+                    memory_action: Some("trace".to_owned()),
+                    disposition: None,
+                    text_design: None,
+                    open_hooks: Vec::new(),
+                }],
+                hidden_state_delta: Vec::new(),
+                next_choices: scene_specific_choices(),
+            },
+        }) else {
+            anyhow::bail!("placeholder extra contact reached world commit");
         };
-        assert_eq!(loaded.thread_id, binding.thread_id);
 
-        let Some(cleared) = clear_codex_thread_binding(Some(store.as_path()), "stw_codex_bind")?
-        else {
-            anyhow::bail!("binding should be returned when cleared");
-        };
-        assert_eq!(cleared.thread_id, binding.thread_id);
-        assert!(load_codex_thread_binding(Some(store.as_path()), "stw_codex_bind")?.is_none());
+        assert!(error.to_string().contains("schema placeholder"));
+        let after: TurnSnapshot = read_json(&files.latest_snapshot)?;
+        assert_eq!(after.turn_id, before.turn_id);
+        assert_eq!(after.last_choices.len(), before.last_choices.len());
+        assert_eq!(after.last_choices[0].slot, before.last_choices[0].slot);
+        assert_eq!(after.last_choices[0].tag, before.last_choices[0].tag);
+        let still_pending =
+            load_pending_agent_turn(Some(store.as_path()), "stw_agent_extra_preflight")?;
+        assert_eq!(still_pending.turn_id, pending.turn_id);
         Ok(())
     }
 

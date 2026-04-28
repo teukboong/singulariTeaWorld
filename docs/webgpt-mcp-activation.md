@@ -17,8 +17,7 @@ vn-serve browser UI
 
 The Rust world store remains source of truth. WebGPT receives a player-visible
 and schema-bound packet, returns exactly one response object or one generated
-PNG, and the worker commits through the same validators used by the Codex App
-backend.
+PNG, and the worker commits through the Rust validators.
 
 ## Requirements
 
@@ -137,11 +136,8 @@ unrelated process still fails loudly.
 
 ## Continuity Policy
 
-Codex App is the cost-balanced engine: native app-server thread history carries
-style and recent rhythm, while each turn injects a compact authoritative packet.
-
-WebGPT gets a heavier revival packet because ChatGPT project/session compaction
-is less explicit. Each text turn includes:
+WebGPT gets an active revival packet because ChatGPT project/session compaction
+is less explicit than the world store. Each text turn includes:
 
 - compact current pending-turn contract
 - larger `resume_pack` windows
@@ -166,8 +162,7 @@ turn to finish before claiming visual jobs.
 
 ## Image Rules
 
-WebGPT image generation closes the same visual jobs as Codex App image
-generation:
+WebGPT image generation closes the repo-owned visual jobs:
 
 ```text
 claim visual job -> webgpt_generate_image -> extracted PNG -> complete job
@@ -180,8 +175,7 @@ off-screen, shadow, or cropped non-identifying framing. Character sheet jobs may
 still depict the character, but they stay in the reference-asset conversation
 and are saved only to their reference asset paths; the gate applies to scene CG.
 
-WebGPT image cadence is intentionally more eager than Codex App. The default
-turn-CG cadence is every 2 turns:
+WebGPT image cadence defaults to every 2 turns:
 
 ```bash
 SINGULARI_WORLD_WEBGPT_TURN_CG_CADENCE_MIN=2

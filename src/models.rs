@@ -346,6 +346,10 @@ pub struct CharacterVoiceAnchor {
     #[serde(default)]
     pub speech: Vec<String>,
     #[serde(default)]
+    pub endings: Vec<String>,
+    #[serde(default)]
+    pub tone: Vec<String>,
+    #[serde(default)]
     pub gestures: Vec<String>,
     #[serde(default)]
     pub habits: Vec<String>,
@@ -357,6 +361,8 @@ impl CharacterVoiceAnchor {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.speech.is_empty()
+            && self.endings.is_empty()
+            && self.tone.is_empty()
             && self.gestures.is_empty()
             && self.habits.is_empty()
             && self.drift.is_empty()
@@ -368,6 +374,14 @@ impl CharacterVoiceAnchor {
             speech: vec![
                 "모르는 세계 지식은 단정하지 않고 확인한 단서부터 말한다".to_owned(),
                 "모르는 세계 지식은 단정하지 않고 조건을 먼저 세운다".to_owned(),
+            ],
+            endings: vec![
+                "긴장할수록 짧은 평서문과 낮은 의문문으로 끊는다".to_owned(),
+                "결론을 단정하기보다 '~같다', '~부터 보자'처럼 확인의 여지를 남긴다".to_owned(),
+            ],
+            tone: vec![
+                "자기 확신보다 관찰 순서를 앞세우는 절제된 어투를 쓴다".to_owned(),
+                "모르는 일을 아는 척하지 않고, 필요한 말만 낮게 덧붙인다".to_owned(),
             ],
             gestures: vec![
                 "이름, 기록, 동의가 얽힐 때 왼손목을 누르거나 가린다".to_owned(),
@@ -387,6 +401,14 @@ impl CharacterVoiceAnchor {
             speech: vec![
                 "짧고 담담하게 말하며 감정 설명보다 판단을 먼저 둔다".to_owned(),
                 "숨겨진 진실은 과잉 설명하지 않고 필요한 만큼만 연다".to_owned(),
+            ],
+            endings: vec![
+                "짧은 평서와 여백 있는 명령형을 쓰되, 해설형 장광설을 피한다".to_owned(),
+                "상대가 선택해야 할 순간에는 말끝을 끊어 직접 판단할 공간을 남긴다".to_owned(),
+            ],
+            tone: vec![
+                "보호와 경고가 섞인 낮고 담담한 어투를 유지한다".to_owned(),
+                "친밀함은 설명보다 거리 조절과 짧은 확인으로 드러낸다".to_owned(),
             ],
             gestures: vec![
                 "위험할수록 손목이나 표식을 감추고, 보호할 때 한 걸음 앞으로 선다".to_owned(),
@@ -643,6 +665,8 @@ pub struct CodexView {
     #[serde(default)]
     pub voice_anchors: Vec<CodexVoiceAnchorEntry>,
     #[serde(default)]
+    pub local_faces: Vec<CodexLocalFaceEntry>,
+    #[serde(default)]
     pub realtime_analysis: Vec<CodexAnalysisEntry>,
     #[serde(default)]
     pub related_recommendations: Vec<CodexRecommendation>,
@@ -681,11 +705,28 @@ pub struct CodexVoiceAnchorEntry {
     #[serde(default)]
     pub speech: Vec<String>,
     #[serde(default)]
+    pub endings: Vec<String>,
+    #[serde(default)]
+    pub tone: Vec<String>,
+    #[serde(default)]
     pub gestures: Vec<String>,
     #[serde(default)]
     pub habits: Vec<String>,
     #[serde(default)]
     pub drift: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodexLocalFaceEntry {
+    pub extra_id: String,
+    pub display_name: String,
+    pub role: String,
+    pub home_location_id: String,
+    pub last_seen_turn: String,
+    pub disposition: String,
+    pub last_contact: String,
+    #[serde(default)]
+    pub open_hooks: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1124,6 +1165,8 @@ mod tests {
         let anchor = CharacterVoiceAnchor::protagonist_default();
         let joined = [
             anchor.speech.join(" "),
+            anchor.endings.join(" "),
+            anchor.tone.join(" "),
             anchor.gestures.join(" "),
             anchor.habits.join(" "),
             anchor.drift.join(" "),

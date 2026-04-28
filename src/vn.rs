@@ -242,13 +242,11 @@ pub fn build_vn_packet(options: &BuildVnPacketOptions) -> Result<VnPacket> {
         .clone()
         .or_else(|| turn_cg_exists.then_some(turn_cg_url.clone()))
         .or_else(|| {
-            (turn_cg_decision.action == "reuse_last").then(|| {
-                latest_existing_turn_cg_url(
-                    world.world_id.as_str(),
-                    &files.dir,
-                    render_packet.turn_id.as_str(),
-                )
-            })?
+            latest_existing_turn_cg_url(
+                world.world_id.as_str(),
+                &files.dir,
+                render_packet.turn_id.as_str(),
+            )
         });
     Ok(VnPacket {
         schema_version: VN_PACKET_SCHEMA_VERSION.to_owned(),
@@ -1622,7 +1620,7 @@ premise:
             Some(store.as_path()),
             &WorldBackendSelection::new(
                 "stw_vn_webgpt_visual".to_owned(),
-                WorldTextBackend::CodexAppServer,
+                WorldTextBackend::Webgpt,
                 WorldVisualBackend::Webgpt,
                 "test",
             ),
@@ -1643,6 +1641,68 @@ premise:
         assert_eq!(packet.image.budget_policy.turn_cg_cadence_min, 2);
         assert_eq!(packet.image.auto_decision.action, "generate_scene");
         assert!(packet.image.image_generation_job.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn pending_turn_cg_keeps_previous_saved_cg_visible() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(
+            &seed_path,
+            r#"
+schema_version: singulari.world_seed.v1
+world_id: stw_vn_cg_residue
+title: "잔존 CG 세계"
+premise:
+  genre: "중세 판타지"
+  protagonist: "변경 순찰자, 남자 주인공"
+"#,
+        )?;
+        let initialized = init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+        save_world_backend_selection(
+            Some(store.as_path()),
+            &WorldBackendSelection::new(
+                "stw_vn_cg_residue".to_owned(),
+                WorldTextBackend::Webgpt,
+                WorldVisualBackend::Webgpt,
+                "test",
+            ),
+        )?;
+        advance_turn(&AdvanceTurnOptions {
+            store_root: Some(store.clone()),
+            world_id: "stw_vn_cg_residue".to_owned(),
+            input: "1".to_owned(),
+        })?;
+        let turn_cg_dir = initialized
+            .world_dir
+            .join(crate::visual_assets::VN_ASSETS_DIR)
+            .join(super::TURN_CG_DIR);
+        std::fs::create_dir_all(turn_cg_dir.as_path())?;
+        std::fs::write(turn_cg_dir.join("turn_0001.png"), b"fake previous cg")?;
+        advance_turn(&AdvanceTurnOptions {
+            store_root: Some(store.clone()),
+            world_id: "stw_vn_cg_residue".to_owned(),
+            input: "1".to_owned(),
+        })?;
+
+        let mut options = BuildVnPacketOptions::new("stw_vn_cg_residue".to_owned());
+        options.store_root = Some(store);
+        let packet = build_vn_packet(&options)?;
+
+        assert_eq!(packet.turn_id, "turn_0002");
+        assert_eq!(packet.image.auto_decision.action, "generate_scene");
+        assert!(packet.image.image_generation_job.is_some());
+        assert!(!packet.image.exists);
+        assert_eq!(
+            packet.image.existing_image_url.as_deref(),
+            Some("/world-assets/stw_vn_cg_residue/assets/vn/turn_cg/turn_0001.png")
+        );
         Ok(())
     }
 }

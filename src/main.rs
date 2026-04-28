@@ -19,20 +19,18 @@ use singulari_world::{
     BuildCodexViewOptions, BuildResumePackOptions, BuildVnPacketOptions,
     BuildWorldVisualAssetsOptions, ChatRouteOptions, ClaimVisualJobOptions, CodexViewSection,
     CompleteVisualJobOptions, ExportWorldOptions, ImageGenerationJob, ImportWorldOptions,
-    ReleaseVisualJobClaimOptions, SaveCodexThreadBindingOptions, StartWorldOptions, VnServeOptions,
-    build_vn_packet, build_world_visual_assets, claim_visual_job, clear_codex_thread_binding,
-    complete_visual_job, export_world, import_world, load_codex_thread_binding,
-    load_visual_job_claim, release_visual_job_claim, save_codex_thread_binding, serve_vn,
+    ReleaseVisualJobClaimOptions, StartWorldOptions, VnServeOptions, build_vn_packet,
+    build_world_visual_assets, claim_visual_job, complete_visual_job, export_world, import_world,
+    load_visual_job_claim, release_visual_job_claim, serve_vn,
 };
 use std::collections::HashSet;
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
-use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 #[derive(Parser)]
 #[command(
@@ -49,40 +47,14 @@ struct Cli {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum CodexThreadContextMode {
-    /// Reuse the Codex App thread history and send only a small authoritative world packet.
-    NativeThread,
-    /// Exclude prior app-server turns and reinject the full pending packet every turn.
-    BoundedPacket,
-}
-
-impl CodexThreadContextMode {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::NativeThread => "native-thread",
-            Self::BoundedPacket => "bounded-packet",
-        }
-    }
-}
-
-impl fmt::Display for CodexThreadContextMode {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum HostWorkerTextBackend {
-    /// Use Codex App app-server as the narrative engine.
-    CodexAppServer,
-    /// Use an external `WebGPT` adapter command as the narrative engine.
+    /// Use `WebGPT` as the narrative engine.
     Webgpt,
 }
 
 impl HostWorkerTextBackend {
     const fn as_str(self) -> &'static str {
         match self {
-            Self::CodexAppServer => "codex-app-server",
             Self::Webgpt => "webgpt",
         }
     }
@@ -97,7 +69,6 @@ impl fmt::Display for HostWorkerTextBackend {
 impl From<WorldTextBackend> for HostWorkerTextBackend {
     fn from(value: WorldTextBackend) -> Self {
         match value {
-            WorldTextBackend::CodexAppServer => Self::CodexAppServer,
             WorldTextBackend::Webgpt => Self::Webgpt,
         }
     }
@@ -105,8 +76,6 @@ impl From<WorldTextBackend> for HostWorkerTextBackend {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum HostWorkerVisualBackend {
-    /// Use Codex App app-server imageGeneration for visual jobs.
-    CodexAppServer,
     /// Use `ChatGPT` Web image generation through `WebGPT` MCP.
     Webgpt,
     /// Do not claim or generate visual jobs from this worker.
@@ -116,7 +85,6 @@ enum HostWorkerVisualBackend {
 impl HostWorkerVisualBackend {
     const fn as_str(self) -> &'static str {
         match self {
-            Self::CodexAppServer => "codex-app-server",
             Self::Webgpt => "webgpt",
             Self::None => "none",
         }
@@ -132,7 +100,6 @@ impl fmt::Display for HostWorkerVisualBackend {
 impl From<WorldVisualBackend> for HostWorkerVisualBackend {
     fn from(value: WorldVisualBackend) -> Self {
         match value {
-            WorldVisualBackend::CodexAppServer => Self::CodexAppServer,
             WorldVisualBackend::Webgpt => Self::Webgpt,
         }
     }
@@ -245,7 +212,7 @@ enum Commands {
         json: bool,
     },
 
-    /// Atomically claim one pending Codex App image generation job.
+    /// Atomically claim one pending host image generation job.
     VisualJobClaim {
         #[arg(long)]
         world_id: Option<String>,
@@ -253,7 +220,7 @@ enum Commands {
         #[arg(long)]
         slot: Option<String>,
 
-        #[arg(long, default_value = "codex_app_image_worker")]
+        #[arg(long, default_value = "webgpt_image_worker")]
         claimed_by: String,
 
         #[arg(long)]
@@ -263,7 +230,7 @@ enum Commands {
         json: bool,
     },
 
-    /// Mark a Codex App image generation job complete after the PNG is saved.
+    /// Mark a host image generation job complete after the PNG is saved.
     VisualJobComplete {
         #[arg(long)]
         world_id: Option<String>,
@@ -395,7 +362,7 @@ enum Commands {
         json: bool,
     },
 
-    /// Upsert a character speech/gesture/habit/drift anchor.
+    /// Upsert a character speech/ending/tone/gesture/habit/drift anchor.
     CharacterAnchor {
         #[arg(long)]
         world_id: Option<String>,
@@ -414,6 +381,12 @@ enum Commands {
 
         #[arg(long = "speech")]
         speech: Vec<String>,
+
+        #[arg(long = "ending")]
+        endings: Vec<String>,
+
+        #[arg(long = "tone")]
+        tone: Vec<String>,
 
         #[arg(long = "gesture")]
         gestures: Vec<String>,
@@ -497,16 +470,12 @@ enum Commands {
         #[arg(long)]
         once: bool,
 
-        /// Existing Codex App thread used for realtime world turns.
-        #[arg(long, env = "SINGULARI_WORLD_CODEX_THREAD_ID")]
-        codex_thread_id: Option<String>,
-
         /// Narrative engine used by the common VN web frontend.
         #[arg(
             long,
             env = "SINGULARI_WORLD_TEXT_BACKEND",
             value_enum,
-            default_value_t = HostWorkerTextBackend::CodexAppServer
+            default_value_t = HostWorkerTextBackend::Webgpt
         )]
         text_backend: HostWorkerTextBackend,
 
@@ -515,30 +484,9 @@ enum Commands {
             long,
             env = "SINGULARI_WORLD_VISUAL_BACKEND",
             value_enum,
-            default_value_t = HostWorkerVisualBackend::CodexAppServer
+            default_value_t = HostWorkerVisualBackend::Webgpt
         )]
         visual_backend: HostWorkerVisualBackend,
-
-        /// Codex CLI path used by managed app-server spawn.
-        #[arg(long, env = "SINGULARI_WORLD_CODEX_BIN")]
-        codex_bin: Option<PathBuf>,
-
-        /// Official Codex app-server websocket URL used by the codex-app-server backend.
-        #[arg(long, env = "SINGULARI_WORLD_CODEX_APP_SERVER_URL")]
-        codex_app_server_url: Option<String>,
-
-        /// How the text backend uses Codex App thread history.
-        #[arg(
-            long,
-            env = "SINGULARI_WORLD_CODEX_THREAD_CONTEXT_MODE",
-            value_enum,
-            default_value_t = CodexThreadContextMode::NativeThread
-        )]
-        codex_thread_context_mode: CodexThreadContextMode,
-
-        /// Node.js binary used only by the codex-app-server backend helper.
-        #[arg(long, env = "SINGULARI_WORLD_NODE_BIN")]
-        node_bin: Option<PathBuf>,
 
         /// Executable adapter used only by the webgpt text backend.
         #[arg(long, env = "SINGULARI_WORLD_WEBGPT_TURN_COMMAND")]
@@ -587,36 +535,6 @@ enum Commands {
             default_value_t = 900
         )]
         webgpt_timeout_secs: u64,
-    },
-
-    /// Bind a world to the Codex thread that should receive realtime turns.
-    CodexThreadBind {
-        #[arg(long)]
-        world_id: Option<String>,
-
-        #[arg(long, env = "CODEX_THREAD_ID")]
-        thread_id: Option<String>,
-
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Show the Codex realtime thread binding for a world.
-    CodexThreadShow {
-        #[arg(long)]
-        world_id: Option<String>,
-
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Clear the Codex realtime thread binding for a world.
-    CodexThreadClear {
-        #[arg(long)]
-        world_id: Option<String>,
-
-        #[arg(long)]
-        json: bool,
     },
 
     /// Export a world as a filesystem bundle directory.
@@ -813,6 +731,8 @@ fn dispatch(cli: Cli) -> Result<()> {
             role,
             knowledge_state,
             speech,
+            endings,
+            tone,
             gestures,
             habits,
             drift,
@@ -827,6 +747,8 @@ fn dispatch(cli: Cli) -> Result<()> {
                 role,
                 knowledge_state,
                 speech,
+                endings,
+                tone,
                 gestures,
                 habits,
                 drift,
@@ -864,13 +786,8 @@ fn dispatch(cli: Cli) -> Result<()> {
             world_id,
             interval_ms,
             once,
-            codex_thread_id,
             text_backend,
             visual_backend,
-            codex_bin,
-            codex_app_server_url,
-            codex_thread_context_mode,
-            node_bin,
             webgpt_turn_command,
             webgpt_mcp_wrapper,
             webgpt_model,
@@ -886,13 +803,8 @@ fn dispatch(cli: Cli) -> Result<()> {
             &HostWorkerOptions {
                 interval_ms,
                 once,
-                codex_thread_id,
                 text_backend,
                 visual_backend,
-                codex_bin,
-                codex_app_server_url,
-                codex_thread_context_mode,
-                node_bin,
                 webgpt_turn_command,
                 webgpt_mcp_wrapper,
                 webgpt_model,
@@ -904,17 +816,6 @@ fn dispatch(cli: Cli) -> Result<()> {
                 webgpt_timeout_secs,
             },
         )?,
-        Commands::CodexThreadBind {
-            world_id,
-            thread_id,
-            json,
-        } => handle_codex_thread_bind(store_root.as_deref(), world_id.as_deref(), thread_id, json)?,
-        Commands::CodexThreadShow { world_id, json } => {
-            handle_codex_thread_show(store_root.as_deref(), world_id.as_deref(), json)?;
-        }
-        Commands::CodexThreadClear { world_id, json } => {
-            handle_codex_thread_clear(store_root.as_deref(), world_id.as_deref(), json)?;
-        }
         Commands::ExportWorld {
             world_id,
             output,
@@ -1420,6 +1321,8 @@ struct CharacterAnchorInput {
     role: Option<String>,
     knowledge_state: Option<String>,
     speech: Vec<String>,
+    endings: Vec<String>,
+    tone: Vec<String>,
     gestures: Vec<String>,
     habits: Vec<String>,
     drift: Vec<String>,
@@ -1441,6 +1344,8 @@ fn handle_character_anchor(
         role: input.role,
         knowledge_state: input.knowledge_state,
         speech: input.speech,
+        endings: input.endings,
+        tone: input.tone,
         gestures: input.gestures,
         habits: input.habits,
         drift: input.drift,
@@ -1569,90 +1474,8 @@ fn handle_agent_commit(
     Ok(())
 }
 
-fn handle_codex_thread_bind(
-    store_root: Option<&Path>,
-    world_id: Option<&str>,
-    thread_id: Option<String>,
-    json: bool,
-) -> Result<()> {
-    let world_id = resolve_world_id(store_root, world_id)?;
-    let thread_id = thread_id
-        .filter(|value| !value.trim().is_empty())
-        .with_context(|| {
-            "missing Codex thread id: pass --thread-id or run from a Codex turn with CODEX_THREAD_ID"
-        })?;
-    let binding = save_codex_thread_binding(&SaveCodexThreadBindingOptions {
-        store_root: store_root.map(Path::to_path_buf),
-        world_id,
-        thread_id,
-        source: "codex_thread_bind_cli".to_owned(),
-    })?;
-    if json {
-        println!("{}", serde_json::to_string_pretty(&binding)?);
-    } else {
-        println!("world: {}", binding.world_id);
-        println!("thread: {}", binding.thread_id);
-        println!("updated_at: {}", binding.updated_at);
-    }
-    Ok(())
-}
-
-fn handle_codex_thread_show(
-    store_root: Option<&Path>,
-    world_id: Option<&str>,
-    json: bool,
-) -> Result<()> {
-    let world_id = resolve_world_id(store_root, world_id)?;
-    let binding = load_codex_thread_binding(store_root, world_id.as_str())?;
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "schema_version": "singulari.codex_thread_binding_status.v1",
-                "world_id": world_id,
-                "binding": binding,
-            }))?
-        );
-    } else if let Some(binding) = binding {
-        println!("world: {}", binding.world_id);
-        println!("thread: {}", binding.thread_id);
-        println!("source: {}", binding.source);
-        println!("updated_at: {}", binding.updated_at);
-    } else {
-        println!("world: {world_id}");
-        println!("thread: <unbound>");
-    }
-    Ok(())
-}
-
-fn handle_codex_thread_clear(
-    store_root: Option<&Path>,
-    world_id: Option<&str>,
-    json: bool,
-) -> Result<()> {
-    let world_id = resolve_world_id(store_root, world_id)?;
-    let cleared = clear_codex_thread_binding(store_root, world_id.as_str())?;
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "schema_version": "singulari.codex_thread_binding_clear.v1",
-                "world_id": world_id,
-                "cleared": cleared,
-            }))?
-        );
-    } else if let Some(binding) = cleared {
-        println!("cleared: {}", binding.thread_id);
-    } else {
-        println!("thread: <already unbound>");
-    }
-    Ok(())
-}
-
 const HOST_WORKER_EVENT_SCHEMA_VERSION: &str = "singulari.host_worker_event.v1";
-const HOST_WORKER_CONSUMER: &str = "codex_app_host_worker";
-const CODEX_APP_SERVER_TURN_HELPER: &str = include_str!("codex_app_server_turn.mjs");
-const CODEX_APP_SERVER_IMAGE_HELPER: &str = include_str!("codex_app_server_image.mjs");
+const HOST_WORKER_CONSUMER: &str = "webgpt_host_worker";
 const DEFAULT_WEBGPT_TEXT_CDP_PORT: u16 = 9238;
 const DEFAULT_WEBGPT_IMAGE_CDP_PORT: u16 = 9239;
 
@@ -1660,13 +1483,8 @@ const DEFAULT_WEBGPT_IMAGE_CDP_PORT: u16 = 9239;
 struct HostWorkerOptions {
     interval_ms: u64,
     once: bool,
-    codex_thread_id: Option<String>,
     text_backend: HostWorkerTextBackend,
     visual_backend: HostWorkerVisualBackend,
-    codex_bin: Option<PathBuf>,
-    codex_app_server_url: Option<String>,
-    codex_thread_context_mode: CodexThreadContextMode,
-    node_bin: Option<PathBuf>,
     webgpt_turn_command: Option<PathBuf>,
     webgpt_mcp_wrapper: Option<PathBuf>,
     webgpt_model: Option<String>,
@@ -1690,13 +1508,6 @@ fn handle_host_worker(
     let interval = Duration::from_millis(options.interval_ms.max(250));
     ensure_webgpt_lane_runtime_isolated(options)?;
     let mut emitted = HashSet::new();
-    let mut app_server_dispatch_config = CodexAppServerDispatchConfig::from_cli(
-        options.codex_app_server_url.clone(),
-        options.codex_thread_id.clone(),
-        options.codex_thread_context_mode,
-        options.node_bin.clone(),
-        options.codex_bin.clone(),
-    );
     let initial_world_id = resolve_host_worker_world_id(store_root, world_id)?;
     emit_host_event(&serde_json::json!({
         "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
@@ -1744,7 +1555,6 @@ fn handle_host_worker(
                 &mut emitted,
                 text_backend,
                 options,
-                &mut app_server_dispatch_config,
             )? {
                 emitted_this_tick = true;
             }
@@ -1755,7 +1565,6 @@ fn handle_host_worker(
             text_backend,
             visual_backend,
             options,
-            &mut app_server_dispatch_config,
         )? {
             emitted_this_tick = true;
         }
@@ -1796,7 +1605,6 @@ fn effective_host_worker_backends(
 
 const fn host_worker_visual_jobs_label(backend: HostWorkerVisualBackend) -> &'static str {
     match backend {
-        HostWorkerVisualBackend::CodexAppServer => "claim_and_generate",
         HostWorkerVisualBackend::Webgpt => "claim_and_generate_webgpt",
         HostWorkerVisualBackend::None => "disabled",
     }
@@ -1823,90 +1631,13 @@ fn emit_host_pending_agent_turn_event(
     emitted: &mut HashSet<String>,
     text_backend: HostWorkerTextBackend,
     options: &HostWorkerOptions,
-    app_server_dispatch_config: &mut CodexAppServerDispatchConfig,
 ) -> Result<bool> {
     let Ok(pending) = load_pending_agent_turn(store_root, world_id) else {
         return Ok(false);
     };
     match text_backend {
-        HostWorkerTextBackend::CodexAppServer => {
-            let dispatch = app_server_dispatch_config
-                .resolve(store_root, world_id)?
-                .context("host-worker requires Codex App app-server dispatch")?;
-            emit_codex_app_server_pending_agent_turn_event(store_root, emitted, &pending, &dispatch)
-        }
         HostWorkerTextBackend::Webgpt => {
             emit_webgpt_pending_agent_turn_event(store_root, emitted, &pending, options)
-        }
-    }
-}
-
-fn emit_codex_app_server_pending_agent_turn_event(
-    store_root: Option<&Path>,
-    emitted: &mut HashSet<String>,
-    pending: &singulari_world::PendingAgentTurn,
-    dispatch: &CodexAppServerDispatch,
-) -> Result<bool> {
-    match dispatch_pending_agent_turn_via_app_server(store_root, pending, dispatch)? {
-        AppServerDispatchOutcome::Started(record) => {
-            let event_key = format!(
-                "codex-app-server-started:{}:{}:{}",
-                pending.world_id,
-                pending.turn_id,
-                record.thread_id.as_deref().unwrap_or("new-thread")
-            );
-            if !emitted.insert(event_key) {
-                return Ok(false);
-            }
-            emit_host_event(&serde_json::json!({
-                "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
-                "event": "codex_app_server_dispatch_started",
-                "world_id": pending.world_id,
-                "turn_id": pending.turn_id,
-                "thread_id": record.thread_id,
-                "turn_status": record.status,
-                "app_server_url": dispatch.app_server_url.as_str(),
-                "app_server_managed": dispatch.app_server_managed,
-                "app_server_runtime_path": dispatch
-                    .app_server_runtime_path
-                    .as_ref()
-                    .map(|path| path.display().to_string()),
-                "pid": record.pid,
-                "record_path": record.record_path,
-                "prompt_path": record.prompt_path,
-                "result_path": record.result_path,
-                "stdout_path": record.stdout_path,
-                "stderr_path": record.stderr_path,
-                "consumer": HOST_WORKER_CONSUMER,
-            }))?;
-            Ok(true)
-        }
-        AppServerDispatchOutcome::AlreadyDispatched(record_path) => {
-            let event_key = format!(
-                "codex-app-server-skipped:{}:{}:{}",
-                pending.world_id,
-                pending.turn_id,
-                dispatch.thread_id.as_deref().unwrap_or("new-thread")
-            );
-            if !emitted.insert(event_key) {
-                return Ok(false);
-            }
-            emit_host_event(&serde_json::json!({
-                "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
-                "event": "codex_app_server_dispatch_skipped",
-                "reason": "already_dispatched",
-                "world_id": pending.world_id,
-                "turn_id": pending.turn_id,
-                "thread_id": dispatch.thread_id.as_deref(),
-                "app_server_managed": dispatch.app_server_managed,
-                "app_server_runtime_path": dispatch
-                    .app_server_runtime_path
-                    .as_ref()
-                    .map(|path| path.display().to_string()),
-                "record_path": record_path,
-                "consumer": HOST_WORKER_CONSUMER,
-            }))?;
-            Ok(true)
         }
     }
 }
@@ -1946,17 +1677,10 @@ fn emit_webgpt_pending_agent_turn_event(
 }
 
 enum HostTextDispatchResult {
-    Codex {
-        dispatch: CodexAppServerDispatch,
-        outcome: AppServerDispatchOutcome,
-    },
-    Webgpt {
-        outcome: WebGptDispatchOutcome,
-    },
+    Webgpt { outcome: WebGptDispatchOutcome },
 }
 
 enum HostVisualDispatchResult {
-    Codex(CodexAppServerImageDispatchRecord),
     Webgpt(WebGptImageDispatchRecord),
 }
 
@@ -1967,24 +1691,9 @@ fn emit_host_text_and_visual_events_parallel(
     text_backend: HostWorkerTextBackend,
     visual_backend: HostWorkerVisualBackend,
     options: &HostWorkerOptions,
-    app_server_dispatch_config: &mut CodexAppServerDispatchConfig,
 ) -> Result<bool> {
     let pending = load_pending_agent_turn(store_root, world_id).ok();
-    let app_server_dispatch = if text_backend == HostWorkerTextBackend::CodexAppServer
-        || visual_backend == HostWorkerVisualBackend::CodexAppServer
-    {
-        Some(
-            app_server_dispatch_config
-                .resolve(store_root, world_id)?
-                .context("host-worker requires Codex App app-server dispatch")?,
-        )
-    } else {
-        None
-    };
     let visual_claim = match visual_backend {
-        HostWorkerVisualBackend::CodexAppServer => {
-            claim_next_host_visual_job(store_root, world_id, "singulari_host_worker")?
-        }
         HostWorkerVisualBackend::Webgpt => {
             claim_next_host_visual_job(store_root, world_id, "singulari_webgpt_image_worker")?
         }
@@ -1994,20 +1703,9 @@ fn emit_host_text_and_visual_events_parallel(
         return Ok(false);
     }
 
-    let text_app_server_dispatch = app_server_dispatch.clone();
-    let image_app_server_dispatch = app_server_dispatch.clone();
     let (text_result, image_result) = thread::scope(|scope| {
         let text_handle = pending.as_ref().map(|pending| {
             scope.spawn(move || match text_backend {
-                HostWorkerTextBackend::CodexAppServer => {
-                    let dispatch = text_app_server_dispatch
-                        .as_ref()
-                        .context("host-worker requires Codex App app-server dispatch")?
-                        .clone();
-                    let outcome =
-                        dispatch_pending_agent_turn_via_app_server(store_root, pending, &dispatch)?;
-                    Ok(HostTextDispatchResult::Codex { dispatch, outcome })
-                }
                 HostWorkerTextBackend::Webgpt => {
                     let outcome =
                         dispatch_pending_agent_turn_via_webgpt(store_root, pending, options)?;
@@ -2017,13 +1715,6 @@ fn emit_host_text_and_visual_events_parallel(
         });
         let image_handle = visual_claim.as_ref().map(|claim| {
             scope.spawn(move || match visual_backend {
-                HostWorkerVisualBackend::CodexAppServer => {
-                    let dispatch = image_app_server_dispatch
-                        .as_ref()
-                        .context("host-worker requires Codex App app-server dispatch")?;
-                    dispatch_visual_job_via_app_server(store_root, claim, dispatch)
-                        .map(HostVisualDispatchResult::Codex)
-                }
                 HostWorkerVisualBackend::Webgpt => {
                     dispatch_visual_job_via_webgpt(store_root, claim, options)
                         .map(HostVisualDispatchResult::Webgpt)
@@ -2061,13 +1752,8 @@ fn emit_host_text_and_visual_events_parallel(
         emitted_any = true;
     }
     if !initial_image_dispatched
-        && let Some(result) = dispatch_host_visual_job_once(
-            store_root,
-            world_id,
-            visual_backend,
-            options,
-            app_server_dispatch.as_ref(),
-        )?
+        && let Some(result) =
+            dispatch_host_visual_job_once(store_root, world_id, visual_backend, options)?
         && emit_visual_dispatch_result(result)?
     {
         emitted_any = true;
@@ -2080,12 +1766,8 @@ fn dispatch_host_visual_job_once(
     world_id: &str,
     visual_backend: HostWorkerVisualBackend,
     options: &HostWorkerOptions,
-    app_server_dispatch: Option<&CodexAppServerDispatch>,
 ) -> Result<Option<HostVisualDispatchResult>> {
     let visual_claim = match visual_backend {
-        HostWorkerVisualBackend::CodexAppServer => {
-            claim_next_host_visual_job(store_root, world_id, "singulari_host_worker")?
-        }
         HostWorkerVisualBackend::Webgpt => {
             claim_next_host_visual_job(store_root, world_id, "singulari_webgpt_image_worker")?
         }
@@ -2095,12 +1777,6 @@ fn dispatch_host_visual_job_once(
         return Ok(None);
     };
     let result = match visual_backend {
-        HostWorkerVisualBackend::CodexAppServer => {
-            let dispatch = app_server_dispatch
-                .context("host-worker requires Codex App app-server dispatch")?;
-            dispatch_visual_job_via_app_server(store_root, &claim, dispatch)
-                .map(HostVisualDispatchResult::Codex)?
-        }
         HostWorkerVisualBackend::Webgpt => {
             dispatch_visual_job_via_webgpt(store_root, &claim, options)
                 .map(HostVisualDispatchResult::Webgpt)?
@@ -2118,54 +1794,10 @@ fn emit_text_dispatch_result(
     emitted: &mut HashSet<String>,
 ) -> Result<bool> {
     match result {
-        HostTextDispatchResult::Codex { dispatch, outcome } => {
-            emit_codex_text_dispatch_result(pending, outcome, &dispatch, emitted)
-        }
         HostTextDispatchResult::Webgpt { outcome } => {
             emit_webgpt_text_dispatch_result(pending, outcome, emitted)
         }
     }
-}
-
-fn emit_codex_text_dispatch_result(
-    pending: &singulari_world::PendingAgentTurn,
-    outcome: AppServerDispatchOutcome,
-    dispatch: &CodexAppServerDispatch,
-    emitted: &mut HashSet<String>,
-) -> Result<bool> {
-    match outcome {
-        AppServerDispatchOutcome::Started(record) => {
-            let event_key = format!(
-                "codex-app-server-started:{}:{}:{}",
-                pending.world_id,
-                pending.turn_id,
-                record.thread_id.as_deref().unwrap_or("new-thread")
-            );
-            if !emitted.insert(event_key) {
-                return Ok(false);
-            }
-            emit_host_event(&codex_app_server_dispatch_started_event(
-                pending, &record, dispatch,
-            ))?;
-        }
-        AppServerDispatchOutcome::AlreadyDispatched(record_path) => {
-            let event_key = format!(
-                "codex-app-server-skipped:{}:{}:{}",
-                pending.world_id,
-                pending.turn_id,
-                dispatch.thread_id.as_deref().unwrap_or("new-thread")
-            );
-            if !emitted.insert(event_key) {
-                return Ok(false);
-            }
-            emit_host_event(&codex_app_server_dispatch_skipped_event(
-                pending,
-                record_path.as_str(),
-                dispatch,
-            ))?;
-        }
-    }
-    Ok(true)
 }
 
 fn emit_webgpt_text_dispatch_result(
@@ -2197,9 +1829,6 @@ fn emit_webgpt_text_dispatch_result(
 
 fn emit_visual_dispatch_result(result: HostVisualDispatchResult) -> Result<bool> {
     match result {
-        HostVisualDispatchResult::Codex(record) => {
-            emit_host_event(&codex_app_image_completed_event(&record))?;
-        }
         HostVisualDispatchResult::Webgpt(record) => {
             emit_host_event(&webgpt_image_completed_event(&record))?;
         }
@@ -2214,56 +1843,6 @@ fn thread_panic_error(context: &str, panic: &(dyn std::any::Any + Send)) -> anyh
         .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
         .unwrap_or("unknown panic payload");
     anyhow::anyhow!("{context} panicked: {reason}")
-}
-
-fn codex_app_server_dispatch_started_event(
-    pending: &singulari_world::PendingAgentTurn,
-    record: &CodexAppServerDispatchRecord,
-    dispatch: &CodexAppServerDispatch,
-) -> serde_json::Value {
-    serde_json::json!({
-        "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
-        "event": "codex_app_server_dispatch_started",
-        "world_id": pending.world_id,
-        "turn_id": pending.turn_id,
-        "thread_id": record.thread_id,
-        "turn_status": record.status,
-        "app_server_url": dispatch.app_server_url.as_str(),
-        "app_server_managed": dispatch.app_server_managed,
-        "app_server_runtime_path": dispatch
-            .app_server_runtime_path
-            .as_ref()
-            .map(|path| path.display().to_string()),
-        "pid": record.pid,
-        "record_path": record.record_path,
-        "prompt_path": record.prompt_path,
-        "result_path": record.result_path,
-        "stdout_path": record.stdout_path,
-        "stderr_path": record.stderr_path,
-        "consumer": HOST_WORKER_CONSUMER,
-    })
-}
-
-fn codex_app_server_dispatch_skipped_event(
-    pending: &singulari_world::PendingAgentTurn,
-    record_path: &str,
-    dispatch: &CodexAppServerDispatch,
-) -> serde_json::Value {
-    serde_json::json!({
-        "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
-        "event": "codex_app_server_dispatch_skipped",
-        "reason": "already_dispatched",
-        "world_id": pending.world_id,
-        "turn_id": pending.turn_id,
-        "thread_id": dispatch.thread_id.as_deref(),
-        "app_server_managed": dispatch.app_server_managed,
-        "app_server_runtime_path": dispatch
-            .app_server_runtime_path
-            .as_ref()
-            .map(|path| path.display().to_string()),
-        "record_path": record_path,
-        "consumer": HOST_WORKER_CONSUMER,
-    })
 }
 
 fn webgpt_dispatch_started_event(
@@ -2302,23 +1881,6 @@ fn webgpt_dispatch_skipped_event(
         "world_id": pending.world_id,
         "turn_id": pending.turn_id,
         "record_path": record_path,
-        "consumer": HOST_WORKER_CONSUMER,
-    })
-}
-
-fn codex_app_image_completed_event(
-    record: &CodexAppServerImageDispatchRecord,
-) -> serde_json::Value {
-    serde_json::json!({
-        "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
-        "event": "codex_app_image_generate_completed",
-        "world_id": record.world_id.as_str(),
-        "slot": record.slot.as_str(),
-        "claim_id": record.claim_id.as_deref(),
-        "saved_path": record.saved_path.as_deref(),
-        "destination_path": record.destination_path.as_str(),
-        "record_path": record.record_path.as_str(),
-        "status": record.status.as_str(),
         "consumer": HOST_WORKER_CONSUMER,
     })
 }
@@ -2411,294 +1973,6 @@ fn emit_host_event(event: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone)]
-struct CodexAppServerDispatch {
-    app_server_url: String,
-    thread_id: Option<String>,
-    thread_context_mode: CodexThreadContextMode,
-    node_bin: PathBuf,
-    binding_source: Option<String>,
-    binding_updated_at: Option<String>,
-    app_server_managed: bool,
-    app_server_runtime_path: Option<PathBuf>,
-}
-
-#[derive(Debug)]
-struct CodexAppServerDispatchConfig {
-    app_server_url: Option<String>,
-    cli_thread_id: Option<String>,
-    thread_context_mode: CodexThreadContextMode,
-    node_bin: Option<PathBuf>,
-    codex_bin: Option<PathBuf>,
-    bound_worlds: HashSet<String>,
-    managed_app_server: Option<ManagedCodexAppServer>,
-}
-
-impl CodexAppServerDispatchConfig {
-    fn from_cli(
-        app_server_url: Option<String>,
-        thread_id: Option<String>,
-        thread_context_mode: CodexThreadContextMode,
-        node_bin: Option<PathBuf>,
-        codex_bin: Option<PathBuf>,
-    ) -> Self {
-        Self {
-            app_server_url: app_server_url
-                .map(|value| value.trim().to_owned())
-                .filter(|value| !value.is_empty()),
-            cli_thread_id: thread_id.filter(|value| !value.trim().is_empty()),
-            thread_context_mode,
-            node_bin,
-            codex_bin,
-            bound_worlds: HashSet::new(),
-            managed_app_server: None,
-        }
-    }
-
-    fn resolve(
-        &mut self,
-        store_root: Option<&Path>,
-        world_id: &str,
-    ) -> Result<Option<CodexAppServerDispatch>> {
-        let Some(app_server_url) = self.resolved_app_server_url(store_root, world_id)? else {
-            return Ok(None);
-        };
-        let app_server_runtime_path = self
-            .managed_app_server
-            .as_ref()
-            .map(|runtime| runtime.record_path.clone());
-        let app_server_managed = app_server_runtime_path.is_some();
-        ensure_control_safe_runtime_value("codex_app_server_url", app_server_url.as_str())?;
-        if let Some(thread_id) = &self.cli_thread_id
-            && self.bound_worlds.insert(world_id.to_owned())
-        {
-            save_codex_thread_binding(&SaveCodexThreadBindingOptions {
-                store_root: store_root.map(Path::to_path_buf),
-                world_id: world_id.to_owned(),
-                thread_id: thread_id.clone(),
-                source: "codex_app_server_cli".to_owned(),
-            })?;
-        }
-        let binding = load_codex_thread_binding(store_root, world_id)?;
-        Ok(Some(CodexAppServerDispatch {
-            app_server_url,
-            thread_id: binding.as_ref().map(|value| value.thread_id.clone()),
-            thread_context_mode: self.thread_context_mode,
-            node_bin: self.resolved_node_bin(),
-            binding_source: binding.as_ref().map(|value| value.source.clone()),
-            binding_updated_at: binding.map(|value| value.updated_at),
-            app_server_managed,
-            app_server_runtime_path,
-        }))
-    }
-
-    fn resolved_app_server_url(
-        &mut self,
-        store_root: Option<&Path>,
-        world_id: &str,
-    ) -> Result<Option<String>> {
-        if let Some(url) = self.explicit_app_server_url() {
-            return Ok(Some(url));
-        }
-        if let Some(runtime) = self.managed_app_server.as_mut()
-            && runtime.is_running()?
-        {
-            return Ok(Some(runtime.url.clone()));
-        }
-        self.managed_app_server = None;
-        let runtime = spawn_managed_codex_app_server(
-            store_root,
-            world_id,
-            self.resolved_codex_bin().as_path(),
-        )?;
-        let url = runtime.url.clone();
-        self.managed_app_server = Some(runtime);
-        Ok(Some(url))
-    }
-
-    fn explicit_app_server_url(&self) -> Option<String> {
-        self.app_server_url.clone().or_else(|| {
-            std::env::var("SINGULARI_WORLD_CODEX_APP_SERVER_URL")
-                .ok()
-                .map(|value| value.trim().to_owned())
-                .filter(|value| !value.is_empty())
-        })
-    }
-
-    fn resolved_node_bin(&self) -> PathBuf {
-        self.node_bin
-            .clone()
-            .or_else(|| std::env::var_os("SINGULARI_WORLD_NODE_BIN").map(PathBuf::from))
-            .or_else(|| std::env::var_os("HESPERIDES_NODE_BIN").map(PathBuf::from))
-            .unwrap_or_else(|| PathBuf::from("node"))
-    }
-
-    fn resolved_codex_bin(&self) -> PathBuf {
-        self.codex_bin
-            .clone()
-            .or_else(|| std::env::var_os("SINGULARI_WORLD_CODEX_BIN").map(PathBuf::from))
-            .unwrap_or_else(|| PathBuf::from("codex"))
-    }
-}
-
-#[derive(Debug)]
-struct ManagedCodexAppServer {
-    url: String,
-    record_path: PathBuf,
-    child: Child,
-}
-
-impl ManagedCodexAppServer {
-    fn is_running(&mut self) -> Result<bool> {
-        Ok(self
-            .child
-            .try_wait()
-            .context("failed to inspect managed codex app-server process")?
-            .is_none())
-    }
-}
-
-impl Drop for ManagedCodexAppServer {
-    fn drop(&mut self) {
-        if matches!(self.child.try_wait(), Ok(None)) {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-        }
-        mark_managed_codex_app_server_stopped(self.record_path.as_path());
-    }
-}
-
-fn spawn_managed_codex_app_server(
-    store_root: Option<&Path>,
-    world_id: &str,
-    codex_bin: &Path,
-) -> Result<ManagedCodexAppServer> {
-    let bridge_dir = codex_app_server_runtime_dir(store_root, world_id)?;
-    fs::create_dir_all(&bridge_dir)
-        .with_context(|| format!("failed to create {}", bridge_dir.display()))?;
-    let port = reserve_loopback_port()?;
-    let url = format!("ws://127.0.0.1:{port}");
-    let record_path = bridge_dir.join("codex_app_server_runtime.json");
-    let stdout_path = bridge_dir.join("codex_app_server_stdout.log");
-    let stderr_path = bridge_dir.join("codex_app_server_stderr.log");
-    let stdout = File::create(&stdout_path)
-        .with_context(|| format!("failed to create {}", stdout_path.display()))?;
-    let stderr = File::create(&stderr_path)
-        .with_context(|| format!("failed to create {}", stderr_path.display()))?;
-    let mut child = Command::new(codex_bin)
-        .arg("app-server")
-        .arg("--listen")
-        .arg(url.as_str())
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr))
-        .spawn()
-        .with_context(|| {
-            format!(
-                "failed to spawn managed codex app-server: codex_bin={}",
-                codex_bin.display()
-            )
-        })?;
-    wait_for_managed_codex_app_server(port, &mut child, stderr_path.as_path())?;
-    let pid = child.id();
-    fs::write(
-        &record_path,
-        serde_json::to_vec_pretty(&serde_json::json!({
-            "schema_version": "singulari.codex_app_server_runtime.v1",
-            "status": "running",
-            "world_id": world_id,
-            "url": url.as_str(),
-            "host": "127.0.0.1",
-            "port": port,
-            "pid": pid,
-            "codex_bin": codex_bin.display().to_string(),
-            "stdout_path": stdout_path.display().to_string(),
-            "stderr_path": stderr_path.display().to_string(),
-            "started_at": Utc::now().to_rfc3339(),
-            "owner": HOST_WORKER_CONSUMER,
-        }))?,
-    )
-    .with_context(|| format!("failed to write {}", record_path.display()))?;
-    Ok(ManagedCodexAppServer {
-        url,
-        record_path,
-        child,
-    })
-}
-
-fn codex_app_server_runtime_dir(store_root: Option<&Path>, _world_id: &str) -> Result<PathBuf> {
-    let paths = resolve_store_paths(store_root)?;
-    Ok(paths.root.join("agent_bridge"))
-}
-
-fn reserve_loopback_port() -> Result<u16> {
-    let listener =
-        TcpListener::bind(("127.0.0.1", 0)).context("failed to reserve loopback port")?;
-    Ok(listener
-        .local_addr()
-        .context("failed to read reserved loopback port")?
-        .port())
-}
-
-fn wait_for_managed_codex_app_server(
-    port: u16,
-    child: &mut Child,
-    stderr_path: &Path,
-) -> Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let addr = format!("127.0.0.1:{port}");
-    while Instant::now() < deadline {
-        if let Some(status) = child
-            .try_wait()
-            .context("failed to inspect managed codex app-server process")?
-        {
-            anyhow::bail!(
-                "managed codex app-server exited before listening: status={}, stderr_path={}",
-                status,
-                stderr_path.display()
-            );
-        }
-        if TcpStream::connect_timeout(
-            &addr
-                .parse()
-                .context("failed to parse managed app-server socket address")?,
-            Duration::from_millis(200),
-        )
-        .is_ok()
-        {
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-    let _ = child.kill();
-    let _ = child.wait();
-    anyhow::bail!(
-        "managed codex app-server did not start listening: port={}, stderr_path={}",
-        port,
-        stderr_path.display()
-    );
-}
-
-fn mark_managed_codex_app_server_stopped(record_path: &Path) {
-    let Ok(raw) = fs::read_to_string(record_path) else {
-        return;
-    };
-    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return;
-    };
-    if let Some(object) = value.as_object_mut() {
-        object.insert("status".to_owned(), serde_json::json!("stopped"));
-        object.insert(
-            "stopped_at".to_owned(),
-            serde_json::json!(Utc::now().to_rfc3339()),
-        );
-        let _ = fs::write(
-            record_path,
-            serde_json::to_vec_pretty(&value).unwrap_or_else(|_| raw.into_bytes()),
-        );
-    }
-}
-
 fn ensure_control_safe_runtime_value(field: &str, value: &str) -> Result<()> {
     if value.chars().any(char::is_control) {
         anyhow::bail!("{field} contains control characters");
@@ -2789,43 +2063,9 @@ fn webgpt_default_profile_root() -> Result<PathBuf> {
         .join("webgpt"))
 }
 
-enum AppServerDispatchOutcome {
-    Started(Box<CodexAppServerDispatchRecord>),
-    AlreadyDispatched(String),
-}
-
 enum WebGptDispatchOutcome {
     Started(Box<WebGptDispatchRecord>),
     AlreadyDispatched(String),
-}
-
-#[derive(Debug, Serialize)]
-struct CodexAppServerDispatchRecord {
-    schema_version: &'static str,
-    status: String,
-    world_id: String,
-    turn_id: String,
-    thread_id: Option<String>,
-    thread_context_mode: &'static str,
-    app_server_url: String,
-    app_server_managed: bool,
-    app_server_runtime_path: Option<String>,
-    binding_source: Option<String>,
-    binding_updated_at: Option<String>,
-    node_bin: String,
-    pid: u32,
-    record_path: String,
-    prompt_path: String,
-    response_path: String,
-    result_path: String,
-    helper_path: String,
-    stdout_path: String,
-    stderr_path: String,
-    dispatched_at: String,
-    exit_code: Option<i32>,
-    binding_clear_reason: Option<&'static str>,
-    binding_cleared_at: Option<String>,
-    completed_at: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -2860,33 +2100,6 @@ struct WebGptDispatchRecord {
 }
 
 #[derive(Debug, Serialize)]
-struct CodexAppServerImageDispatchRecord {
-    schema_version: &'static str,
-    status: String,
-    world_id: String,
-    slot: String,
-    claim_id: Option<String>,
-    app_server_url: String,
-    app_server_managed: bool,
-    app_server_runtime_path: Option<String>,
-    node_bin: String,
-    pid: u32,
-    record_path: String,
-    prompt_path: String,
-    result_path: String,
-    helper_path: String,
-    stdout_path: String,
-    stderr_path: String,
-    saved_path: Option<String>,
-    destination_path: String,
-    completion_path: Option<String>,
-    dispatched_at: String,
-    exit_code: Option<i32>,
-    error: Option<String>,
-    completed_at: String,
-}
-
-#[derive(Debug, Serialize)]
 struct WebGptImageDispatchRecord {
     schema_version: &'static str,
     status: String,
@@ -2916,199 +2129,6 @@ struct WebGptImageDispatchRecord {
     exit_code: Option<i32>,
     error: Option<String>,
     completed_at: String,
-}
-
-#[allow(
-    clippy::too_many_lines,
-    reason = "App-server dispatch keeps claim, helper execution, and durable record updates together at the process boundary"
-)]
-fn dispatch_pending_agent_turn_via_app_server(
-    store_root: Option<&Path>,
-    pending: &singulari_world::PendingAgentTurn,
-    dispatch: &CodexAppServerDispatch,
-) -> Result<AppServerDispatchOutcome> {
-    let dispatch_dir = dispatch_dir_for_pending(pending)?;
-    fs::create_dir_all(&dispatch_dir)
-        .with_context(|| format!("failed to create {}", dispatch_dir.display()))?;
-    let thread_component = dispatch
-        .thread_id
-        .as_deref()
-        .map_or_else(|| "new-thread".to_owned(), safe_file_component);
-    let record_path = dispatch_dir.join(format!(
-        "{}-appserver-{}.json",
-        pending.turn_id, thread_component
-    ));
-    if record_path.exists() {
-        if remove_stale_app_server_dispatch_record(record_path.as_path(), dispatch)? {
-            return dispatch_pending_agent_turn_via_app_server(store_root, pending, dispatch);
-        }
-        clear_stale_app_server_binding_from_existing_record(
-            store_root,
-            pending.world_id.as_str(),
-            dispatch,
-            record_path.as_path(),
-        )?;
-        return Ok(AppServerDispatchOutcome::AlreadyDispatched(
-            record_path.display().to_string(),
-        ));
-    }
-
-    let prompt_path = dispatch_dir.join(format!("{}-appserver-prompt.md", pending.turn_id));
-    let response_path =
-        dispatch_dir.join(format!("{}-appserver-agent-response.json", pending.turn_id));
-    let result_path = dispatch_dir.join(format!("{}-appserver-result.json", pending.turn_id));
-    let helper_path = dispatch_dir.join("codex_app_server_turn.mjs");
-    let stdout_path = dispatch_dir.join(format!("{}-appserver-stdout.log", pending.turn_id));
-    let stderr_path = dispatch_dir.join(format!("{}-appserver-stderr.log", pending.turn_id));
-    let prompt = build_codex_realtime_prompt(
-        store_root,
-        pending,
-        response_path.as_path(),
-        dispatch.thread_context_mode,
-    )?;
-    fs::write(&prompt_path, prompt.as_bytes())
-        .with_context(|| format!("failed to write {}", prompt_path.display()))?;
-    fs::write(&helper_path, CODEX_APP_SERVER_TURN_HELPER.as_bytes())
-        .with_context(|| format!("failed to write {}", helper_path.display()))?;
-
-    let claim = serde_json::json!({
-        "schema_version": "singulari.codex_app_server_dispatch_record.v1",
-        "status": "dispatching",
-        "world_id": pending.world_id,
-        "turn_id": pending.turn_id,
-        "thread_id": dispatch.thread_id.as_deref(),
-        "thread_context_mode": dispatch.thread_context_mode.as_str(),
-        "app_server_url": dispatch.app_server_url.as_str(),
-        "app_server_managed": dispatch.app_server_managed,
-        "app_server_runtime_path": dispatch
-            .app_server_runtime_path
-            .as_ref()
-            .map(|path| path.display().to_string()),
-        "binding_source": dispatch.binding_source.as_deref(),
-        "binding_updated_at": dispatch.binding_updated_at.as_deref(),
-        "node_bin": dispatch.node_bin.display().to_string(),
-        "prompt_path": prompt_path.display().to_string(),
-        "response_path": response_path.display().to_string(),
-        "result_path": result_path.display().to_string(),
-        "helper_path": helper_path.display().to_string(),
-        "stdout_path": stdout_path.display().to_string(),
-        "stderr_path": stderr_path.display().to_string(),
-        "dispatched_at": Utc::now().to_rfc3339(),
-    });
-    if !write_dispatch_claim(record_path.as_path(), &claim)? {
-        return Ok(AppServerDispatchOutcome::AlreadyDispatched(
-            record_path.display().to_string(),
-        ));
-    }
-
-    let stdout = File::create(&stdout_path)
-        .with_context(|| format!("failed to create {}", stdout_path.display()))?;
-    let stderr = File::create(&stderr_path)
-        .with_context(|| format!("failed to create {}", stderr_path.display()))?;
-    let cwd = std::env::current_dir().context("failed to resolve current working directory")?;
-    let mut command = Command::new(&dispatch.node_bin);
-    command
-        .arg(&helper_path)
-        .arg("--url")
-        .arg(dispatch.app_server_url.as_str())
-        .arg("--cwd")
-        .arg(cwd)
-        .arg("--prompt-path")
-        .arg(&prompt_path)
-        .arg("--result-path")
-        .arg(&result_path)
-        .arg("--thread-context-mode")
-        .arg(dispatch.thread_context_mode.as_str())
-        .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr));
-    if let Some(thread_id) = &dispatch.thread_id {
-        command.arg("--thread-id").arg(thread_id);
-    }
-    let mut child = command.spawn().with_context(|| {
-        format!(
-            "failed to spawn codex app-server dispatch helper: node={}",
-            dispatch.node_bin.display()
-        )
-    })?;
-    let pid = child.id();
-    let exit_status = child
-        .wait()
-        .context("failed to wait for codex app-server dispatch helper")?;
-    let result = read_json_value_if_present(result_path.as_path())?;
-    let result_thread_id = result
-        .as_ref()
-        .and_then(|value| value.get("thread_id"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned);
-    let result_status = app_server_result_status(result.as_ref());
-    let result_completed_without_turn_error =
-        exit_status.success() && result_status.is_none_or(|status| status != "failed");
-    if result_completed_without_turn_error
-        && let Some(thread_id) = &result_thread_id
-        && dispatch.thread_id.as_deref() != Some(thread_id.as_str())
-    {
-        save_codex_thread_binding(&SaveCodexThreadBindingOptions {
-            store_root: store_root.map(Path::to_path_buf),
-            world_id: pending.world_id.clone(),
-            thread_id: thread_id.clone(),
-            source: if dispatch.thread_id.is_some() {
-                "codex_app_server_thread_resume".to_owned()
-            } else {
-                "codex_app_server_thread_start".to_owned()
-            },
-        })?;
-    }
-    let binding_clear_reason = app_server_stale_thread_binding_reason(result.as_ref(), dispatch);
-    let binding_cleared_at = if binding_clear_reason.is_some() {
-        clear_codex_thread_binding(store_root, pending.world_id.as_str())?;
-        Some(Utc::now().to_rfc3339())
-    } else {
-        None
-    };
-    let pending_still_open = load_pending_agent_turn(store_root, pending.world_id.as_str())
-        .is_ok_and(|open| open.turn_id == pending.turn_id);
-    let status = if exit_status.success() && !pending_still_open {
-        "completed"
-    } else if exit_status.success() {
-        "failed_uncommitted"
-    } else {
-        "failed"
-    }
-    .to_owned();
-
-    let record = CodexAppServerDispatchRecord {
-        schema_version: "singulari.codex_app_server_dispatch_record.v1",
-        status,
-        world_id: pending.world_id.clone(),
-        turn_id: pending.turn_id.clone(),
-        thread_id: result_thread_id.or_else(|| dispatch.thread_id.clone()),
-        thread_context_mode: dispatch.thread_context_mode.as_str(),
-        app_server_url: dispatch.app_server_url.clone(),
-        app_server_managed: dispatch.app_server_managed,
-        app_server_runtime_path: dispatch
-            .app_server_runtime_path
-            .as_ref()
-            .map(|path| path.display().to_string()),
-        binding_source: dispatch.binding_source.clone(),
-        binding_updated_at: dispatch.binding_updated_at.clone(),
-        node_bin: dispatch.node_bin.display().to_string(),
-        pid,
-        record_path: record_path.display().to_string(),
-        prompt_path: prompt_path.display().to_string(),
-        response_path: response_path.display().to_string(),
-        result_path: result_path.display().to_string(),
-        helper_path: helper_path.display().to_string(),
-        stdout_path: stdout_path.display().to_string(),
-        stderr_path: stderr_path.display().to_string(),
-        dispatched_at: Utc::now().to_rfc3339(),
-        exit_code: exit_status.code(),
-        binding_clear_reason,
-        binding_cleared_at,
-        completed_at: Utc::now().to_rfc3339(),
-    };
-    fs::write(&record_path, serde_json::to_vec_pretty(&record)?)
-        .with_context(|| format!("failed to update {}", record_path.display()))?;
-    Ok(AppServerDispatchOutcome::Started(Box::new(record)))
 }
 
 fn dispatch_pending_agent_turn_via_webgpt(
@@ -3947,180 +2967,6 @@ fn commit_webgpt_agent_response(
 
 #[allow(
     clippy::too_many_lines,
-    reason = "Image dispatch keeps the host imageGeneration call and visual-job completion in one process-boundary record"
-)]
-fn dispatch_visual_job_via_app_server(
-    store_root: Option<&Path>,
-    claim: &singulari_world::VisualJobClaim,
-    dispatch: &CodexAppServerDispatch,
-) -> Result<CodexAppServerImageDispatchRecord> {
-    let dispatch_dir = visual_dispatch_dir_for_world(store_root, claim.world_id.as_str())?;
-    fs::create_dir_all(&dispatch_dir)
-        .with_context(|| format!("failed to create {}", dispatch_dir.display()))?;
-    let slot_component = safe_file_component(claim.slot.as_str());
-    let claim_component = safe_file_component(claim.claim_id.as_str());
-    let record_path = dispatch_dir.join(format!(
-        "{slot_component}-{claim_component}-appserver-image.json"
-    ));
-    let prompt_path = dispatch_dir.join(format!(
-        "{slot_component}-{claim_component}-image-prompt.md"
-    ));
-    let result_path = dispatch_dir.join(format!(
-        "{slot_component}-{claim_component}-image-result.json"
-    ));
-    let helper_path = dispatch_dir.join("codex_app_server_image.mjs");
-    let stdout_path = dispatch_dir.join(format!(
-        "{slot_component}-{claim_component}-image-stdout.log"
-    ));
-    let stderr_path = dispatch_dir.join(format!(
-        "{slot_component}-{claim_component}-image-stderr.log"
-    ));
-    let prompt = build_codex_app_server_image_prompt(&claim.job);
-    fs::write(&prompt_path, prompt.as_bytes())
-        .with_context(|| format!("failed to write {}", prompt_path.display()))?;
-    fs::write(&helper_path, CODEX_APP_SERVER_IMAGE_HELPER.as_bytes())
-        .with_context(|| format!("failed to write {}", helper_path.display()))?;
-
-    let dispatched_at = Utc::now().to_rfc3339();
-    let claim_record = serde_json::json!({
-        "schema_version": "singulari.codex_app_server_image_dispatch_record.v1",
-        "status": "dispatching",
-        "world_id": claim.world_id.as_str(),
-        "slot": claim.slot.as_str(),
-        "claim_id": claim.claim_id.as_str(),
-        "app_server_url": dispatch.app_server_url.as_str(),
-        "app_server_managed": dispatch.app_server_managed,
-        "app_server_runtime_path": dispatch
-            .app_server_runtime_path
-            .as_ref()
-            .map(|path| path.display().to_string()),
-        "node_bin": dispatch.node_bin.display().to_string(),
-        "prompt_path": prompt_path.display().to_string(),
-        "result_path": result_path.display().to_string(),
-        "helper_path": helper_path.display().to_string(),
-        "stdout_path": stdout_path.display().to_string(),
-        "stderr_path": stderr_path.display().to_string(),
-        "destination_path": claim.job.destination_path.as_str(),
-        "dispatched_at": dispatched_at.as_str(),
-    });
-    if !write_dispatch_claim(record_path.as_path(), &claim_record)? {
-        anyhow::bail!(
-            "codex app-server image dispatch already exists: record_path={}",
-            record_path.display()
-        );
-    }
-
-    let stdout = File::create(&stdout_path)
-        .with_context(|| format!("failed to create {}", stdout_path.display()))?;
-    let stderr = File::create(&stderr_path)
-        .with_context(|| format!("failed to create {}", stderr_path.display()))?;
-    let cwd = std::env::current_dir().context("failed to resolve current working directory")?;
-    let mut child = Command::new(&dispatch.node_bin)
-        .arg(&helper_path)
-        .arg("--url")
-        .arg(dispatch.app_server_url.as_str())
-        .arg("--cwd")
-        .arg(cwd)
-        .arg("--prompt-path")
-        .arg(&prompt_path)
-        .arg("--result-path")
-        .arg(&result_path)
-        .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr))
-        .spawn()
-        .with_context(|| {
-            format!(
-                "failed to spawn codex app-server image helper: node={}",
-                dispatch.node_bin.display()
-            )
-        })?;
-    let pid = child.id();
-    let exit_status = child
-        .wait()
-        .context("failed to wait for codex app-server image helper")?;
-    let result = read_json_value_if_present(result_path.as_path())?;
-    let saved_path = app_server_image_saved_path(result.as_ref());
-    let mut destination_path = claim.job.destination_path.clone();
-    let mut completion_path = None;
-    let mut error = if exit_status.success() {
-        None
-    } else {
-        Some(app_server_image_error_message(
-            result.as_ref(),
-            format!("image helper exited with status {exit_status}"),
-        ))
-    };
-
-    if error.is_none() {
-        match saved_path.as_ref() {
-            Some(path) => match complete_visual_job(&CompleteVisualJobOptions {
-                store_root: store_root.map(Path::to_path_buf),
-                world_id: claim.world_id.clone(),
-                slot: claim.slot.clone(),
-                claim_id: Some(claim.claim_id.clone()),
-                generated_path: Some(path.clone()),
-            }) {
-                Ok(completion) => {
-                    destination_path = completion.destination_path;
-                    completion_path = Some(completion.completion_path);
-                }
-                Err(complete_error) => {
-                    error = Some(complete_error.to_string());
-                }
-            },
-            None => {
-                error = Some(app_server_image_error_message(
-                    result.as_ref(),
-                    "image generation completed without savedPath".to_owned(),
-                ));
-            }
-        }
-    }
-
-    let status = if error.is_none() {
-        "completed"
-    } else {
-        "failed"
-    }
-    .to_owned();
-    let record = CodexAppServerImageDispatchRecord {
-        schema_version: "singulari.codex_app_server_image_dispatch_record.v1",
-        status,
-        world_id: claim.world_id.clone(),
-        slot: claim.slot.clone(),
-        claim_id: Some(claim.claim_id.clone()),
-        app_server_url: dispatch.app_server_url.clone(),
-        app_server_managed: dispatch.app_server_managed,
-        app_server_runtime_path: dispatch
-            .app_server_runtime_path
-            .as_ref()
-            .map(|path| path.display().to_string()),
-        node_bin: dispatch.node_bin.display().to_string(),
-        pid,
-        record_path: record_path.display().to_string(),
-        prompt_path: prompt_path.display().to_string(),
-        result_path: result_path.display().to_string(),
-        helper_path: helper_path.display().to_string(),
-        stdout_path: stdout_path.display().to_string(),
-        stderr_path: stderr_path.display().to_string(),
-        saved_path: saved_path.map(|path| path.display().to_string()),
-        destination_path,
-        completion_path,
-        dispatched_at,
-        exit_code: exit_status.code(),
-        error,
-        completed_at: Utc::now().to_rfc3339(),
-    };
-    fs::write(&record_path, serde_json::to_vec_pretty(&record)?)
-        .with_context(|| format!("failed to update {}", record_path.display()))?;
-    if let Some(error) = &record.error {
-        anyhow::bail!("{error}");
-    }
-    Ok(record)
-}
-
-#[allow(
-    clippy::too_many_lines,
     reason = "WebGPT image dispatch keeps MCP image generation, extraction, and visual-job completion in one durable record"
 )]
 fn dispatch_visual_job_via_webgpt(
@@ -4494,146 +3340,6 @@ fn visual_dispatch_dir_for_world(store_root: Option<&Path>, world_id: &str) -> R
         .join("dispatches"))
 }
 
-fn build_codex_app_server_image_prompt(job: &ImageGenerationJob) -> String {
-    if job.reference_paths.is_empty() {
-        return job.prompt.clone();
-    }
-    format!(
-        "{}\n\nReference continuity notes: {}",
-        job.prompt,
-        job.reference_paths.join(", ")
-    )
-}
-
-fn app_server_image_saved_path(result: Option<&serde_json::Value>) -> Option<PathBuf> {
-    result
-        .and_then(|value| value.get("saved_path"))
-        .and_then(serde_json::Value::as_str)
-        .map(PathBuf::from)
-}
-
-fn app_server_image_error_message(
-    result: Option<&serde_json::Value>,
-    default_message: String,
-) -> String {
-    result
-        .and_then(|value| value.get("error"))
-        .and_then(serde_json::Value::as_str)
-        .map_or(default_message, str::to_owned)
-}
-
-fn clear_stale_app_server_binding_from_existing_record(
-    store_root: Option<&Path>,
-    world_id: &str,
-    dispatch: &CodexAppServerDispatch,
-    record_path: &Path,
-) -> Result<()> {
-    let Some(thread_id) = &dispatch.thread_id else {
-        return Ok(());
-    };
-    let Some(record) = read_json_value_if_present(record_path)? else {
-        return Ok(());
-    };
-    let result_path = record
-        .get("result_path")
-        .and_then(serde_json::Value::as_str)
-        .map(PathBuf::from);
-    let result = match result_path {
-        Some(path) => read_json_value_if_present(path.as_path())?,
-        None => None,
-    };
-    if app_server_stale_thread_binding_reason(result.as_ref(), dispatch).is_some() {
-        let current = load_codex_thread_binding(store_root, world_id)?;
-        if current.as_ref().map(|binding| binding.thread_id.as_str()) == Some(thread_id.as_str()) {
-            clear_codex_thread_binding(store_root, world_id)?;
-        }
-    }
-    Ok(())
-}
-
-fn remove_stale_app_server_dispatch_record(
-    record_path: &Path,
-    dispatch: &CodexAppServerDispatch,
-) -> Result<bool> {
-    let Some(record) = read_json_value_if_present(record_path)? else {
-        return Ok(false);
-    };
-    if record.get("status").and_then(serde_json::Value::as_str) != Some("dispatching") {
-        return Ok(false);
-    }
-    let existing_url = record
-        .get("app_server_url")
-        .and_then(serde_json::Value::as_str);
-    if existing_url == Some(dispatch.app_server_url.as_str()) {
-        return Ok(false);
-    }
-    fs::remove_file(record_path)
-        .with_context(|| format!("failed to remove stale {}", record_path.display()))?;
-    Ok(true)
-}
-
-fn app_server_stale_thread_binding_reason(
-    result: Option<&serde_json::Value>,
-    dispatch: &CodexAppServerDispatch,
-) -> Option<&'static str> {
-    dispatch.thread_id.as_ref()?;
-    let result = result?;
-    if app_server_result_status(Some(result)) != Some("failed") {
-        return None;
-    }
-    let failure_stage = result
-        .get("failure_stage")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    let error_text = app_server_result_error_text(result);
-    if app_server_error_is_auth_failure(error_text.as_str()) {
-        return None;
-    }
-    if failure_stage == "thread_resume" {
-        return Some("thread_resume_failed");
-    }
-    if app_server_error_mentions_missing_thread(error_text.as_str()) {
-        return Some("thread_not_found");
-    }
-    None
-}
-
-fn app_server_result_status(result: Option<&serde_json::Value>) -> Option<&str> {
-    result
-        .and_then(|value| value.get("status"))
-        .and_then(serde_json::Value::as_str)
-}
-
-fn app_server_result_error_text(result: &serde_json::Value) -> String {
-    let mut fragments = Vec::new();
-    if let Some(error) = result.get("error") {
-        fragments.push(error.to_string());
-    }
-    if let Some(error) = result.get("turn_error") {
-        fragments.push(error.to_string());
-    }
-    if let Some(errors) = result.get("server_errors") {
-        fragments.push(errors.to_string());
-    }
-    fragments.join("\n").to_ascii_lowercase()
-}
-
-fn app_server_error_is_auth_failure(error_text: &str) -> bool {
-    error_text.contains("unauthorized")
-        || error_text.contains("access token")
-        || error_text.contains("sign in")
-        || error_text.contains("authentication")
-}
-
-fn app_server_error_mentions_missing_thread(error_text: &str) -> bool {
-    error_text.contains("thread_not_found")
-        || error_text.contains("thread not found")
-        || error_text.contains("not found")
-        || error_text.contains("no such thread")
-        || error_text.contains("unknown thread")
-        || error_text.contains("invalid thread")
-}
-
 fn read_json_value_if_present(path: &Path) -> Result<Option<serde_json::Value>> {
     if !path.exists() {
         return Ok(None);
@@ -4700,6 +3406,7 @@ const AGENT_TURN_RESPONSE_SCHEMA_GUIDE: &str = r#"AgentTurnResponse 스키마:
   },
   "entity_updates": [],
   "relationship_updates": [],
+  "extra_contacts": [],
   "hidden_state_delta": [],
   "next_choices": [
     {"slot":1,"tag":"현재 장면에 맞춘 짧은 선택명","intent":"현재 장면 단서와 player_input에서 이어지는 구체 행동"},
@@ -4715,55 +3422,15 @@ const AGENT_TURN_RESPONSE_SCHEMA_GUIDE: &str = r#"AgentTurnResponse 스키마:
 - next_choices는 서사 생성과 같은 응답에서 반드시 함께 작성한다. 별도 선택지 재생성 턴을 만들지 않는다.
 - slot 1,2,3,4,5의 tag/intent는 템플릿 문구가 아니라 이번 visible_scene에서 바로 이어지는 구체 선택지여야 한다.
 - next_choices 안에는 label/preview/choices 필드를 쓰지 않는다. 오직 slot/tag/intent만 쓴다.
-- slot 번호가 기능 계약이다. tag는 UI 문구이므로 장면에 맞게 짧게 바꿔도 된다. 단 slot 7 tag는 "판단 위임"으로 유지한다."#;
+- slot 번호가 기능 계약이다. tag는 UI 문구이므로 장면에 맞게 짧게 바꿔도 된다. 단 slot 7 tag는 "판단 위임"으로 유지한다.
+- extra_contacts는 주변 인물이 플레이어와 직접 상호작용했거나, 의미 있는 목격/거래/도움/위협/감정 흔적을 남겼을 때만 쓴다.
+- extra_contacts 항목을 쓸 때는 surface_label, contact_summary를 반드시 실제 장면 내용으로 채운다. 스키마 설명 문구나 예시 문구를 값으로 복사하지 않는다.
+- 단순 배경 군중은 extra_contacts에 넣지 않는다. 한 번 스쳐간 인물은 memory_action "trace", 다시 떠올릴 이유가 분명하면 "remember"를 쓴다."#;
 
-fn build_codex_realtime_prompt(
-    store_root: Option<&Path>,
-    pending: &singulari_world::PendingAgentTurn,
-    response_path: &Path,
-    thread_context_mode: CodexThreadContextMode,
-) -> Result<String> {
-    let binary = current_binary_for_prompt()?;
-    let store_args = store_root
-        .map(|path| {
-            let normalized = normalize_prompt_path(path);
-            format!(
-                " --store-root {}",
-                shell_quote(normalized.display().to_string().as_str())
-            )
-        })
-        .unwrap_or_default();
-    let world_arg = shell_quote(pending.world_id.as_str());
-    let response_arg = shell_quote(response_path.display().to_string().as_str());
-    let binary_arg = shell_quote(binary.display().to_string().as_str());
-    let commit_command = format!(
-        "{binary_arg}{store_args} agent-commit --world-id {world_arg} --response {response_arg} --json"
-    );
-    let narrative_budget = &pending.output_contract.narrative_budget;
-    let narrative_directive = format!(
-        "이번 턴 서사 목표: {}. 기본 선택 턴이면 {}문단 / 약 {}자까지 충분히 써라. 큰 사건이면 {}문단 / 약 {}자까지 확장해라. 짧게 요약하지 말고 장면, 감각, 행동, 반응, 여운을 각각 분리해서 쌓아라.",
-        narrative_budget.level_label,
-        narrative_budget.standard_choice_turn_blocks,
-        narrative_budget.target_chars,
-        narrative_budget.major_turn_blocks,
-        narrative_budget.major_target_chars,
-    );
-    let prompt = match thread_context_mode {
-        CodexThreadContextMode::NativeThread => build_native_thread_realtime_prompt(
-            pending,
-            response_path,
-            commit_command.as_str(),
-            narrative_directive.as_str(),
-        )?,
-        CodexThreadContextMode::BoundedPacket => build_bounded_packet_realtime_prompt(
-            pending,
-            response_path,
-            commit_command.as_str(),
-            narrative_directive.as_str(),
-        )?,
-    };
-    Ok(prompt)
-}
+const NARRATIVE_TEXT_DESIGN_DIRECTIVE: &str = r"- 캐릭터 voice_anchors는 캐릭터 텍스트 디자인이다. speech는 화법, endings는 어미/말끝, tone은 어투/거리감/어휘, gestures는 반복 제스처, habits는 행동 습관, drift는 변화 방향으로 적용한다.
+- 문체와 서사 작법은 캐릭터에 귀속하지 말고 visible_scene의 전역 서사에만 적용한다. 기본 문체는 감각 단서 -> 행동/반응 -> 유보된 추론 -> 선택 압박 -> 여운 순서로 문단을 쌓는 VN prose다.
+- 문체를 설명문으로 노출하지 마라. 대사 말끝, 행동 습관, 문단 박자, 장면 압력으로만 체감되게 써라.
+- tone_notes에는 이번 턴에서 실제로 반영한 캐릭터 화법/어미/어투와 전역 서사 문체를 짧게 기록한다.";
 
 const AGENT_REVIVAL_PACKET_SCHEMA_VERSION: &str = "singulari.agent_revival_packet.v1";
 const WEBGPT_REVIVAL_RECENT_EVENTS: usize = 24;
@@ -4830,7 +3497,7 @@ fn build_agent_revival_packet(
         "engine_session_kind": engine_session_kind,
         "retrieval_profile": {
             "name": "webgpt_active_memory",
-            "purpose": "WebGPT has less transparent context-window and compaction behavior than Codex App, so host-worker proactively surfaces more player-visible continuity from world.db before each turn.",
+            "purpose": "WebGPT context-window and compaction behavior are not the world source of truth, so host-worker proactively surfaces more player-visible continuity from world.db before each turn.",
             "recent_events": WEBGPT_REVIVAL_RECENT_EVENTS,
             "recent_character_memories": WEBGPT_REVIVAL_RECENT_MEMORIES,
             "chapter_summaries": WEBGPT_REVIVAL_CHAPTER_LIMIT,
@@ -4853,6 +3520,7 @@ fn build_agent_revival_packet(
             "recent_scene_window": pending.visible_context.recent_scene,
             "known_facts": pending.visible_context.known_facts,
             "voice_anchors": pending.visible_context.voice_anchors,
+            "extra_memory": pending.visible_context.extra_memory,
             "active_memory_revival": {
                 "player_visible_archive_view": archive_view,
                 "query_recall": {
@@ -4897,6 +3565,7 @@ fn build_webgpt_turn_prompt(
 - 플레이어에게 다시 묻지 말고, 아래 revival packet만 보고 바로 서사 턴을 작성한다.
 - hidden/private context는 판정에만 쓰고, visible_scene/canon_event/choice text에는 절대 누출하지 않는다.
 - 출력 서사는 한국어 VN prose다. 대화, 제스처, 말버릇을 살리고, 게임식 수치 계산처럼 보이게 쓰지 않는다.
+{text_design_directive}
 - 출력량은 revival packet의 output_contract.narrative_level과 narrative_budget을 따른다. 레벨 간 차이는 확연해야 한다.
 - 레벨 1은 표준 VN 밀도, 레벨 2는 장면 확장 밀도, 레벨 3은 장편 연재 밀도다. 레벨 2/3에서는 같은 사건도 감각, 행동, 반응, 여운, 압박을 더 길게 쌓는다.
 - player_input이 "세계 개막"이면 그것은 선택지가 아니라 시드에서 첫 서사를 여는 bootstrap turn이다.
@@ -4930,203 +3599,12 @@ revival packet JSON:
         target_chars = narrative_budget.target_chars,
         major_blocks = narrative_budget.major_turn_blocks,
         major_target_chars = narrative_budget.major_target_chars,
+        text_design_directive = NARRATIVE_TEXT_DESIGN_DIRECTIVE,
         agent_schema = AGENT_TURN_RESPONSE_SCHEMA_GUIDE,
         revival_packet = revival_packet,
         world_id = pending.world_id,
         turn_id = pending.turn_id,
     ))
-}
-
-fn build_bounded_packet_realtime_prompt(
-    pending: &singulari_world::PendingAgentTurn,
-    response_path: &Path,
-    commit_command: &str,
-    narrative_directive: &str,
-) -> Result<String> {
-    let pending_packet = serde_json::to_string_pretty(pending)
-        .context("failed to serialize pending turn for realtime prompt")?;
-    Ok(format!(
-        r#"Singulari World realtime event가 들어왔어. 이 턴 하나만 처리하고 멈춰.
-
-서사 출력 지시:
-- {narrative_directive}
-- text_blocks는 한 항목을 너무 길게 뭉치지 말고, 장면 박자마다 별도 문단으로 나눠라.
-- commit validator가 길이 부족을 reject하지 않으니, 처음 작성할 때 목표량을 스스로 채워라.
-
-역할:
-- 너는 Singulari World의 trusted narrative agent다.
-- 플레이어에게 다시 묻지 말고, 아래 pending turn JSON만 보고 바로 서사 턴을 작성한다.
-- hidden/private context는 판정에만 쓰고, visible_scene/canon_event/choice text에는 절대 누출하지 않는다.
-- 출력 서사는 한국어 VN prose다. 대화, 제스처, 말버릇을 살리고, 게임식 수치 계산처럼 보이게 쓰지 않는다.
-- 출력량은 pending turn JSON의 output_contract.narrative_level과 narrative_budget을 따른다. 레벨 간 차이는 확연해야 한다.
-- 레벨 1은 표준 VN 밀도, 레벨 2는 장면 확장 밀도, 레벨 3은 장편 연재 밀도다. 레벨 2/3에서는 같은 사건도 감각, 행동, 반응, 여운, 압박을 더 길게 쌓는다.
-- player_input이 "세계 개막"이면 그것은 선택지가 아니라 시드에서 첫 서사를 여는 bootstrap turn이다. 첫 장소, 첫 감각, 첫 사건의 hook을 visible_scene에 바로 작성한다.
-- 시드나 visible facts에 명시되지 않은 장르 문법을 추론해서 주입하지 마라. 특히 현대인 전생, 환생, 빙의, 회귀, 이세계 전이, 시스템/치트/상태창은 seed premise나 player-visible canon에 명시된 경우에만 쓴다.
-- 매 턴 survival/social/material/threat/mystery/desire/moral_cost/time_pressure 중 최소 하나의 장면 압력을 visible_scene과 next_choices에 반영한다. 편향을 지우더라도 무미건조한 로그로 쓰지 마라.
-- `anchor_character` 저장 필드는 호환용이다. 시드나 visible canon이 명시하지 않으면 숨은 인물, 운명적 안내자, 히로인, 흑막으로 해석하지 마라. 극점은 인물/장소/물건/세력/맹세/위협/질문 중 visible evidence가 만든다.
-- 이 Codex thread의 이전 대화 맥락은 말맛과 리듬을 위한 working context다. 세계의 사실/상태/source of truth는 아래 pending turn JSON과 world store다.
-- thread context가 compact 되었거나 pending packet과 충돌하면 pending packet을 우선한다.
-- slot 7은 항상 판단 위임이고 preview는 숨긴다: "맡긴다. 세부 내용은 선택 후 드러난다."
-- slot 6은 항상 자유서술이며 inline prose를 요구하는 선택지로 둔다.
-- 소스 파일을 읽거나 repo를 탐색하지 마라. 필요한 스키마와 pending packet은 이 프롬프트 안에 있다.
-- 허용된 외부 명령은 마지막 commit 명령뿐이다. commit이 next_choices 스키마 에러를 내면 visible_scene을 다시 쓰지 말고 기존 JSON의 next_choices만 고쳐 한 번 더 commit한다.
-
-{agent_schema}
-
-pending turn JSON:
-```json
-{pending_packet}
-```
-
-절차:
-1. AgentTurnResponse JSON을 작성해서 아래 경로에 저장해라.
-   {response_path}
-2. 저장한 JSON을 commit해라.
-   {commit_command}
-3. 최종 답변은 짧은 한국어 상태 한 줄만 남겨라. AgentTurnResponse JSON 본문을 채팅에 붙이지 마라.
-
-고정값:
-- world_id: {world_id}
-- turn_id: {turn_id}
-- player_input: {player_input}
-"#,
-        narrative_directive = narrative_directive,
-        agent_schema = AGENT_TURN_RESPONSE_SCHEMA_GUIDE,
-        pending_packet = pending_packet,
-        response_path = response_path.display(),
-        commit_command = commit_command,
-        world_id = pending.world_id,
-        turn_id = pending.turn_id,
-        player_input = pending.player_input,
-    ))
-}
-
-fn build_native_thread_realtime_prompt(
-    pending: &singulari_world::PendingAgentTurn,
-    response_path: &Path,
-    commit_command: &str,
-    narrative_directive: &str,
-) -> Result<String> {
-    let authoritative_packet =
-        serde_json::to_string_pretty(&native_thread_authoritative_packet(pending))
-            .context("failed to serialize native-thread authoritative packet")?;
-    Ok(format!(
-        r#"Singulari World realtime event가 들어왔어. 이 턴 하나만 처리하고 멈춰.
-
-서사 출력 지시:
-- {narrative_directive}
-- text_blocks는 장면 박자마다 별도 문단으로 나눠라.
-- 이 Codex App thread의 이전 turn들은 말맛, 직전 감정선, 장면 리듬을 잇는 working context다.
-- 아래 authoritative packet은 세계 상태/source of truth다. thread 기억과 충돌하면 packet을 우선한다.
-
-역할:
-- 너는 Singulari World의 trusted narrative agent다.
-- 플레이어에게 다시 묻지 말고 바로 서사 턴을 작성한다.
-- hidden/private context는 판정에만 쓰고, visible_scene/canon_event/choice text에는 절대 누출하지 않는다.
-- 출력 서사는 한국어 VN prose다. 대화, 제스처, 말버릇을 살리고, 게임식 수치 계산처럼 보이게 쓰지 않는다.
-- player_input이 "세계 개막"이면 첫 장소, 첫 감각, 첫 사건의 hook을 visible_scene에 바로 작성한다.
-- 시드나 visible facts에 명시되지 않은 장르 문법을 추론해서 주입하지 마라. 특히 현대인 전생, 환생, 빙의, 회귀, 이세계 전이, 시스템/치트/상태창은 seed premise나 player-visible canon에 명시된 경우에만 쓴다.
-- 매 턴 survival/social/material/threat/mystery/desire/moral_cost/time_pressure 중 최소 하나의 장면 압력을 visible_scene과 next_choices에 반영한다. 편향을 지우더라도 무미건조한 로그로 쓰지 마라.
-- `anchor_character` 저장 필드는 호환용이다. 시드나 visible canon이 명시하지 않으면 숨은 인물, 운명적 안내자, 히로인, 흑막으로 해석하지 마라. 극점은 인물/장소/물건/세력/맹세/위협/질문 중 visible evidence가 만든다.
-- slot 7은 항상 판단 위임이고 preview는 숨긴다: "맡긴다. 세부 내용은 선택 후 드러난다."
-- slot 6은 항상 자유서술이며 inline prose를 요구하는 선택지로 둔다.
-- 소스 파일을 읽거나 repo를 탐색하지 마라. 필요한 상태와 응답 계약은 이 프롬프트 안에 있다.
-- 허용된 외부 명령은 마지막 commit 명령뿐이다. commit이 next_choices 스키마 에러를 내면 visible_scene을 다시 쓰지 말고 기존 JSON의 next_choices만 고쳐 한 번 더 commit한다.
-
-응답 JSON 계약:
-- schema_version은 "singulari.agent_turn_response.v1"이다.
-- world_id와 turn_id는 아래 고정값과 정확히 같아야 한다.
-- visible_scene은 NarrativeScene이며, text_blocks를 포함한다.
-- next_choices는 반드시 1..7 슬롯을 모두 포함한다. 이 필드가 비면 commit이 실패한다.
-- next_choices의 1,2,3,4,5번은 현재 장면 단서와 player_input에 맞춰 새로 써라. 템플릿 기본 선택지를 그대로 쓰면 commit이 실패한다.
-- next_choices는 visible_scene과 같은 응답에서 함께 만든다. 별도 선택지 생성 턴을 기다리지 않는다.
-- visible_scene 안에 choices를 넣지 말고, top-level next_choices에 slot/tag/intent만 넣는다. label/preview 필드는 commit 스키마가 아니다.
-- slot 6은 자유서술 안내이고, slot 7은 "판단 위임"과 숨김 문구다.
-- hidden_truth는 visible_scene, canon_event, next_choices, final chat text에 쓰지 않는다.
-- adjudication, canon_event, entity_updates, relationship_updates는 필요한 경우에만 넣는다.
-- 최종 채팅 답변에는 JSON 본문을 붙이지 않는다.
-
-authoritative packet:
-```json
-{authoritative_packet}
-```
-
-절차:
-1. AgentTurnResponse JSON을 작성해서 아래 경로에 저장해라.
-   {response_path}
-2. 저장한 JSON을 commit해라.
-   {commit_command}
-3. 최종 답변은 짧은 한국어 상태 한 줄만 남겨라.
-
-고정값:
-- world_id: {world_id}
-- turn_id: {turn_id}
-- player_input: {player_input}
-"#,
-        narrative_directive = narrative_directive,
-        authoritative_packet = authoritative_packet,
-        response_path = response_path.display(),
-        commit_command = commit_command,
-        world_id = pending.world_id,
-        turn_id = pending.turn_id,
-        player_input = pending.player_input,
-    ))
-}
-
-fn native_thread_authoritative_packet(
-    pending: &singulari_world::PendingAgentTurn,
-) -> serde_json::Value {
-    serde_json::json!({
-        "schema_version": pending.schema_version,
-        "world_id": pending.world_id,
-        "turn_id": pending.turn_id,
-        "status": pending.status,
-        "player_input": pending.player_input,
-        "selected_choice": pending.selected_choice,
-        "visible_context": {
-            "location": pending.visible_context.location,
-            "recent_scene_hint": compact_recent_scene_hint(&pending.visible_context.recent_scene),
-            "known_facts": pending.visible_context.known_facts,
-            "voice_anchors": pending.visible_context.voice_anchors,
-        },
-        "private_adjudication_context": pending.private_adjudication_context,
-        "output_contract": pending.output_contract,
-        "pending_ref": pending.pending_ref,
-        "thread_context_policy": {
-            "mode": "native_thread",
-            "use_thread_history_for": ["prose rhythm", "immediate emotional continuity", "recent dialogue cadence"],
-            "use_authoritative_packet_for": ["world facts", "current player input", "hidden adjudication", "output contract"],
-            "conflict_rule": "authoritative_packet_wins"
-        }
-    })
-}
-
-fn compact_recent_scene_hint(recent_scene: &[String]) -> Vec<String> {
-    const MAX_HINT_BLOCKS: usize = 2;
-    const MAX_HINT_CHARS_PER_BLOCK: usize = 1200;
-    recent_scene
-        .iter()
-        .rev()
-        .take(MAX_HINT_BLOCKS)
-        .map(|block| truncate_for_prompt_hint(block, MAX_HINT_CHARS_PER_BLOCK))
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect()
-}
-
-fn truncate_for_prompt_hint(value: &str, max_chars: usize) -> String {
-    let mut chars = value.chars();
-    let truncated: String = chars.by_ref().take(max_chars).collect();
-    if chars.next().is_some() {
-        format!("{truncated} ...")
-    } else {
-        truncated
-    }
-}
-
-fn current_binary_for_prompt() -> Result<PathBuf> {
-    std::env::current_exe().context("failed to resolve current singulari-world binary")
 }
 
 fn normalize_prompt_path(path: &Path) -> PathBuf {
@@ -5144,18 +3622,6 @@ fn safe_file_component(value: &str) -> String {
             }
         })
         .collect()
-}
-
-fn shell_quote(value: &str) -> String {
-    if !value.is_empty()
-        && value
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '-' | '_' | ':'))
-    {
-        value.to_owned()
-    } else {
-        format!("'{}'", value.replace('\'', r"'\''"))
-    }
 }
 
 fn handle_export_world(
@@ -5235,75 +3701,6 @@ fn handle_resume_pack(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn app_server_dispatch(thread_id: Option<&str>) -> CodexAppServerDispatch {
-        CodexAppServerDispatch {
-            app_server_url: "ws://127.0.0.1:48713".to_owned(),
-            thread_id: thread_id.map(str::to_owned),
-            thread_context_mode: CodexThreadContextMode::NativeThread,
-            node_bin: PathBuf::from("node"),
-            binding_source: Some("test".to_owned()),
-            binding_updated_at: Some("2026-04-28T00:00:00Z".to_owned()),
-            app_server_managed: false,
-            app_server_runtime_path: None,
-        }
-    }
-
-    #[test]
-    fn app_server_resume_failure_marks_bound_thread_stale() {
-        let result = serde_json::json!({
-            "status": "failed",
-            "failure_stage": "thread_resume",
-            "error": "thread not found"
-        });
-        assert_eq!(
-            app_server_stale_thread_binding_reason(
-                Some(&result),
-                &app_server_dispatch(Some("thread-old"))
-            ),
-            Some("thread_resume_failed")
-        );
-    }
-
-    #[test]
-    fn app_server_auth_failure_keeps_thread_binding() {
-        let result = serde_json::json!({
-            "status": "failed",
-            "failure_stage": "thread_resume",
-            "error": "unauthorized: access token could not be refreshed"
-        });
-        assert_eq!(
-            app_server_stale_thread_binding_reason(
-                Some(&result),
-                &app_server_dispatch(Some("thread-old"))
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn app_server_new_thread_failure_has_no_binding_to_clear() {
-        let result = serde_json::json!({
-            "status": "failed",
-            "failure_stage": "thread_start",
-            "error": "thread not found"
-        });
-        assert_eq!(
-            app_server_stale_thread_binding_reason(Some(&result), &app_server_dispatch(None)),
-            None
-        );
-    }
-
-    #[test]
-    fn native_thread_recent_scene_hint_is_bounded_to_latest_two_blocks() {
-        let recent_scene = vec!["old".to_owned(), "middle".to_owned(), "가".repeat(1300)];
-        let hint = compact_recent_scene_hint(&recent_scene);
-
-        assert_eq!(hint.len(), 2);
-        assert_eq!(hint[0], "middle");
-        assert!(hint[1].chars().count() < recent_scene[2].chars().count());
-        assert!(hint[1].ends_with(" ..."));
-    }
 
     #[test]
     fn webgpt_answer_json_extractor_accepts_fenced_response() -> anyhow::Result<()> {
@@ -5441,13 +3838,8 @@ mod tests {
         let options = HostWorkerOptions {
             interval_ms: 750,
             once: true,
-            codex_thread_id: None,
             text_backend: HostWorkerTextBackend::Webgpt,
             visual_backend: HostWorkerVisualBackend::Webgpt,
-            codex_bin: None,
-            codex_app_server_url: None,
-            codex_thread_context_mode: CodexThreadContextMode::NativeThread,
-            node_bin: None,
             webgpt_turn_command: None,
             webgpt_mcp_wrapper: None,
             webgpt_model: None,
@@ -5475,13 +3867,8 @@ mod tests {
         let options = HostWorkerOptions {
             interval_ms: 750,
             once: true,
-            codex_thread_id: None,
             text_backend: HostWorkerTextBackend::Webgpt,
             visual_backend: HostWorkerVisualBackend::Webgpt,
-            codex_bin: None,
-            codex_app_server_url: None,
-            codex_thread_context_mode: CodexThreadContextMode::NativeThread,
-            node_bin: None,
             webgpt_turn_command: None,
             webgpt_mcp_wrapper: None,
             webgpt_model: None,
@@ -5503,8 +3890,8 @@ mod tests {
     #[test]
     fn webgpt_turn_cg_prompt_reuses_turn_cg_session_url() {
         let job = ImageGenerationJob {
-            tool: "codex_app.image.generate".to_owned(),
-            codex_app_call: singulari_world::CodexAppImageGenerationCall {
+            tool: singulari_world::IMAGE_GENERATION_TOOL.to_owned(),
+            image_generation_call: singulari_world::HostImageGenerationCall {
                 capability: "image_generation".to_owned(),
                 slot: "turn_cg:turn_0002".to_owned(),
                 prompt: "draw the scene".to_owned(),
@@ -5538,8 +3925,8 @@ mod tests {
     #[test]
     fn webgpt_reference_asset_prompt_is_not_a_scene_cg_prompt() {
         let job = ImageGenerationJob {
-            tool: "codex_app.image.generate".to_owned(),
-            codex_app_call: singulari_world::CodexAppImageGenerationCall {
+            tool: singulari_world::IMAGE_GENERATION_TOOL.to_owned(),
+            image_generation_call: singulari_world::HostImageGenerationCall {
                 capability: "image_generation".to_owned(),
                 slot: "character_sheet:char:protagonist".to_owned(),
                 prompt: "draw the character sheet".to_owned(),
@@ -5576,8 +3963,8 @@ mod tests {
         let reference = temp.path().join("char.png");
         std::fs::write(&reference, b"png fixture")?;
         let job = ImageGenerationJob {
-            tool: "codex_app.image.generate".to_owned(),
-            codex_app_call: singulari_world::CodexAppImageGenerationCall {
+            tool: singulari_world::IMAGE_GENERATION_TOOL.to_owned(),
+            image_generation_call: singulari_world::HostImageGenerationCall {
                 capability: "image_generation".to_owned(),
                 slot: "turn_cg:turn_0002".to_owned(),
                 prompt: "draw the scene".to_owned(),
@@ -5604,8 +3991,8 @@ mod tests {
     #[test]
     fn webgpt_image_reference_paths_fail_loud_when_asset_is_missing() -> anyhow::Result<()> {
         let job = ImageGenerationJob {
-            tool: "codex_app.image.generate".to_owned(),
-            codex_app_call: singulari_world::CodexAppImageGenerationCall {
+            tool: singulari_world::IMAGE_GENERATION_TOOL.to_owned(),
+            image_generation_call: singulari_world::HostImageGenerationCall {
                 capability: "image_generation".to_owned(),
                 slot: "turn_cg:turn_0002".to_owned(),
                 prompt: "draw the scene".to_owned(),
@@ -5665,6 +4052,8 @@ premise:
         for required in [
             "너는 Singulari World의 trusted narrative agent다.",
             "출력 서사는 한국어 VN prose다. 대화, 제스처, 말버릇을 살리고",
+            "speech는 화법, endings는 어미/말끝, tone은 어투/거리감/어휘",
+            "문체와 서사 작법은 캐릭터에 귀속하지 말고 visible_scene의 전역 서사에만 적용한다.",
             "레벨 1은 표준 VN 밀도, 레벨 2는 장면 확장 밀도, 레벨 3은 장편 연재 밀도다.",
             "시드나 visible facts에 명시되지 않은 장르 문법을 추론해서 주입하지 마라.",
             "현대인 전생, 환생, 빙의, 회귀, 이세계 전이, 시스템/치트/상태창은 seed premise나 player-visible canon에 명시된 경우에만 쓴다.",
