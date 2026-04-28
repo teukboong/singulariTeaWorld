@@ -1301,7 +1301,7 @@ select {
 .runtime-status-panel {
   display: grid;
   gap: 8px;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .runtime-status-pill,
@@ -1337,6 +1337,14 @@ select {
 
 .runtime-status-pill[data-status="standby"] {
   border-color: color-mix(in srgb, #b6bccd 42%, var(--line-soft));
+}
+
+.runtime-status-pill[data-status="idle"] {
+  border-color: color-mix(in srgb, #b6bccd 42%, var(--line-soft));
+}
+
+.runtime-status-pill[data-status="blocked"] {
+  border-color: color-mix(in srgb, #f1b5b5 44%, var(--line-soft));
 }
 
 .runtime-status-pill span,
@@ -1375,6 +1383,90 @@ select {
   border: 1px solid var(--line-soft);
   background: rgba(7, 8, 10, 0.42);
   padding: 8px;
+}
+
+.host-supervisor-panel {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 8px;
+  border: 1px solid var(--line-soft);
+  background: rgba(7, 8, 10, 0.36);
+  padding: 8px;
+}
+
+.host-supervisor-title,
+.host-supervisor-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.host-supervisor-title strong,
+.host-supervisor-row-head strong {
+  color: var(--paper-strong);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0;
+}
+
+.host-supervisor-title span,
+.host-supervisor-row-head span {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  letter-spacing: 0;
+  overflow-wrap: anywhere;
+}
+
+.host-supervisor-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.host-supervisor-row {
+  display: grid;
+  gap: 5px;
+  border-left: 2px solid var(--line-soft);
+  padding: 6px 8px;
+  background: rgba(238, 238, 238, 0.03);
+}
+
+.host-supervisor-row[data-status="ready"] {
+  border-left-color: color-mix(in srgb, var(--world-accent) 62%, var(--line-soft));
+}
+
+.host-supervisor-row[data-status="idle"] {
+  border-left-color: color-mix(in srgb, #b6bccd 54%, var(--line-soft));
+}
+
+.host-supervisor-row[data-status="blocked"] {
+  border-left-color: color-mix(in srgb, #f1b5b5 68%, var(--line-soft));
+}
+
+.host-supervisor-row p,
+.host-supervisor-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.host-supervisor-jobs {
+  display: grid;
+  gap: 3px;
+  margin: 0;
+  padding-left: 15px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  line-height: 1.35;
+}
+
+.host-supervisor-jobs li {
+  overflow-wrap: anywhere;
 }
 
 .projection-health-title,
@@ -2143,6 +2235,11 @@ select {
 
   .side-tabs {
     grid-template-columns: repeat(2, 1fr);
+  }
+
+  .runtime-status-panel,
+  .host-supervisor-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .cg-gallery-card {

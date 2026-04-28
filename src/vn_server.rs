@@ -6,6 +6,7 @@ use crate::backend_selection::{
     WorldBackendSelection, WorldTextBackend, WorldVisualBackend, load_world_backend_selection,
     save_world_backend_selection,
 };
+use crate::host_supervisor::{HostSupervisorPlan, build_host_supervisor_plan};
 use crate::job_ledger::{ReadWorldJobsOptions, WorldJobKind, WorldJobStatus, read_world_jobs};
 use crate::models::FREEFORM_CHOICE_SLOT;
 use crate::projection_health::{ProjectionHealthReport, build_projection_health_report};
@@ -242,6 +243,7 @@ struct VnRuntimeDetails {
     latest_text_dispatch: Option<serde_json::Value>,
     latest_visual_dispatch: Option<serde_json::Value>,
     projection_health: ProjectionHealthReport,
+    host_supervisor: HostSupervisorPlan,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -705,8 +707,9 @@ fn runtime_status(state: &VnServerState) -> Result<VnRuntimeStatusResponse> {
     let pending = load_pending_agent_turn(state.store_root.as_deref(), world_id.as_str()).ok();
     let latest_text_dispatch = latest_text_dispatch_record(state, world_id.as_str())?;
     let latest_visual_dispatch = latest_visual_dispatch_record(state, world_id.as_str())?;
-    let projection_health =
-        build_projection_health_report(state.store_root.as_deref(), world_id.as_str())?;
+    let host_supervisor =
+        build_host_supervisor_plan(state.store_root.as_deref(), world_id.as_str())?;
+    let projection_health = host_supervisor.projection_health.clone();
     let packet = current_packet(state)?;
     let visual =
         visual_runtime_status(state, &packet, &selection, latest_visual_dispatch.as_ref())?;
@@ -764,6 +767,7 @@ fn runtime_status(state: &VnServerState) -> Result<VnRuntimeStatusResponse> {
             latest_text_dispatch,
             latest_visual_dispatch,
             projection_health,
+            host_supervisor,
         },
     })
 }
@@ -2017,6 +2021,11 @@ premise:
         assert_eq!(
             status.details.projection_health.status.to_string(),
             "healthy"
+        );
+        assert_eq!(status.details.host_supervisor.status.to_string(), "ready");
+        assert_eq!(
+            status.details.host_supervisor.recommended_action,
+            "dispatch_lanes:image"
         );
         assert_eq!(status.visual.label, "CG 생성 대기");
         assert!(

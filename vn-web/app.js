@@ -1113,10 +1113,13 @@ function renderRuntimeStatus(status) {
   const narrative = status?.narrative || {};
   const visual = status?.visual || {};
   const projection = projectionRuntimeLane(status?.details?.projection_health);
+  const supervisor = supervisorRuntimeLane(status?.details?.host_supervisor);
   els.runtimeStatusPanel.append(
     runtimeStatusPill("서사", narrative, selection.text_backend),
     runtimeStatusPill("CG", visual, selection.visual_backend),
     runtimeStatusPill("상태", projection, "store"),
+    runtimeStatusPill("워커", supervisor, "host-supervisor"),
+    hostSupervisorPanel(status?.details?.host_supervisor),
     projectionHealthPanel(status?.details?.projection_health),
   );
   if (els.runtimeDetails) {
@@ -1152,6 +1155,22 @@ function projectionRuntimeLane(report) {
     backend: "store",
     online: status === "healthy",
     detail,
+    endpoint: null,
+    latest_dispatch_status: null,
+  };
+}
+
+function supervisorRuntimeLane(plan) {
+  const status = plan?.status || "unknown";
+  const readyLanes = Array.isArray(plan?.lanes)
+    ? plan.lanes.filter((lane) => lane.status === "ready").map((lane) => lane.lane)
+    : [];
+  return {
+    label: status === "ready" ? "작업 대기" : status === "idle" ? "대기 중" : "점검 필요",
+    status,
+    backend: "host-supervisor",
+    online: status !== "blocked" && status !== "unknown",
+    detail: plan?.recommended_action || `ready_lanes=${readyLanes.join(",") || "none"}`,
     endpoint: null,
     latest_dispatch_status: null,
   };
@@ -1220,6 +1239,75 @@ function projectionHealthPanel(report) {
   }
   panel.append(list);
   return panel;
+}
+
+function hostSupervisorPanel(plan) {
+  const panel = document.createElement("section");
+  panel.className = "host-supervisor-panel";
+  panel.dataset.status = plan?.status || "unknown";
+  const title = document.createElement("div");
+  title.className = "host-supervisor-title";
+  const heading = document.createElement("strong");
+  heading.textContent = "Host Supervisor";
+  const action = document.createElement("span");
+  action.textContent = plan?.recommended_action || "unknown";
+  title.append(heading, action);
+  panel.append(title);
+
+  const lanes = Array.isArray(plan?.lanes) ? plan.lanes : [];
+  if (!lanes.length) {
+    const empty = document.createElement("p");
+    empty.className = "host-supervisor-empty";
+    empty.textContent = "lane plan 없음";
+    panel.append(empty);
+    return panel;
+  }
+
+  const list = document.createElement("div");
+  list.className = "host-supervisor-list";
+  for (const lane of lanes) {
+    list.append(hostSupervisorLaneRow(lane));
+  }
+  panel.append(list);
+  return panel;
+}
+
+function hostSupervisorLaneRow(lane) {
+  const row = document.createElement("article");
+  row.className = "host-supervisor-row";
+  row.dataset.status = lane.status || "unknown";
+  const head = document.createElement("div");
+  head.className = "host-supervisor-row-head";
+  const name = document.createElement("strong");
+  name.textContent = lane.lane || "unknown";
+  const status = document.createElement("span");
+  status.textContent = lane.status || "unknown";
+  head.append(name, status);
+  const detail = document.createElement("p");
+  detail.textContent = lane.detail || "세부 상태 없음";
+  row.append(head, detail);
+
+  const pending = Array.isArray(lane.pending_jobs) ? lane.pending_jobs : [];
+  const claimed = Array.isArray(lane.claimed_jobs) ? lane.claimed_jobs : [];
+  if (pending.length || claimed.length) {
+    const jobs = document.createElement("ul");
+    jobs.className = "host-supervisor-jobs";
+    for (const job of pending) {
+      jobs.append(hostSupervisorJobItem("pending", job));
+    }
+    for (const job of claimed) {
+      jobs.append(hostSupervisorJobItem("claimed", job));
+    }
+    row.append(jobs);
+  }
+  return row;
+}
+
+function hostSupervisorJobItem(status, job) {
+  const item = document.createElement("li");
+  item.dataset.status = status;
+  item.textContent = `${status} · ${job.job_id || "job"} · ${job.slot || "slot"}`;
+  return item;
 }
 
 function projectionHealthRow(component) {
