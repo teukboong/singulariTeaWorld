@@ -358,6 +358,9 @@ old backend flags from reintroducing a second engine. The default WebGPT cadence
 is `SINGULARI_WORLD_WEBGPT_TURN_CG_CADENCE_MIN=2`. `--visual-backend none`
 disables only visual claiming/generation for explicit text-only checks; pending
 CG jobs remain in the store for a later visual worker.
+Use `singulari-world revival-packet --world-id <world-id> --json` to inspect
+the exact WebGPT text continuity packet. The packet is the source-of-truth
+revival surface; ChatGPT project/session memory is not.
 
 ## Visual Job Worker
 
@@ -418,8 +421,16 @@ singulari-world visual-job-release --world-id <world-id> --slot <slot> --json
 singulari-world export-world --world-id <world-id> --output <bundle-dir> --json
 singulari-world import-world --bundle <bundle-dir> --activate --json
 singulari-world validate --world-id <world-id> --json
+singulari-world projection-health --world-id <world-id> --json
 singulari-world repair-db --world-id <world-id> --json
+singulari-world repair-extra-memory --world-id <world-id> --json
+singulari-world visual-job-release --world-id <world-id> --slot <slot> --json
 ```
+
+Run `projection-health` before repair. It checks world files, world.db, turn
+commit envelopes, extra memory projections, and the unified job ledger. Repair
+only the failed component it names; no fallback or hidden auto-repair during
+normal play.
 
 Older local worlds created before initial VN render packets existed may validate
 but fail `vn-packet` with a missing `sessions/<session>/render_packets/turn_0000.json`.

@@ -108,6 +108,13 @@ and image defaults to CDP port `9239`, with separate profile roots under
 launcher write a locked `agent_bridge/backend_selection.json`; the valid
 backend pair is WebGPT/WebGPT. Old local `codex-app-server` selections are
 legacy data and must not start Codex App runtime plumbing.
+Inspect the exact deterministic continuity packet sent to WebGPT text without
+launching a browser:
+
+```bash
+singulari-world revival-packet --world-id <world-id> --json
+```
+
 WebGPT turn CG cadence defaults to every 2 turns; override it with
 `SINGULARI_WORLD_WEBGPT_TURN_CG_CADENCE_MIN`. `--webgpt-turn-command` remains
 available for a custom text adapter.
@@ -251,6 +258,21 @@ runtime. Override it explicitly with:
 ```bash
 SINGULARI_WORLD_HOME=/path/to/world-store cargo run --bin singulari-world -- active --json
 ```
+
+## Diagnostics and Repair
+
+```bash
+singulari-world validate --world-id <world-id> --json
+singulari-world projection-health --world-id <world-id> --json
+singulari-world repair-db --world-id <world-id> --json
+singulari-world repair-extra-memory --world-id <world-id> --json
+singulari-world visual-job-release --world-id <world-id> --slot <slot> --json
+```
+
+`projection-health` is the first diagnostic. It checks world files, world.db,
+turn commit envelopes, extra memory projection records, and the unified job
+ledger. Use repair commands only for the component it names; no hidden repair
+runs during normal play.
 
 ## Public Boundary
 
