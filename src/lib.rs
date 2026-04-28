@@ -7,6 +7,7 @@ pub mod entity_update;
 pub mod extra_memory;
 pub mod job_ledger;
 pub mod models;
+pub mod projection_health;
 pub mod render;
 pub mod resume;
 pub mod revival;
@@ -71,6 +72,10 @@ pub use models::{
     StructuredEntityUpdates, TURN_LOG_ENTRY_SCHEMA_VERSION, TURN_SNAPSHOT_SCHEMA_VERSION,
     TurnChoice, TurnInputKind, TurnLogEntry, TurnSnapshot, VisibleState, WorldPremise, WorldRecord,
     WorldSeed, default_freeform_choice, default_turn_choices, normalize_turn_choices,
+};
+pub use projection_health::{
+    PROJECTION_HEALTH_SCHEMA_VERSION, ProjectionComponentHealth, ProjectionHealthReport,
+    ProjectionHealthStatus, build_projection_health_report, render_projection_health_report,
 };
 pub use render::{RenderPacketLoadOptions, load_render_packet, render_packet_markdown};
 pub use resume::{

@@ -12,17 +12,18 @@ use singulari_world::{
     load_world_backend_selection, load_world_record, recent_entity_updates,
     recent_relationship_updates, refresh_world_docs, render_advanced_turn_report,
     render_chat_route, render_codex_view_section_markdown, render_packet_markdown,
-    render_resume_pack_markdown, render_started_world_report, repair_world_db, resolve_store_paths,
-    resolve_world_id, route_chat_input, search_world_db, start_world, validate_world,
-    world_db_stats,
+    render_projection_health_report, render_resume_pack_markdown, render_started_world_report,
+    repair_world_db, resolve_store_paths, resolve_world_id, route_chat_input, search_world_db,
+    start_world, validate_world, world_db_stats,
 };
 use singulari_world::{
     BuildCodexViewOptions, BuildResumePackOptions, BuildVnPacketOptions,
     BuildWorldVisualAssetsOptions, ChatRouteOptions, ClaimVisualJobOptions, CodexViewSection,
     CompleteVisualJobOptions, ExportWorldOptions, ImageGenerationJob, ImportWorldOptions,
     ReleaseVisualJobClaimOptions, StartWorldOptions, VisualArtifactKind, VnServeOptions,
-    build_vn_packet, build_world_visual_assets, claim_visual_job, complete_visual_job,
-    export_world, import_world, load_visual_job_claim, release_visual_job_claim, serve_vn,
+    build_projection_health_report, build_vn_packet, build_world_visual_assets, claim_visual_job,
+    complete_visual_job, export_world, import_world, load_visual_job_claim,
+    release_visual_job_claim, serve_vn,
 };
 use std::collections::HashSet;
 use std::fmt;
@@ -263,6 +264,15 @@ enum Commands {
 
     /// Validate a persisted world.
     Validate {
+        #[arg(long)]
+        world_id: Option<String>,
+
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Print cross-projection health for one world.
+    ProjectionHealth {
         #[arg(long)]
         world_id: Option<String>,
 
@@ -671,6 +681,9 @@ fn dispatch(cli: Cli) -> Result<()> {
         } => handle_visual_job_release(store_root.as_deref(), world_id.as_deref(), slot, json)?,
         Commands::Validate { world_id, json } => {
             handle_validate(store_root.as_deref(), world_id.as_deref(), json)?;
+        }
+        Commands::ProjectionHealth { world_id, json } => {
+            handle_projection_health(store_root.as_deref(), world_id.as_deref(), json)?;
         }
         Commands::Active { json } => handle_active(store_root.as_deref(), json)?,
         Commands::DbStats { world_id, json } => {
@@ -1149,6 +1162,21 @@ fn handle_validate(store_root: Option<&Path>, world_id: Option<&str>, json: bool
     }
     if report.status == ValidationStatus::Failed {
         std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn handle_projection_health(
+    store_root: Option<&Path>,
+    world_id: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    let world_id = resolve_world_id(store_root, world_id)?;
+    let report = build_projection_health_report(store_root, world_id.as_str())?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("{}", render_projection_health_report(&report));
     }
     Ok(())
 }
