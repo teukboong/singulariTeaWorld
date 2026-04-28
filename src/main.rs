@@ -2441,7 +2441,7 @@ fn commit_webgpt_dispatch_if_success(
             error: None,
         },
         Err(error) => WebGptCommitResult {
-            status: "failed_uncommitted".to_owned(),
+            status: "commit_failed".to_owned(),
             committed: None,
             error: Some(error.to_string()),
         },

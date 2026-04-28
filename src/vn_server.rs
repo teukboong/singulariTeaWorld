@@ -1176,7 +1176,7 @@ fn effective_text_dispatch_status(
     pending_exists: bool,
 ) -> Result<Option<String>> {
     let status = dispatch_status(record);
-    if pending_exists || status.as_deref() != Some("failed_uncommitted") {
+    if pending_exists || status.as_deref() != Some("commit_failed") {
         return Ok(status);
     }
     let record_turn_id = record
