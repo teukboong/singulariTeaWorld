@@ -112,7 +112,8 @@ pub use transfer::{
 pub use turn::{AdvanceTurnOptions, AdvancedTurn, advance_turn, render_advanced_turn_report};
 pub use turn_commit::{
     TURN_COMMIT_ENVELOPE_SCHEMA_VERSION, TURN_COMMITS_FILENAME, TurnCommitEnvelope,
-    TurnCommitStatus, append_turn_commit_envelope,
+    TurnCommitStatus, TurnMaterializationRepairReport, append_turn_commit_envelope,
+    repair_turn_materializations,
 };
 pub use validate::{ValidationReport, ValidationStatus, validate_world};
 pub use visual_assets::{

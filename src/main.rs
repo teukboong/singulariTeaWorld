@@ -13,9 +13,9 @@ use singulari_world::{
     recent_relationship_updates, refresh_world_docs, render_advanced_turn_report,
     render_chat_route, render_codex_view_section_markdown, render_host_supervisor_plan,
     render_packet_markdown, render_projection_health_report, render_resume_pack_markdown,
-    render_started_world_report, repair_extra_memory_projection, repair_world_db,
-    resolve_store_paths, resolve_world_id, route_chat_input, search_world_db, start_world,
-    validate_world, world_db_stats,
+    render_started_world_report, repair_extra_memory_projection, repair_turn_materializations,
+    repair_world_db, resolve_store_paths, resolve_world_id, route_chat_input, search_world_db,
+    start_world, validate_world, world_db_stats,
 };
 use singulari_world::{
     BuildCodexViewOptions, BuildResumePackOptions, BuildVnPacketOptions,
@@ -274,6 +274,15 @@ enum Commands {
 
     /// Print cross-projection health for one world.
     ProjectionHealth {
+        #[arg(long)]
+        world_id: Option<String>,
+
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Rebuild missing files referenced by committed turn envelopes.
+    RepairTurnMaterializations {
         #[arg(long)]
         world_id: Option<String>,
 
@@ -715,6 +724,9 @@ fn dispatch(cli: Cli) -> Result<()> {
         }
         Commands::ProjectionHealth { world_id, json } => {
             handle_projection_health(store_root.as_deref(), world_id.as_deref(), json)?;
+        }
+        Commands::RepairTurnMaterializations { world_id, json } => {
+            handle_repair_turn_materializations(store_root.as_deref(), world_id.as_deref(), json)?;
         }
         Commands::Active { json } => handle_active(store_root.as_deref(), json)?,
         Commands::DbStats { world_id, json } => {
@@ -1224,6 +1236,30 @@ fn handle_projection_health(
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         println!("{}", render_projection_health_report(&report));
+    }
+    Ok(())
+}
+
+fn handle_repair_turn_materializations(
+    store_root: Option<&Path>,
+    world_id: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    let world_id = resolve_world_id(store_root, world_id)?;
+    let report = repair_turn_materializations(store_root, world_id.as_str())?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("world: {}", report.world_id);
+        println!("committed_envelopes: {}", report.committed_envelopes);
+        println!(
+            "render_packets_repaired: {}",
+            report.render_packets_repaired
+        );
+        println!(
+            "commit_records_repaired: {}",
+            report.commit_records_repaired
+        );
     }
     Ok(())
 }
