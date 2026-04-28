@@ -10,6 +10,7 @@ const newWorldApiUrl = "/api/vn/worlds/new";
 const saveWorldApiUrl = "/api/vn/worlds/save";
 const loadWorldApiUrl = "/api/vn/worlds/load";
 const cgRetryApiUrl = "/api/vn/cg/retry";
+const repairWorldDbApiUrl = "/api/vn/repair/world-db";
 const launchSeenKey = "singulari.vn.launchSeen";
 const launchTransitionMs = 520;
 const LOG_PAGE_SIZE = 5;
@@ -1116,6 +1117,7 @@ function renderRuntimeStatus(status) {
     runtimeStatusPill("서사", narrative, selection.text_backend),
     runtimeStatusPill("CG", visual, selection.visual_backend),
     runtimeStatusPill("상태", projection, "store"),
+    projectionHealthPanel(status?.details?.projection_health),
   );
   if (els.runtimeDetails) {
     els.runtimeDetails.textContent = JSON.stringify(status?.details || {}, null, 2);
@@ -1125,7 +1127,11 @@ function renderRuntimeStatus(status) {
 function renderRuntimeLights(status) {
   renderRuntimeLight(els.runtimeLightText, "TXT", status?.narrative);
   renderRuntimeLight(els.runtimeLightVisual, "IMG", status?.visual);
-  renderRuntimeLight(els.runtimeLightState, "DB", projectionRuntimeLane(status?.details?.projection_health));
+  renderRuntimeLight(
+    els.runtimeLightState,
+    "DB",
+    projectionRuntimeLane(status?.details?.projection_health),
+  );
 }
 
 function projectionRuntimeLane(report) {
@@ -1183,6 +1189,111 @@ function runtimeStatusPill(label, lane, selectedBackend) {
   detail.textContent = lane?.detail || "세부 상태 없음";
   pill.append(key, text, meta, detail);
   return pill;
+}
+
+function projectionHealthPanel(report) {
+  const panel = document.createElement("section");
+  panel.className = "projection-health-panel";
+  panel.dataset.status = report?.status || "unknown";
+  const title = document.createElement("div");
+  title.className = "projection-health-title";
+  const heading = document.createElement("strong");
+  heading.textContent = "Projection Health";
+  const status = document.createElement("span");
+  status.textContent = report?.status || "unknown";
+  title.append(heading, status);
+  panel.append(title);
+
+  const components = Array.isArray(report?.components) ? report.components : [];
+  if (!components.length) {
+    const empty = document.createElement("p");
+    empty.className = "projection-health-empty";
+    empty.textContent = "상태 리포트 없음";
+    panel.append(empty);
+    return panel;
+  }
+
+  const list = document.createElement("div");
+  list.className = "projection-health-list";
+  for (const component of components) {
+    list.append(projectionHealthRow(component));
+  }
+  panel.append(list);
+  return panel;
+}
+
+function projectionHealthRow(component) {
+  const row = document.createElement("article");
+  row.className = "projection-health-row";
+  row.dataset.status = component.status || "unknown";
+  const head = document.createElement("div");
+  head.className = "projection-health-row-head";
+  const name = document.createElement("strong");
+  name.textContent = component.component || "unknown";
+  const status = document.createElement("span");
+  status.textContent = component.status || "unknown";
+  head.append(name, status);
+  const detail = document.createElement("p");
+  detail.textContent = component.detail || "세부 상태 없음";
+  row.append(head, detail);
+
+  const notes = projectionHealthNotes(component);
+  if (notes) {
+    row.append(notes);
+  }
+  if (component.component === "world_db" && component.status !== "healthy") {
+    const actions = document.createElement("div");
+    actions.className = "projection-health-actions";
+    const repairButton = document.createElement("button");
+    repairButton.type = "button";
+    repairButton.textContent = "DB 재구축";
+    repairButton.addEventListener("click", requestWorldDbRepair);
+    actions.append(repairButton);
+    row.append(actions);
+  }
+  return row;
+}
+
+function projectionHealthNotes(component) {
+  const messages = [
+    ...(Array.isArray(component.errors)
+      ? component.errors.map((text) => ["error", text])
+      : []),
+    ...(Array.isArray(component.warnings)
+      ? component.warnings.map((text) => ["warning", text])
+      : []),
+  ];
+  if (!messages.length) {
+    return null;
+  }
+  const list = document.createElement("ul");
+  list.className = "projection-health-notes";
+  for (const [kind, text] of messages) {
+    const item = document.createElement("li");
+    item.dataset.kind = kind;
+    item.textContent = text;
+    list.append(item);
+  }
+  return list;
+}
+
+async function requestWorldDbRepair() {
+  if (state.busy || !state.apiAvailable || explicitPacketUrl) {
+    return;
+  }
+  state.busy = true;
+  setWorldOperationStatus("world.db 재구축 중");
+  try {
+    const response = await fetchJson(repairWorldDbApiUrl, { method: "POST" });
+    await refreshRuntimeStatus();
+    setWorldOperationStatus(
+      `world.db 재구축 완료: search_documents=${response.repair?.search_documents ?? 0}`,
+    );
+  } catch (error) {
+    setWorldOperationStatus(`world.db 재구축 실패: ${error.message}`);
+  } finally {
+    state.busy = false;
+  }
 }
 
 function backendRuntimeSummary(lane, selectedBackend) {

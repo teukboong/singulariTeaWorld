@@ -1368,6 +1368,101 @@ select {
   color: color-mix(in srgb, var(--paper) 72%, var(--muted));
 }
 
+.projection-health-panel {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 8px;
+  border: 1px solid var(--line-soft);
+  background: rgba(7, 8, 10, 0.42);
+  padding: 8px;
+}
+
+.projection-health-title,
+.projection-health-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.projection-health-title strong,
+.projection-health-row-head strong {
+  color: var(--paper-strong);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0;
+}
+
+.projection-health-title span,
+.projection-health-row-head span {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  letter-spacing: 0;
+}
+
+.projection-health-list {
+  display: grid;
+  gap: 6px;
+}
+
+.projection-health-row {
+  display: grid;
+  gap: 5px;
+  border-left: 2px solid var(--line-soft);
+  padding: 6px 8px;
+  background: rgba(238, 238, 238, 0.035);
+}
+
+.projection-health-row[data-status="healthy"] {
+  border-left-color: color-mix(in srgb, #9fe6a0 64%, var(--line-soft));
+}
+
+.projection-health-row[data-status="degraded"] {
+  border-left-color: color-mix(in srgb, var(--gold) 66%, var(--line-soft));
+}
+
+.projection-health-row[data-status="failed"] {
+  border-left-color: color-mix(in srgb, #f1b5b5 68%, var(--line-soft));
+}
+
+.projection-health-row p,
+.projection-health-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.projection-health-notes {
+  display: grid;
+  gap: 3px;
+  margin: 0;
+  padding-left: 15px;
+  color: var(--muted);
+  font-size: 0.68rem;
+  line-height: 1.3;
+}
+
+.projection-health-notes li[data-kind="error"] {
+  color: color-mix(in srgb, #f1b5b5 82%, var(--paper));
+}
+
+.projection-health-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.projection-health-actions button {
+  min-height: 28px;
+  border: 1px solid color-mix(in srgb, #f1b5b5 45%, var(--line-soft));
+  background: rgba(241, 181, 181, 0.08);
+  color: var(--paper);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+}
+
 .cg-job-status,
 .cg-job-note {
   margin: 0;

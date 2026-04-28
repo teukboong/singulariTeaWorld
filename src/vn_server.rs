@@ -20,6 +20,7 @@ use crate::visual_assets::{
     BuildWorldVisualAssetsOptions, ImageGenerationJob, build_world_visual_assets,
 };
 use crate::vn::{BuildVnPacketOptions, build_vn_packet, turn_cg_retry_path};
+use crate::world_db::{WorldDbRepairReport, repair_world_db};
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -244,6 +245,14 @@ struct VnRuntimeDetails {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct VnWorldDbRepairResponse {
+    schema_version: String,
+    world_id: String,
+    repair: WorldDbRepairReport,
+    projection_health: ProjectionHealthReport,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct VnCgGalleryResponse {
     schema_version: String,
     world_id: String,
@@ -344,6 +353,7 @@ fn route_request(state: &VnServerState, request: &HttpRequest) -> HttpResponse {
         ("GET", "/api/vn/agent/pending") => pending_agent_turn_response(state),
         ("POST", "/api/vn/agent/commit") => commit_agent_turn_response(state, &request.body),
         ("POST", "/api/vn/cg/retry") => cg_retry_response(state, &request.body),
+        ("POST", "/api/vn/repair/world-db") => repair_world_db_response(state),
         ("POST", "/api/vn/choose") => choose_response(state, &request.body),
         _ => error_response("404 Not Found", format!("unknown route: {}", request.path)),
     }
@@ -391,6 +401,13 @@ fn runtime_status_response(state: &VnServerState) -> HttpResponse {
     match runtime_status(state) {
         Ok(response) => json_response(&response),
         Err(error) => error_response("500 Internal Server Error", error.to_string()),
+    }
+}
+
+fn repair_world_db_response(state: &VnServerState) -> HttpResponse {
+    match repair_world_db_for_active_world(state) {
+        Ok(response) => json_response(&response),
+        Err(error) => error_response("400 Bad Request", error.to_string()),
     }
 }
 
@@ -748,6 +765,22 @@ fn runtime_status(state: &VnServerState) -> Result<VnRuntimeStatusResponse> {
             latest_visual_dispatch,
             projection_health,
         },
+    })
+}
+
+fn repair_world_db_for_active_world(state: &VnServerState) -> Result<VnWorldDbRepairResponse> {
+    let world_id = state.world_id()?;
+    let store_paths = resolve_store_paths(state.store_root.as_deref())?;
+    let files = world_file_paths(&store_paths, world_id.as_str());
+    let repair = repair_world_db(&files.dir, world_id.as_str())?;
+    crate::world_docs::refresh_world_docs(&files.dir)?;
+    let projection_health =
+        build_projection_health_report(state.store_root.as_deref(), world_id.as_str())?;
+    Ok(VnWorldDbRepairResponse {
+        schema_version: "singulari.vn_world_db_repair.v1".to_owned(),
+        world_id,
+        repair,
+        projection_health,
     })
 }
 
@@ -1774,8 +1807,8 @@ mod tests {
         VnAgentPendingResponse, VnCgRetryRequest, VnNewWorldRequest, VnSaveWorldResponse,
         VnServerState, VnWorldSwitchResponse, cg_gallery, cg_retry_response, choose_request_body,
         choose_response, ensure_allowed_vn_host, load_request_body, load_world_response, new_world,
-        read_world_asset, runtime_status, save_request_body, save_world_response,
-        validate_vn_input, world_list,
+        read_world_asset, repair_world_db_response, runtime_status, save_request_body,
+        save_world_response, validate_vn_input, world_list,
     };
     use crate::backend_selection::{WorldTextBackend, WorldVisualBackend};
     use crate::store::{InitWorldOptions, init_world};
@@ -2002,6 +2035,42 @@ premise:
             status.narrative.label.as_str(),
             "서사 연결됨" | "WebGPT 서사 연결됨"
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn repair_world_db_response_rebuilds_projection_and_reports_health() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(
+            &seed_path,
+            r#"
+schema_version: singulari.world_seed.v1
+world_id: stw_vn_repair_db
+title: "DB 복구 세계"
+premise:
+  genre: "중세 판타지"
+  protagonist: "변경 순찰자, 남자 주인공"
+"#,
+        )?;
+        let initialized = init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+        std::fs::remove_file(initialized.world_dir.join(crate::WORLD_DB_FILENAME))?;
+        let state = VnServerState {
+            store_root: Some(store),
+            world_id: Mutex::new("stw_vn_repair_db".to_owned()),
+        };
+
+        let response = repair_world_db_response(&state);
+
+        assert_eq!(response.status, "200 OK");
+        let body: serde_json::Value = serde_json::from_slice(&response.body)?;
+        assert_eq!(body["repair"]["rebuilt"], true);
+        assert_eq!(body["projection_health"]["status"], "healthy");
         Ok(())
     }
 
