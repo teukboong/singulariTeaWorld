@@ -75,28 +75,29 @@ http://127.0.0.1:4177/
 ## Codex App Prep
 
 When the operator says `싱귤러리 월드 준비해줘` from Codex App, prepare the
-background runtime, not a one-off chat turn.
+VN runtime, not a one-off chat turn.
 
-From this repository, build the binary and start one long-running worker:
+From this repository, build the binary and start the VN server:
 
 ```bash
 cargo build --locked --release --bin singulari-world --bin singulari-world-mcp
 
-target/release/singulari-world --store-root .world-store host-worker \
-  --text-backend codex-app-server \
-  --interval-ms 750
+target/release/singulari-world --store-root .world-store vn-serve --port 4177
 ```
 
-That worker starts a managed loopback `codex app-server` when no
-`--codex-app-server-url` is provided. It consumes pending text turns through the
-selected text backend and consumes visual jobs through Codex App app-server.
-Visual jobs must close through
+`vn-serve` owns the default deployment UX. When the browser creates a pending
+turn, asks for CG retry, or commits an app-server turn, it wakes
+`host-worker --once` for the active world. That one-shot worker starts a managed
+loopback `codex app-server` only when the selected backend needs it, consumes
+pending text and visual jobs, writes results back to the store, and exits. Do
+not require `launchd`/KeepAlive for normal play. Visual jobs must close through
 `imageGeneration -> savedPath -> complete`; do not route them through this
 Codex chat's visual generation session. Keep Codex App open while playing; idle
-worker ticks spend zero model tokens and wait for browser-created work.
+browser time spends zero model tokens.
 
 The VN browser app is the common frontend. To replace Codex App as the narrative
-engine, keep `vn-serve` unchanged and start:
+engine, keep `vn-serve` unchanged and choose the world backend in the VN app.
+For diagnostics, the equivalent worker command is:
 
 ```bash
 target/release/singulari-world --store-root .world-store host-worker \
@@ -105,9 +106,11 @@ target/release/singulari-world --store-root .world-store host-worker \
   --interval-ms 750
 ```
 
-The built-in WebGPT backend calls `webgpt_research` through the sibling
-`webgpt-mcp-checkout/scripts/webgpt-mcp.sh` wrapper unless `--webgpt-mcp-wrapper` or
-`WEBGPT_MCP_WRAPPER` overrides it. It extracts one `AgentTurnResponse` JSON
+The built-in WebGPT backend calls `webgpt_research` through a sibling
+`webgpt-mcp-checkout/scripts/webgpt-mcp.sh` wrapper unless
+`--webgpt-mcp-wrapper` or `SINGULARI_WORLD_WEBGPT_MCP_WRAPPER` in process env
+or repository-local `.env` overrides it. It must not inspect parent Hesperides
+repos; this package stays standalone. It extracts one `AgentTurnResponse` JSON
 from `answer_markdown`; the Rust worker owns validation and commit. Do not add
 a separate ChatGPT conversation UI as a second play client.
 Codex App uses native thread history plus a compact authoritative packet for
@@ -331,19 +334,22 @@ singulari-world host-worker \
   --interval-ms 750
 ```
 
-`host-worker` is the app-facing supervisor. It spends zero model tokens while
-idle. With `--text-backend codex-app-server`, it uses the official Codex
-app-server websocket. If no explicit websocket URL is provided, it
-starts a managed loopback `codex app-server`, records the runtime URL in the
-store-root `agent_bridge` directory, and stops the child when the worker exits.
+`vn-serve` is the app-facing supervisor for default play. It wakes
+`host-worker --once` on browser-created work instead of relying on a
+long-running keepalive loop. With `--text-backend codex-app-server`, that worker
+uses the official Codex app-server websocket. If no explicit websocket URL is
+provided, it starts a managed loopback `codex app-server`, records the runtime
+URL in the store-root `agent_bridge` directory, and stops the child when the
+worker exits.
 `host-worker` reads
 `worlds/<world-id>/agent_bridge/codex_thread_binding.json` on every tick, so
 rebinding does not require restarting the worker.
-When no active world exists, `host-worker` waits instead of failing, so the app
-can start it before the user creates or loads a world.
+When no active world exists, `vn-serve` waits for the user to create or load one
+before any one-shot worker is needed.
 
-If the host starts `host-worker` through `launchctl`, pass a full `--codex-bin`
-path and include a PATH that can resolve `node`. The npm Codex launcher uses
+`launchctl` is not the normal deployment path. If a custom host still starts a
+long-running `host-worker` through `launchctl`, pass a full `--codex-bin` path
+and include a PATH that can resolve `node`. The npm Codex launcher uses
 `#!/usr/bin/env node`, so a minimal launchd PATH can fail even when the same
 command works in an interactive shell.
 

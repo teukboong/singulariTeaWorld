@@ -45,22 +45,13 @@ The intended local Codex App engine flow is:
 
 1. Open Codex App.
 2. Tell the agent: `싱귤러리 월드 준비해줘`.
-3. Let the agent start the background worker below.
-4. Run or open the VN web app and keep Codex App open while playing.
+3. Build the binary and run the VN web app.
+4. Keep Codex App open while playing.
 
 Prep command:
 
 ```bash
 cargo build --locked --release --bin singulari-world --bin singulari-world-mcp
-
-target/release/singulari-world --store-root .world-store host-worker \
-  --text-backend codex-app-server \
-  --interval-ms 750
-```
-
-Then start the VN app:
-
-```bash
 target/release/singulari-world --store-root .world-store vn-serve --port 4177
 ```
 
@@ -70,14 +61,20 @@ Open:
 http://127.0.0.1:4177/
 ```
 
-`host-worker` is the cross-platform process an embedding app should start
-before the VN app needs agent-authored turns. In the default
-`codex-app-server` text backend, it talks to the official Codex app-server
-websocket and starts a model turn only when a pending world turn exists. If no
-`--codex-app-server-url` is provided, the worker starts `codex app-server` on a
-loopback port, records the runtime URL under the store-root `agent_bridge`
-directory, and stops it when the worker exits. Keep Codex App open while the web
-app is in use. Idle ticks spend zero model tokens.
+`vn-serve` is the normal play supervisor. When the browser creates a pending
+turn, asks for CG retry, or commits an app-server turn, it wakes
+`host-worker --once` for the active world. That one-shot worker consumes pending
+text and visual jobs, writes the visible result back to the world store, and
+exits. A long-running `host-worker` is still useful for diagnostics or custom
+embedding hosts, but it is not required for the default deployment UX and does
+not need `launchd`/KeepAlive.
+
+In the default `codex-app-server` text backend, the worker talks to the official
+Codex app-server websocket and starts a model turn only when a pending world
+turn exists. If no `--codex-app-server-url` is provided, the worker starts
+`codex app-server` on a loopback port, records the runtime URL under the
+store-root `agent_bridge` directory, and stops it when the worker exits. Keep
+Codex App open while the web app is in use. Idle runs spend zero model tokens.
 
 By default the worker owns visual jobs through the Codex App app-server loop.
 It claims one pending visual job per tick, asks Codex App for one
@@ -92,7 +89,8 @@ are WebGPT, text and image dispatch run in parallel against their separate
 browser sessions.
 
 To swap the narrative engine to WebGPT while keeping the same browser frontend
-and world store, run the worker with the WebGPT backend:
+and world store, choose the WebGPT text/visual backend when creating the world
+in the VN app. For operator diagnostics, the equivalent worker command is:
 
 ```bash
 target/release/singulari-world --store-root .world-store host-worker \
@@ -101,8 +99,11 @@ target/release/singulari-world --store-root .world-store host-worker \
   --interval-ms 750
 ```
 
-By default the worker finds the sibling `webgpt-mcp-checkout/scripts/webgpt-mcp.sh`
-wrapper or uses `WEBGPT_MCP_WRAPPER` / `--webgpt-mcp-wrapper`. It sends the
+By default the worker finds a sibling
+`webgpt-mcp-checkout/scripts/webgpt-mcp.sh` wrapper, or uses
+`SINGULARI_WORLD_WEBGPT_MCP_WRAPPER` in the process env or repository-local
+`.env` / `--webgpt-mcp-wrapper` for an explicit checkout. It does not inspect
+parent Hesperides repos; the public-alpha package must stay standalone. It sends the
 pending-turn prompt to `webgpt_research`, extracts one `AgentTurnResponse` JSON
 from `answer_markdown`, and commits it through the same schema, redaction, and
 world-store path as the Codex App engine. Codex App stays cost-balanced through

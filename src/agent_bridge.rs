@@ -338,7 +338,10 @@ pub fn load_pending_agent_turn(
 ) -> Result<PendingAgentTurn> {
     let store_paths = resolve_store_paths(store_root)?;
     let files = world_file_paths(&store_paths, world_id);
-    read_json(&pending_agent_turn_path(&files))
+    let mut pending: PendingAgentTurn = read_json(&pending_agent_turn_path(&files))?;
+    let snapshot: TurnSnapshot = read_json(&files.latest_snapshot)?;
+    pending.selected_choice = selected_choice(pending.player_input.as_str(), &snapshot);
+    Ok(pending)
 }
 
 /// Save the Codex thread currently responsible for realtime narrative dispatch.
@@ -427,8 +430,10 @@ pub fn commit_agent_turn(options: &AgentCommitTurnOptions) -> Result<CommittedAg
     let store_paths = resolve_store_paths(options.store_root.as_deref())?;
     let files = world_file_paths(&store_paths, options.world_id.as_str());
     let pending_path = pending_agent_turn_path(&files);
-    let pending: PendingAgentTurn = read_json(&pending_path)?;
-    validate_agent_response(&pending, &options.response)?;
+    let pending =
+        load_pending_agent_turn(options.store_root.as_deref(), options.world_id.as_str())?;
+    let response = canonical_agent_turn_response(options.response.clone());
+    validate_agent_response(&pending, &response)?;
 
     let advanced = advance_turn(&AdvanceTurnOptions {
         store_root: options.store_root.clone(),
@@ -444,14 +449,14 @@ pub fn commit_agent_turn(options: &AgentCommitTurnOptions) -> Result<CommittedAg
     }
 
     let mut render_packet = advanced.render_packet;
-    apply_agent_response_to_render_packet(&mut render_packet, &options.response);
+    apply_agent_response_to_render_packet(&mut render_packet, &response);
     write_json(&advanced.render_packet_path, &render_packet)?;
 
     persist_agent_next_choices(
         &files,
         &advanced.snapshot_path,
         &advanced.snapshot,
-        &options.response.next_choices,
+        &response.next_choices,
     )?;
 
     let committed_at = Utc::now().to_rfc3339();
@@ -459,7 +464,7 @@ pub fn commit_agent_turn(options: &AgentCommitTurnOptions) -> Result<CommittedAg
     fs::create_dir_all(&turn_dir)
         .with_context(|| format!("failed to create {}", turn_dir.display()))?;
     let response_path = turn_dir.join("agent_response.json");
-    write_json(&response_path, &options.response)?;
+    write_json(&response_path, &response)?;
 
     let packet = build_vn_packet(&BuildVnPacketOptions {
         store_root: options.store_root.clone(),
@@ -482,6 +487,13 @@ pub fn commit_agent_turn(options: &AgentCommitTurnOptions) -> Result<CommittedAg
     fs::remove_file(&pending_path)
         .with_context(|| format!("failed to remove {}", pending_path.display()))?;
     Ok(committed)
+}
+
+fn canonical_agent_turn_response(mut response: AgentTurnResponse) -> AgentTurnResponse {
+    if response.next_choices.len() == 7 {
+        response.next_choices = normalize_turn_choices(&response.next_choices);
+    }
+    response
 }
 
 fn validate_agent_response(pending: &PendingAgentTurn, response: &AgentTurnResponse) -> Result<()> {
@@ -563,7 +575,7 @@ fn validate_agent_next_choices(response: &AgentTurnResponse) -> Result<()> {
 
 fn choices_keep_default_template(choices: &[TurnChoice]) -> bool {
     let defaults = default_turn_choices();
-    [1, 2, 3, 5, 6].iter().all(|slot| {
+    [1, 2, 3, 4, 5].iter().all(|slot| {
         let Some(choice) = choices.iter().find(|choice| choice.slot == *slot) else {
             return false;
         };
@@ -654,8 +666,9 @@ fn persist_agent_next_choices(
 }
 
 fn selected_choice(input: &str, snapshot: &TurnSnapshot) -> Option<PendingAgentChoice> {
+    let choices = normalize_turn_choices(&snapshot.last_choices);
     let choice =
-        numeric_choice(input, snapshot).or_else(|| inline_freeform_choice(input, snapshot));
+        numeric_choice(input, &choices).or_else(|| inline_freeform_choice(input, &choices));
     choice.map(|choice| {
         let visible_intent = choice.player_visible_intent().to_owned();
         PendingAgentChoice {
@@ -666,16 +679,12 @@ fn selected_choice(input: &str, snapshot: &TurnSnapshot) -> Option<PendingAgentC
     })
 }
 
-fn numeric_choice(input: &str, snapshot: &TurnSnapshot) -> Option<TurnChoice> {
+fn numeric_choice(input: &str, choices: &[TurnChoice]) -> Option<TurnChoice> {
     let slot = input.trim().parse::<u8>().ok()?;
-    snapshot
-        .last_choices
-        .iter()
-        .find(|choice| choice.slot == slot)
-        .cloned()
+    choices.iter().find(|choice| choice.slot == slot).cloned()
 }
 
-fn inline_freeform_choice(input: &str, snapshot: &TurnSnapshot) -> Option<TurnChoice> {
+fn inline_freeform_choice(input: &str, choices: &[TurnChoice]) -> Option<TurnChoice> {
     let slot_digit = char::from_digit(u32::from(FREEFORM_CHOICE_SLOT), 10)?;
     let rest = input.trim().strip_prefix(slot_digit)?;
     if !(rest.starts_with("번")
@@ -687,8 +696,7 @@ fn inline_freeform_choice(input: &str, snapshot: &TurnSnapshot) -> Option<TurnCh
     {
         return None;
     }
-    snapshot
-        .last_choices
+    choices
         .iter()
         .find(|choice| choice.slot == FREEFORM_CHOICE_SLOT)
         .cloned()
@@ -855,16 +863,19 @@ fn ensure_human_safe_field(field: &str, value: &str) -> Result<()> {
 mod tests {
     use super::{
         AGENT_TURN_RESPONSE_SCHEMA_VERSION, AgentCommitTurnOptions, AgentSubmitTurnOptions,
-        AgentTurnResponse, SaveCodexThreadBindingOptions, clear_codex_thread_binding,
-        enqueue_agent_turn, load_codex_thread_binding, narrative_budget_for_level,
-        normalize_narrative_level, save_codex_thread_binding,
+        AgentTurnResponse, SaveCodexThreadBindingOptions, canonical_agent_turn_response,
+        clear_codex_thread_binding, enqueue_agent_turn, load_codex_thread_binding,
+        narrative_budget_for_level, normalize_narrative_level, save_codex_thread_binding,
+        selected_choice,
     };
     use crate::agent_bridge::commit_agent_turn;
     use crate::models::{
-        GUIDE_CHOICE_TAG, NARRATIVE_SCENE_SCHEMA_VERSION, NarrativeScene, TurnChoice,
+        GUIDE_CHOICE_TAG, NARRATIVE_SCENE_SCHEMA_VERSION, NarrativeScene, TurnChoice, TurnSnapshot,
         default_turn_choices,
     };
-    use crate::store::{InitWorldOptions, init_world};
+    use crate::store::{
+        InitWorldOptions, init_world, read_json, resolve_store_paths, world_file_paths,
+    };
     use crate::vn::{BuildVnPacketOptions, build_vn_packet};
     use tempfile::tempdir;
 
@@ -921,6 +932,93 @@ premise:
                 intent: "맡긴다. 세부 내용은 선택 후 드러난다.".to_owned(),
             },
         ]
+    }
+
+    fn legacy_slot_contract_choices() -> Vec<TurnChoice> {
+        let mut choices = scene_specific_choices();
+        choices[3] = TurnChoice {
+            slot: 4,
+            tag: GUIDE_CHOICE_TAG.to_owned(),
+            intent: "맡긴다. 세부 내용은 선택 후 드러난다.".to_owned(),
+        };
+        choices[4] = TurnChoice {
+            slot: 5,
+            tag: "기록".to_owned(),
+            intent: "현재 알려진 세계 기록을 연다".to_owned(),
+        };
+        choices[5] = TurnChoice {
+            slot: 6,
+            tag: "흐름".to_owned(),
+            intent: "시간의 관찰자 시점으로 다음 흐름을 본다".to_owned(),
+        };
+        choices[6] = TurnChoice {
+            slot: 7,
+            tag: "자유서술".to_owned(),
+            intent: "7 뒤에 직접 행동, 말, 내면 독백을 서술한다".to_owned(),
+        };
+        choices
+    }
+
+    #[test]
+    fn canonicalizes_legacy_slot_contract_agent_response() {
+        let response = AgentTurnResponse {
+            schema_version: AGENT_TURN_RESPONSE_SCHEMA_VERSION.to_owned(),
+            world_id: "stw_legacy_contract".to_owned(),
+            turn_id: "turn_0001".to_owned(),
+            visible_scene: NarrativeScene {
+                schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
+                speaker: None,
+                text_blocks: vec!["agent-authored visible scene".to_owned()],
+                tone_notes: Vec::new(),
+            },
+            adjudication: None,
+            canon_event: None,
+            entity_updates: Vec::new(),
+            relationship_updates: Vec::new(),
+            hidden_state_delta: Vec::new(),
+            next_choices: legacy_slot_contract_choices(),
+        };
+
+        let canonical = canonical_agent_turn_response(response);
+
+        assert_eq!(canonical.next_choices[3].slot, 4);
+        assert_eq!(canonical.next_choices[3].tag, "기록");
+        assert_eq!(canonical.next_choices[4].slot, 5);
+        assert_eq!(canonical.next_choices[4].tag, "흐름");
+        assert_eq!(canonical.next_choices[5].slot, 6);
+        assert_eq!(canonical.next_choices[5].tag, "자유서술");
+        assert!(canonical.next_choices[5].intent.contains("6 뒤에"));
+        assert_eq!(canonical.next_choices[6].slot, 7);
+        assert_eq!(canonical.next_choices[6].tag, GUIDE_CHOICE_TAG);
+    }
+
+    #[test]
+    fn selected_choice_interprets_legacy_snapshot_with_current_slots() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(&seed_path, seed_body("stw_legacy_snapshot"))?;
+        init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+        let store_paths = resolve_store_paths(Some(store.as_path()))?;
+        let files = world_file_paths(&store_paths, "stw_legacy_snapshot");
+        let mut snapshot: TurnSnapshot = read_json(&files.latest_snapshot)?;
+        snapshot.last_choices = legacy_slot_contract_choices();
+
+        let Some(guide) = selected_choice("7", &snapshot) else {
+            anyhow::bail!("slot 7 should map to guide");
+        };
+        assert_eq!(guide.slot, 7);
+        assert_eq!(guide.tag, GUIDE_CHOICE_TAG);
+        let Some(freeform) = selected_choice("6 문 아래의 흙을 살핀다", &snapshot) else {
+            anyhow::bail!("slot 6 should map to freeform");
+        };
+        assert_eq!(freeform.slot, 6);
+        assert_eq!(freeform.tag, "자유서술");
+        Ok(())
     }
 
     #[test]

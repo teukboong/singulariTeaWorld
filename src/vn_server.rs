@@ -24,10 +24,16 @@ use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::fs;
+#[cfg(not(test))]
+use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+#[cfg(not(test))]
+use std::process::{Command, Stdio};
 use std::sync::Mutex;
+#[cfg(not(test))]
+use std::thread;
 
 const INDEX_HTML: &str = include_str!("../vn-web/index.html");
 const APP_JS: &str = include_str!("../vn-web/app.js");
@@ -49,6 +55,10 @@ const VN_RUNTIME_STATUS_SCHEMA_VERSION: &str = "singulari.vn_runtime_status.v1";
 const VN_CG_GALLERY_SCHEMA_VERSION: &str = "singulari.vn_cg_gallery.v1";
 const TURN_CG_ASSET_DIR: &str = "assets/vn/turn_cg";
 const PROMPT_SUMMARY_MAX_CHARS: usize = 180;
+#[cfg(not(test))]
+const VN_HOST_WORKER_STDOUT: &str = "agent_bridge/vn-host-worker.log";
+#[cfg(not(test))]
+const VN_HOST_WORKER_STDERR: &str = "agent_bridge/vn-host-worker.err.log";
 
 #[derive(Debug, Clone)]
 pub struct VnServeOptions {
@@ -295,6 +305,7 @@ pub fn serve_vn(options: &VnServeOptions) -> Result<()> {
         .with_context(|| format!("vn server bind failed: {bind_addr}"))?;
     println!("vn server: http://{bind_addr}/");
     println!("world: {}", state.world_id()?);
+    wake_existing_pending_work_once(&state);
     for stream in listener.incoming() {
         match stream {
             Ok(mut stream) => {
@@ -477,7 +488,10 @@ fn commit_agent_turn_response(state: &VnServerState, body: &[u8]) -> HttpRespons
         world_id,
         response,
     }) {
-        Ok(committed) => json_response(&committed.packet),
+        Ok(committed) => {
+            wake_host_worker_once(state, "agent_commit_visual_jobs");
+            json_response(&committed.packet)
+        }
         Err(error) => error_response("400 Bad Request", error.to_string()),
     }
 }
@@ -492,7 +506,10 @@ fn cg_retry_response(state: &VnServerState, body: &[u8]) -> HttpResponse {
         }
     };
     match request_turn_cg_retry(state, request) {
-        Ok(packet) => json_response(&packet),
+        Ok(packet) => {
+            wake_host_worker_once(state, "turn_cg_retry");
+            json_response(&packet)
+        }
         Err(error) => error_response("400 Bad Request", error.to_string()),
     }
 }
@@ -537,7 +554,10 @@ fn choose_agent_pending_response(
         input,
         narrative_level: Some(normalize_narrative_level(narrative_level)),
     }) {
-        Ok(pending) => json_response(&vn_agent_pending_response(&pending)),
+        Ok(pending) => {
+            wake_host_worker_once(state, "choose_agent_pending");
+            json_response(&vn_agent_pending_response(&pending))
+        }
         Err(error) => error_response("400 Bad Request", error.to_string()),
     }
 }
@@ -554,6 +574,73 @@ fn vn_agent_pending_response(pending: &PendingAgentTurn) -> VnAgentPendingRespon
             pending.world_id
         ),
     }
+}
+
+fn wake_host_worker_once(state: &VnServerState, reason: &str) {
+    if let Err(error) = spawn_host_worker_once(state, reason) {
+        eprintln!("vn server host-worker wake failed: reason={reason}, error={error:#}");
+    }
+}
+
+fn wake_existing_pending_work_once(state: &VnServerState) {
+    let Ok(world_id) = state.world_id() else {
+        return;
+    };
+    if load_pending_agent_turn(state.store_root.as_deref(), world_id.as_str()).is_ok() {
+        wake_host_worker_once(state, "vn_serve_start_pending_turn");
+    }
+}
+
+#[cfg(not(test))]
+fn spawn_host_worker_once(state: &VnServerState, reason: &str) -> Result<()> {
+    let store_paths = resolve_store_paths(state.store_root.as_deref())?;
+    let world_id = state.world_id()?;
+    let stdout_path = store_paths.root.join(VN_HOST_WORKER_STDOUT);
+    let stderr_path = store_paths.root.join(VN_HOST_WORKER_STDERR);
+    if let Some(parent) = stdout_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    if let Some(parent) = stderr_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let stdout = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&stdout_path)
+        .with_context(|| format!("failed to open {}", stdout_path.display()))?;
+    let stderr = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&stderr_path)
+        .with_context(|| format!("failed to open {}", stderr_path.display()))?;
+    let exe = std::env::current_exe().context("failed to resolve current singulari-world exe")?;
+    let mut child = Command::new(exe)
+        .arg("--store-root")
+        .arg(store_paths.root.as_os_str())
+        .arg("host-worker")
+        .arg("--world-id")
+        .arg(world_id.as_str())
+        .arg("--once")
+        .env("SINGULARI_WORLD_VN_WORKER_WAKE_REASON", reason)
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .with_context(|| format!("failed to spawn host-worker --once: reason={reason}"))?;
+    thread::spawn(move || {
+        if let Err(error) = child.wait() {
+            eprintln!("vn server host-worker wait failed: {error}");
+        }
+    });
+    Ok(())
+}
+
+#[cfg(test)]
+fn spawn_host_worker_once(state: &VnServerState, reason: &str) -> Result<()> {
+    let _ = reason;
+    let _ = resolve_store_paths(state.store_root.as_deref())?;
+    Ok(())
 }
 
 fn agent_bridge_enabled(state: &VnServerState) -> bool {
@@ -619,13 +706,14 @@ fn runtime_status(state: &VnServerState) -> Result<VnRuntimeStatusResponse> {
     let visual =
         visual_runtime_status(state, &packet, &selection, latest_visual_dispatch.as_ref())?;
     let agent_bridge_enabled = agent_bridge_enabled(state);
+    let narrative_backend = selection.text_backend.as_str();
     let label = narrative_runtime_label(
         agent_bridge_enabled,
+        narrative_backend,
         pending.as_ref().map(|value| value.turn_id.as_str()),
         binding.as_ref().map(|value| value.source.as_str()),
         latest_text_dispatch.as_ref(),
     );
-    let narrative_backend = selection.text_backend.as_str();
     let narrative_endpoint = narrative_backend_endpoint(
         narrative_backend,
         app_server.as_ref(),
@@ -706,6 +794,7 @@ fn backend_selection_status(
 
 fn narrative_runtime_label(
     agent_bridge_enabled: bool,
+    backend: &str,
     pending_turn_id: Option<&str>,
     binding_source: Option<&str>,
     latest_dispatch: Option<&serde_json::Value>,
@@ -715,6 +804,9 @@ fn narrative_runtime_label(
     }
     if !agent_bridge_enabled {
         return "서사 연결됨";
+    }
+    if backend == WorldTextBackend::Webgpt.as_str() {
+        return "WebGPT 서사 연결됨";
     }
     if matches!(binding_source, Some("codex_app_server_thread_start")) {
         return "새 서사 맥락 재구성됨";
@@ -748,7 +840,7 @@ fn narrative_runtime_status_code(
     }
     match label {
         "새 서사 맥락 재구성됨" => "rebuilt",
-        "서사 연결됨" => "connected",
+        "서사 연결됨" | "WebGPT 서사 연결됨" => "connected",
         _ => "needs_connection",
     }
     .to_owned()
@@ -1314,6 +1406,7 @@ fn new_world(state: &VnServerState, request: VnNewWorldRequest) -> Result<VnWorl
             input: INITIAL_AGENT_TURN_INPUT.to_owned(),
             narrative_level: None,
         })?;
+        wake_host_worker_once(state, "new_world_initial_turn");
         Some(vn_agent_pending_response(&pending))
     } else {
         None

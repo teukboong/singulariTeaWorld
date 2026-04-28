@@ -2054,12 +2054,62 @@ fn emit_host_text_and_visual_events_parallel(
         emitted_any = true;
     }
 
+    let initial_image_dispatched = image_result.is_some();
     if let Some(result) = image_result
         && emit_visual_dispatch_result(result?)?
     {
         emitted_any = true;
     }
+    if !initial_image_dispatched
+        && let Some(result) = dispatch_host_visual_job_once(
+            store_root,
+            world_id,
+            visual_backend,
+            options,
+            app_server_dispatch.as_ref(),
+        )?
+        && emit_visual_dispatch_result(result)?
+    {
+        emitted_any = true;
+    }
     Ok(emitted_any)
+}
+
+fn dispatch_host_visual_job_once(
+    store_root: Option<&Path>,
+    world_id: &str,
+    visual_backend: HostWorkerVisualBackend,
+    options: &HostWorkerOptions,
+    app_server_dispatch: Option<&CodexAppServerDispatch>,
+) -> Result<Option<HostVisualDispatchResult>> {
+    let visual_claim = match visual_backend {
+        HostWorkerVisualBackend::CodexAppServer => {
+            claim_next_host_visual_job(store_root, world_id, "singulari_host_worker")?
+        }
+        HostWorkerVisualBackend::Webgpt => {
+            claim_next_host_visual_job(store_root, world_id, "singulari_webgpt_image_worker")?
+        }
+        HostWorkerVisualBackend::None => None,
+    };
+    let Some(claim) = visual_claim else {
+        return Ok(None);
+    };
+    let result = match visual_backend {
+        HostWorkerVisualBackend::CodexAppServer => {
+            let dispatch = app_server_dispatch
+                .context("host-worker requires Codex App app-server dispatch")?;
+            dispatch_visual_job_via_app_server(store_root, &claim, dispatch)
+                .map(HostVisualDispatchResult::Codex)?
+        }
+        HostWorkerVisualBackend::Webgpt => {
+            dispatch_visual_job_via_webgpt(store_root, &claim, options)
+                .map(HostVisualDispatchResult::Webgpt)?
+        }
+        HostWorkerVisualBackend::None => {
+            anyhow::bail!("visual backend none cannot dispatch visual claim")
+        }
+    };
+    Ok(Some(result))
 }
 
 fn emit_text_dispatch_result(
@@ -3538,6 +3588,14 @@ fn resolve_webgpt_mcp_wrapper(options: &HostWorkerOptions) -> Result<PathBuf> {
     if let Some(wrapper) = &options.webgpt_mcp_wrapper {
         return Ok(wrapper.clone());
     }
+    if let Some(wrapper) = std::env::var_os("SINGULARI_WORLD_WEBGPT_MCP_WRAPPER").map(PathBuf::from)
+    {
+        return Ok(wrapper);
+    }
+    if let Some(wrapper) = local_env_value("SINGULARI_WORLD_WEBGPT_MCP_WRAPPER")?.map(PathBuf::from)
+    {
+        return Ok(wrapper);
+    }
     if let Some(wrapper) = std::env::var_os("WEBGPT_MCP_WRAPPER").map(PathBuf::from) {
         return Ok(wrapper);
     }
@@ -3545,8 +3603,49 @@ fn resolve_webgpt_mcp_wrapper(options: &HostWorkerOptions) -> Result<PathBuf> {
         return Ok(wrapper);
     }
     anyhow::bail!(
-        "webgpt text backend requires --webgpt-mcp-wrapper, WEBGPT_MCP_WRAPPER, or a sibling webgpt-mcp-checkout/scripts/webgpt-mcp.sh"
+        "webgpt text backend requires --webgpt-mcp-wrapper, SINGULARI_WORLD_WEBGPT_MCP_WRAPPER in env/.env, or a sibling webgpt-mcp-checkout/scripts/webgpt-mcp.sh"
     );
+}
+
+fn local_env_value(name: &str) -> Result<Option<String>> {
+    let path = std::env::current_dir()
+        .context("failed to resolve current working directory")?
+        .join(".env");
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(path.as_path())
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line).trim();
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() != name {
+            continue;
+        }
+        let value = unquote_local_env_value(value.trim());
+        ensure_control_safe_runtime_value(name, value.as_str())?;
+        if !value.is_empty() {
+            return Ok(Some(value));
+        }
+    }
+    Ok(None)
+}
+
+fn unquote_local_env_value(value: &str) -> String {
+    if value.len() >= 2
+        && ((value.starts_with('"') && value.ends_with('"'))
+            || (value.starts_with('\'') && value.ends_with('\'')))
+    {
+        value[1..value.len() - 1].to_owned()
+    } else {
+        value.to_owned()
+    }
 }
 
 fn find_webgpt_mcp_wrapper_from_current_dir() -> Result<Option<PathBuf>> {

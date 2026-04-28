@@ -7,6 +7,7 @@ use crate::models::{
     PROTAGONIST_CHARACTER_ID, RENDER_PACKET_SCHEMA_VERSION, RenderPacket, ScanTarget,
     TURN_LOG_ENTRY_SCHEMA_VERSION, TurnChoice, TurnInputKind, TurnLogEntry, TurnSnapshot,
     VisibleState, WorldRecord, default_freeform_choice, default_turn_choices, is_guide_choice_tag,
+    normalize_turn_choices,
 };
 use crate::store::{
     TURN_LOG_FILENAME, WorldFilePaths, append_canon_event, append_jsonl, read_json,
@@ -264,16 +265,12 @@ pub fn render_advanced_turn_report(turn: &AdvancedTurn) -> String {
 fn classify_input(input: &str, snapshot: &TurnSnapshot) -> Result<ClassifiedInput> {
     let cc_mode = input.contains(".cc");
     let effective_input = input.replace(".cc", "").trim().to_owned();
-    let inline_freeform = inline_freeform_choice(&effective_input, snapshot);
+    let choices = normalize_turn_choices(&snapshot.last_choices);
+    let inline_freeform = inline_freeform_choice(&effective_input, &choices);
     let selection = effective_input
         .parse::<u8>()
         .ok()
-        .and_then(|slot| {
-            snapshot
-                .last_choices
-                .iter()
-                .find(|choice| choice.slot == slot)
-        })
+        .and_then(|slot| choices.iter().find(|choice| choice.slot == slot))
         .cloned();
     let mut style_notes = vec!["Korean UI".to_owned()];
     if input.starts_with("월뮬") {
@@ -356,10 +353,9 @@ fn classify_input(input: &str, snapshot: &TurnSnapshot) -> Result<ClassifiedInpu
 
 fn inline_freeform_choice(
     effective_input: &str,
-    snapshot: &TurnSnapshot,
+    choices: &[TurnChoice],
 ) -> Option<(TurnChoice, String)> {
-    let choice = snapshot
-        .last_choices
+    let choice = choices
         .iter()
         .find(|choice| choice.slot == FREEFORM_CHOICE_SLOT)
         .cloned()
@@ -555,7 +551,7 @@ fn build_render_packet(
                     thought: "아직 원인을 단정하기에는 단서가 부족하다".to_owned(),
                 },
             ],
-            choices: snapshot.last_choices.clone(),
+            choices: normalize_turn_choices(&snapshot.last_choices),
         },
         adjudication: Some(adjudication),
         codex_view,
@@ -631,8 +627,12 @@ fn next_turn_number(turn_id: &str) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::{AdvanceTurnOptions, advance_turn};
-    use crate::models::{FREEFORM_CHOICE_SLOT, GUIDE_CHOICE_SLOT, GUIDE_CHOICE_TAG, TurnInputKind};
-    use crate::store::{InitWorldOptions, init_world};
+    use crate::models::{
+        FREEFORM_CHOICE_SLOT, GUIDE_CHOICE_SLOT, GUIDE_CHOICE_TAG, TurnChoice, TurnInputKind,
+    };
+    use crate::store::{
+        InitWorldOptions, init_world, read_json, resolve_store_paths, world_file_paths, write_json,
+    };
     use crate::validate::{ValidationStatus, validate_world};
     use tempfile::tempdir;
 
@@ -645,6 +645,46 @@ premise:
   genre: "중세 판타지"
   protagonist: "변경 순찰자, 남자 주인공"
 "#
+    }
+
+    fn legacy_slot_contract_choices() -> Vec<TurnChoice> {
+        vec![
+            TurnChoice {
+                slot: 1,
+                tag: "발소리".to_owned(),
+                intent: "발소리의 방향으로 접근한다".to_owned(),
+            },
+            TurnChoice {
+                slot: 2,
+                tag: "주변".to_owned(),
+                intent: "주변 단서를 확인한다".to_owned(),
+            },
+            TurnChoice {
+                slot: 3,
+                tag: "접촉".to_owned(),
+                intent: "가까운 기척에 말을 건다".to_owned(),
+            },
+            TurnChoice {
+                slot: 4,
+                tag: GUIDE_CHOICE_TAG.to_owned(),
+                intent: "맡긴다. 세부 내용은 선택 후 드러난다.".to_owned(),
+            },
+            TurnChoice {
+                slot: 5,
+                tag: "기록".to_owned(),
+                intent: "현재 알려진 세계 기록을 연다".to_owned(),
+            },
+            TurnChoice {
+                slot: 6,
+                tag: "흐름".to_owned(),
+                intent: "시간의 관찰자 시점으로 다음 흐름을 본다".to_owned(),
+            },
+            TurnChoice {
+                slot: 7,
+                tag: "자유서술".to_owned(),
+                intent: "7 뒤에 직접 행동, 말, 내면 독백을 서술한다".to_owned(),
+            },
+        ]
     }
 
     #[test]
@@ -677,6 +717,43 @@ premise:
         );
         let report = validate_world(Some(&store), "stw_turn")?;
         assert_eq!(report.status, ValidationStatus::Passed);
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_snapshot_turn_seven_still_records_guide_choice() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(
+            &seed_path,
+            seed_body().replace("stw_turn", "stw_legacy_turn"),
+        )?;
+        init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+        let store_paths = resolve_store_paths(Some(store.as_path()))?;
+        let files = world_file_paths(&store_paths, "stw_legacy_turn");
+        let mut snapshot: crate::models::TurnSnapshot = read_json(&files.latest_snapshot)?;
+        snapshot.last_choices = legacy_slot_contract_choices();
+        write_json(&files.latest_snapshot, &snapshot)?;
+
+        let turn = advance_turn(&AdvanceTurnOptions {
+            store_root: Some(store.clone()),
+            world_id: "stw_legacy_turn".to_owned(),
+            input: "7".to_owned(),
+        })?;
+
+        assert_eq!(turn.canon_event.kind, TurnInputKind::GuideChoice.as_wire());
+        assert!(
+            turn.render_packet
+                .visible_state
+                .choices
+                .iter()
+                .any(|choice| choice.slot == GUIDE_CHOICE_SLOT && choice.tag == GUIDE_CHOICE_TAG)
+        );
         Ok(())
     }
 

@@ -5,7 +5,11 @@ pending-turn records, visual job records, and redacted prompts. The VN browser
 app is the common play frontend; the embedding host owns the selected narrative
 engine and image generation.
 
-The host worker is the single background process between those systems.
+`host-worker` is the execution tick between those systems. In the default VN
+deployment, `vn-serve` starts `host-worker --once` whenever the browser creates
+new text or visual work, so the user does not have to keep a long-running worker
+alive with `launchd`/KeepAlive. A long-running worker remains a diagnostic and
+custom-host mode, not the required play path.
 
 For the complete WebGPT setup checklist, including ChatGPT login/challenge
 handling and separate text/image browser lanes, see
@@ -13,29 +17,28 @@ handling and separate text/image browser lanes, see
 
 ## Codex App Operator Prep
 
-When a Codex App operator says `싱귤러리 월드 준비해줘`, start the worker below
-and keep Codex App open while the VN browser is used:
+When a Codex App operator says `싱귤러리 월드 준비해줘`, build the release
+binary, start `vn-serve`, and keep Codex App open while the VN browser is used:
 
 ```bash
-singulari-world --store-root .world-store host-worker \
-  --text-backend codex-app-server \
-  --interval-ms 750
+cargo build --locked --release --bin singulari-world --bin singulari-world-mcp
+target/release/singulari-world --store-root .world-store vn-serve --port 4177
 ```
 
-This prepares the managed loopback `codex app-server`, realtime text dispatch,
-and image queue consumption through Codex App `imageGeneration`. It is safe to
-start before a world exists; the worker emits `worker_waiting_for_active_world`
-until the browser creates or loads one. Idle ticks do not start model turns.
+The web app writes pending jobs into the world store and wakes a one-shot
+worker. That one-shot worker prepares the managed loopback `codex app-server`
+only when a pending Codex App text or image job actually exists, consumes one
+bounded tick of work, writes the visible result back, and exits. Idle browser
+time does not start model turns.
 
-After that, the web-facing process can be started independently:
+For diagnostics, the same tick can be run by hand:
 
 ```bash
-singulari-world --store-root .world-store vn-serve --port 4177
+singulari-world --store-root .world-store host-worker --world-id <world-id> --once
 ```
 
-The web app writes pending jobs into the world store. The already-running worker
-consumes those jobs and writes visible results back, so play can continue from
-the browser as long as Codex App and `host-worker` remain alive.
+The long-running loop form is optional and meant for custom embedding hosts that
+explicitly want external supervision.
 
 ## Runtime Path
 
@@ -68,8 +71,10 @@ store.
 
 The `webgpt` backend:
 
-- Finds the sibling `webgpt-mcp-checkout/scripts/webgpt-mcp.sh`, or uses
-  `--webgpt-mcp-wrapper` / `WEBGPT_MCP_WRAPPER`.
+- Finds a sibling `webgpt-mcp-checkout/scripts/webgpt-mcp.sh`, or uses
+  `--webgpt-mcp-wrapper` / `SINGULARI_WORLD_WEBGPT_MCP_WRAPPER` in process env
+  or repository-local `.env`. It must not inspect parent Hesperides repos; this
+  package stays standalone.
 - Reuses one world-scoped ChatGPT conversation URL for text, stored at
   `agent_bridge/webgpt_conversation_binding.json`.
 - Writes a redacted pending-turn prompt to `*-webgpt-prompt.md`.
@@ -105,9 +110,12 @@ is not gated behind pending text-turn completion:
 - Copy the PNG to `destination_path`.
 - Complete the visual job and clear the claim.
 
-When both text and image are `webgpt`, `host-worker` dispatches them in parallel
-from the same tick so the text lane and image lane consume their separate CDP
-sessions independently.
+When both text and image are `webgpt`, `host-worker` dispatches already-pending
+text and visual work in parallel from the same tick so the text lane and image
+lane consume their separate CDP sessions independently. If the text commit
+creates a new turn-CG job during that tick, the worker immediately claims one
+new visual job before exiting; it does not wait for a long-running keepalive
+loop to come around again.
 
 Turn CG has a major-character design gate. If a protagonist/anchor-level
 character does not yet have an accepted character sheet under
@@ -150,33 +158,29 @@ local provider keys.
 
 ## Process Supervision
 
-Use the release binary for long-running play sessions:
+Use the release binary for normal play sessions:
 
 ```bash
 cargo build --locked --release --bin singulari-world --bin singulari-world-mcp
-
-target/release/singulari-world --store-root .world-store host-worker \
-  --text-backend codex-app-server \
-  --interval-ms 750
-
 target/release/singulari-world --store-root .world-store vn-serve --port 4177
 ```
 
-If a macOS host supervises the worker with `launchctl`, do not rely on the
-interactive shell PATH. Pass `--codex-bin /absolute/path/to/codex` and set PATH
-so `/usr/bin/env node` can resolve `node`; the npm Codex launcher depends on
-that lookup. A suitable launchd environment includes the directories containing
-`node`, `codex`, and the system tools:
+`launchctl` is not part of the default deployment path. If a custom macOS host
+still chooses to supervise a long-running worker with `launchctl`, do not rely
+on the interactive shell PATH. Pass `--codex-bin /absolute/path/to/codex` and
+set PATH so `/usr/bin/env node` can resolve `node`; the npm Codex launcher
+depends on that lookup. A suitable launchd environment includes the directories
+containing `node`, `codex`, and the system tools:
 
 ```text
 PATH=/usr/local/bin:$HOME/.npm/bin:/usr/bin:/bin:/usr/sbin:/sbin
 ```
 
-When replacing an old runtime, stop the old `vn-serve`, `host-worker`, and any
-managed `codex app-server --listen ws://127.0.0.1:<port>` child before starting
-the new worker. Stale `dispatching` records are durable by design; if a worker
-dies before writing a terminal dispatch record, remove only that failed
-dispatch record before retrying the same pending turn.
+When replacing an old runtime, stop the old `vn-serve` and any managed
+`codex app-server --listen ws://127.0.0.1:<port>` child before starting the new
+server. Stale `dispatching` records are durable by design; if a one-shot worker
+dies before writing a terminal dispatch record, remove only that failed dispatch
+record before retrying the same pending turn.
 
 ## Reference CLI
 
@@ -186,7 +190,7 @@ Start a one-shot worker for the active or explicit world:
 singulari-world host-worker --world-id <world-id> --once
 ```
 
-Run the normal long-lived app worker:
+Run an optional long-lived app worker:
 
 ```bash
 singulari-world --store-root .world-store host-worker --interval-ms 750
