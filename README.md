@@ -264,6 +264,7 @@ SINGULARI_WORLD_HOME=/path/to/world-store cargo run --bin singulari-world -- act
 ```bash
 singulari-world validate --world-id <world-id> --json
 singulari-world projection-health --world-id <world-id> --json
+singulari-world repair-turn-materializations --world-id <world-id> --json
 singulari-world repair-db --world-id <world-id> --json
 singulari-world repair-extra-memory --world-id <world-id> --json
 singulari-world visual-job-release --world-id <world-id> --slot <slot> --json
