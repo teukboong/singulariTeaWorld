@@ -149,6 +149,41 @@ with `worldsim_complete_visual_job_from_base64` using raw base64 or a
 `image/png`, rejects local/private hosts, private DNS resolution targets, and
 credentials, limits redirects, and caps the download size.
 
+### Stable Cloudflare Front Door
+
+For a free stable URL, use the same front-door pattern as Railbot:
+
+1. Deploy `cloudflare/worker/` to Workers.dev with a Workers KV namespace.
+2. Set Worker secret `ORIGIN_UPDATE_SECRET`.
+3. Put the fixed Worker URL and the same secret in local `.env`:
+
+```bash
+SINGULARI_WORLD_FRONTDOOR_URL=https://<worker>.workers.dev
+SINGULARI_WORLD_FRONTDOOR_UPDATE_SECRET=<same secret>
+```
+
+4. Run the local MCP server and tunnel:
+
+```bash
+cargo run --locked --bin singulari-world-mcp-web -- \
+  --host 127.0.0.1 \
+  --port 4187 \
+  --path /mcp \
+  --profile play
+
+scripts/run_mcp_tunnel.sh
+```
+
+The ChatGPT custom app MCP URL is:
+
+```text
+https://<worker>.workers.dev/mcp
+```
+
+`scripts/run_mcp_tunnel.sh` watches the free `cloudflared` quick-tunnel URL and
+updates Worker KV through `/_singulari/origin`, so ChatGPT keeps using the
+stable Worker URL.
+
 ## Seed Anchor
 
 World seeds may define an `anchor_character` when a run needs a persistent

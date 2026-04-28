@@ -190,6 +190,22 @@ rejects local/private hosts, private DNS resolution targets, and embedded
 credentials, follows at most three redirects, caps the body at 16 MiB, and then
 uses the same verifier.
 
+## Cloudflare Front Door
+
+For ChatGPT web, keep the local MCP listener on loopback and expose it through
+the Worker front door in `cloudflare/worker/`. The Worker gives ChatGPT a stable
+HTTPS `/mcp` URL while `scripts/run_mcp_tunnel.sh` rotates the free
+`cloudflared` quick-tunnel origin behind it.
+
+Local secret/config values belong in `.env`, which is gitignored:
+
+```bash
+SINGULARI_WORLD_FRONTDOOR_URL=https://<worker>.workers.dev
+SINGULARI_WORLD_FRONTDOOR_UPDATE_SECRET=<same secret as Worker ORIGIN_UPDATE_SECRET>
+```
+
+Do not commit Cloudflare tokens, Worker secrets, or local tunnel state.
+
 ## Agent-Authored Text Turns
 
 The browser queues player input; a trusted local agent commits the visible turn.

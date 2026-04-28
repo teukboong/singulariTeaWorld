@@ -92,6 +92,53 @@ image payload. If the host can pass PNG bytes, use
 `image/png`, rejects local/private hosts, private DNS resolution targets, and
 credentials, follows at most three redirects, and caps the body at 16 MiB.
 
+### Stable Cloudflare Front Door
+
+For ChatGPT web, a stable Workers.dev URL can front the rotating free
+`cloudflared` quick-tunnel URL:
+
+```text
+ChatGPT -> https://<worker>.workers.dev/mcp
+        -> Worker KV origin=https://xxxx.trycloudflare.com
+        -> cloudflared -> http://127.0.0.1:4187/mcp
+```
+
+Deploy the Worker in `cloudflare/worker/`:
+
+```bash
+SINGULARI_WORLD_CF_KV_NAMESPACE_ID=<kv namespace id>
+SINGULARI_WORLD_FRONTDOOR_UPDATE_SECRET=<same secret>
+SINGULARI_WORLD_FRONTDOOR_URL=https://<worker>.workers.dev
+
+scripts/deploy_cloudflare_frontdoor.sh
+```
+
+Then configure the local repository `.env`:
+
+```bash
+SINGULARI_WORLD_FRONTDOOR_URL=https://<worker>.workers.dev
+SINGULARI_WORLD_FRONTDOOR_UPDATE_SECRET=<same secret>
+```
+
+Run the MCP listener and tunnel in separate terminals:
+
+```bash
+cargo run --locked --bin singulari-world-mcp-web -- \
+  --host 127.0.0.1 \
+  --port 4187 \
+  --path /mcp \
+  --profile play
+
+scripts/run_mcp_tunnel.sh
+```
+
+The tunnel script writes the last synced quick-tunnel origin to
+`.runtime/mcp_tunnel_base_url.txt` and retries pending Worker origin updates
+from `.runtime/mcp_tunnel_origin_pending.txt`.
+
+This is a separate Singulari deployment. Reuse the Railbot pattern, not the
+Railbot Worker, KV namespace, or secrets.
+
 ## Local VN Runtime
 
 Create a world:

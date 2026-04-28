@@ -12,6 +12,10 @@ vn-web/current-vn.json
 *.db-wal
 
 # Local/editor noise.
+.env
+.env.*
+!.env.example
+cloudflare/worker/.wrangler.generated.toml
 .playwright-cli/
 .idea/
 .vscode/
