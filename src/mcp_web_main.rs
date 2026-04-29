@@ -5,6 +5,7 @@ use rmcp::transport::{
     StreamableHttpServerConfig, StreamableHttpService,
     streamable_http_server::session::local::LocalSessionManager,
 };
+use singulari_world::RuntimeCapabilityProfile;
 use std::{
     net::{IpAddr, SocketAddr},
     sync::Arc,
@@ -51,6 +52,14 @@ impl WebToolProfile {
             Self::TrustedLocal => WorldsimMcpToolProfile::Full,
         }
     }
+
+    const fn capability_profile(self) -> RuntimeCapabilityProfile {
+        match self {
+            Self::ReadOnly => RuntimeCapabilityProfile::McpWebReadOnly,
+            Self::Play => RuntimeCapabilityProfile::McpWebPlay,
+            Self::TrustedLocal => RuntimeCapabilityProfile::TrustedLocal,
+        }
+    }
 }
 
 #[tokio::main]
@@ -73,6 +82,7 @@ async fn run_main() -> Result<()> {
 
     let path = normalize_mount_path(args.path.as_str())?;
     let ct = CancellationToken::new();
+    let capability_boundary = args.profile.capability_profile().boundary();
     let profile = args.profile.to_mcp_profile();
     let service: StreamableHttpService<WorldsimMcpServer, LocalSessionManager> =
         StreamableHttpService::new(
@@ -92,10 +102,11 @@ async fn run_main() -> Result<()> {
         .await
         .with_context(|| format!("failed to bind MCP web server at http://{addr}{path}"))?;
     tracing::info!(
-        "Singulari World MCP web server listening at http://{}{} profile={:?}",
+        "Singulari World MCP web server listening at http://{}{} profile={:?} capability_profile={}",
         addr,
         path,
-        args.profile
+        args.profile,
+        capability_boundary.profile.as_str()
     );
     axum::serve(listener, router)
         .with_graceful_shutdown(async move {

@@ -1,6 +1,4 @@
-use crate::job_ledger::{
-    ReadWorldJobsOptions, WorldJob, WorldJobKind, WorldJobStatus, read_world_jobs,
-};
+use crate::job_ledger::{ReadWorldJobsOptions, WorldJob, WorldJobKind, read_world_jobs};
 use crate::projection_health::{
     ProjectionHealthReport, ProjectionHealthStatus, build_projection_health_report,
 };
@@ -131,12 +129,12 @@ fn supervisor_lane_plan(
 ) -> HostSupervisorLanePlan {
     let pending_jobs: Vec<WorldJob> = jobs
         .iter()
-        .filter(|job| lane_owns_job(lane, job) && job.status == WorldJobStatus::Pending)
+        .filter(|job| lane_owns_job(lane, job) && job.is_dispatchable())
         .cloned()
         .collect();
     let claimed_jobs: Vec<WorldJob> = jobs
         .iter()
-        .filter(|job| lane_owns_job(lane, job) && job.status == WorldJobStatus::Claimed)
+        .filter(|job| lane_owns_job(lane, job) && job.is_in_flight())
         .cloned()
         .collect();
     let status = if blocked {

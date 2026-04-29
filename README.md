@@ -20,6 +20,7 @@ Detailed operator guides:
 
 - [WebGPT MCP Activation Guide](docs/webgpt-mcp-activation.md)
 - [Cloudflare Free Front Door Guide](docs/cloudflare-free-frontdoor.md)
+- [Architecture V2](docs/architecture-v2.md)
 - [Host Worker Contract](docs/host-worker.md)
 - [Agent Bridge](docs/agent-bridge.md)
 - [Visual Canon and Budget Policy](docs/visual-canon-budget.md)
@@ -35,6 +36,12 @@ cargo run --locked --bin singulari-world -- start \
   --json
 
 cargo run --locked --bin singulari-world -- vn-serve --port 4177
+```
+
+For public-alpha release confidence, run the committed-state clone gate:
+
+```bash
+scripts/fresh-clone-e2e.sh
 ```
 
 `scripts/setup-webgpt-runtime.sh` is the one-time WebGPT backend prep for a

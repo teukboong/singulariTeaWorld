@@ -32,6 +32,7 @@ pub mod render;
 pub mod response_context;
 pub mod resume;
 pub mod revival;
+pub mod runtime_profile;
 pub mod scene_pressure;
 pub mod sqlite;
 pub mod start;
@@ -253,6 +254,10 @@ pub use resume::{
 };
 pub use revival::{
     AGENT_REVIVAL_PACKET_SCHEMA_VERSION, AgentRevivalCompileOptions, build_agent_revival_packet,
+};
+pub use runtime_profile::{
+    RUNTIME_CAPABILITY_PROFILE_SCHEMA_VERSION, RuntimeCapability, RuntimeCapabilityBoundary,
+    RuntimeCapabilityProfile, RuntimeSurfaceKind,
 };
 pub use scene_pressure::{
     ACTIVE_SCENE_PRESSURES_FILENAME, SCENE_PRESSURE_AUDIT_FILENAME,

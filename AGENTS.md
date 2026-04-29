@@ -50,6 +50,13 @@ Or run the bundled gate:
 scripts/release-build.sh
 ```
 
+Before tagging a public-alpha cut, also prove the committed checkout from a
+clean clone:
+
+```bash
+scripts/fresh-clone-e2e.sh
+```
+
 ## CLI Basics
 
 Create a world:

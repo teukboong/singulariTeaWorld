@@ -1,13 +1,13 @@
 use crate::agent_bridge::load_pending_agent_turn;
 use crate::visual_assets::{
-    BuildWorldVisualAssetsOptions, ImageGenerationJob, VisualArtifactKind,
+    BuildWorldVisualAssetsOptions, ImageGenerationJob, VisualArtifactKind, VisualJobClaim,
     build_world_visual_assets, load_visual_job_claim,
 };
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-pub const WORLD_JOB_LEDGER_SCHEMA_VERSION: &str = "singulari.world_job_ledger.v1";
+pub const WORLD_JOB_LEDGER_SCHEMA_VERSION: &str = "singulari.world_job_ledger.v2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -23,7 +23,11 @@ pub enum WorldJobKind {
 pub enum WorldJobStatus {
     Pending,
     Claimed,
+    Running,
     Completed,
+    FailedRetryable,
+    FailedTerminal,
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +44,22 @@ pub struct WorldJob {
     pub artifact_kind: Option<VisualArtifactKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_owner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -69,7 +89,15 @@ pub fn read_world_jobs(options: &ReadWorldJobsOptions) -> Result<Vec<WorldJob>> 
             slot: pending.turn_id.clone(),
             turn_id: Some(pending.turn_id),
             artifact_kind: None,
-            path: Some(pending.pending_ref),
+            path: Some(pending.pending_ref.clone()),
+            input_ref: Some(pending.pending_ref),
+            output_ref: None,
+            claim_id: None,
+            claim_owner: None,
+            claimed_at: None,
+            claim_path: None,
+            attempt_id: None,
+            last_error: None,
         });
     }
 
@@ -87,13 +115,12 @@ pub fn read_world_jobs(options: &ReadWorldJobsOptions) -> Result<Vec<WorldJob>> 
         }
     }
     for job in visual_jobs {
-        let status = if load_visual_job_claim(
+        let claim = load_visual_job_claim(
             options.store_root.as_deref(),
             options.world_id.as_str(),
             job.slot.as_str(),
-        )?
-        .is_some()
-        {
+        )?;
+        let status = if claim.is_some() {
             WorldJobStatus::Claimed
         } else {
             WorldJobStatus::Pending
@@ -102,6 +129,7 @@ pub fn read_world_jobs(options: &ReadWorldJobsOptions) -> Result<Vec<WorldJob>> 
             options.world_id.as_str(),
             &job,
             status,
+            claim.as_ref(),
         ));
     }
 
@@ -147,12 +175,28 @@ impl WorldJob {
             WorldJobKind::UiAsset => "ui_asset",
         }
     }
+
+    #[must_use]
+    pub const fn is_dispatchable(&self) -> bool {
+        self.status.is_dispatchable()
+    }
+
+    #[must_use]
+    pub const fn is_in_flight(&self) -> bool {
+        self.status.is_in_flight()
+    }
+
+    #[must_use]
+    pub const fn is_terminal(&self) -> bool {
+        self.status.is_terminal()
+    }
 }
 
 fn world_job_from_image_job(
     world_id: &str,
     job: &ImageGenerationJob,
     status: WorldJobStatus,
+    claim: Option<&VisualJobClaim>,
 ) -> WorldJob {
     WorldJob {
         schema_version: WORLD_JOB_LEDGER_SCHEMA_VERSION.to_owned(),
@@ -168,6 +212,14 @@ fn world_job_from_image_job(
         turn_id: turn_id_from_slot(job.slot.as_str()),
         artifact_kind: Some(job.artifact_kind),
         path: Some(job.destination_path.clone()),
+        input_ref: None,
+        output_ref: Some(job.destination_path.clone()),
+        claim_id: claim.map(|value| value.claim_id.clone()),
+        claim_owner: claim.map(|value| value.claimed_by.clone()),
+        claimed_at: claim.map(|value| value.claimed_at.clone()),
+        claim_path: claim.map(|value| value.claim_path.clone()),
+        attempt_id: claim.map(|value| value.claim_id.clone()),
+        last_error: None,
     }
 }
 
@@ -187,6 +239,14 @@ fn completed_visual_job(
         turn_id: turn_id_from_slot(slot),
         artifact_kind: Some(artifact_kind),
         path: Some(path.display().to_string()),
+        input_ref: None,
+        output_ref: Some(path.display().to_string()),
+        claim_id: None,
+        claim_owner: None,
+        claimed_at: None,
+        claim_path: None,
+        attempt_id: None,
+        last_error: None,
     }
 }
 
@@ -206,9 +266,32 @@ fn turn_id_from_slot(slot: &str) -> Option<String> {
 
 fn job_status_rank(status: WorldJobStatus) -> u8 {
     match status {
-        WorldJobStatus::Claimed => 0,
-        WorldJobStatus::Pending => 1,
-        WorldJobStatus::Completed => 2,
+        WorldJobStatus::Running => 0,
+        WorldJobStatus::Claimed => 1,
+        WorldJobStatus::Pending => 2,
+        WorldJobStatus::FailedRetryable => 3,
+        WorldJobStatus::Completed => 4,
+        WorldJobStatus::FailedTerminal | WorldJobStatus::Cancelled => 5,
+    }
+}
+
+impl WorldJobStatus {
+    #[must_use]
+    pub const fn is_dispatchable(self) -> bool {
+        matches!(self, Self::Pending | Self::FailedRetryable)
+    }
+
+    #[must_use]
+    pub const fn is_in_flight(self) -> bool {
+        matches!(self, Self::Claimed | Self::Running)
+    }
+
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::FailedTerminal | Self::Cancelled
+        )
     }
 }
 
@@ -302,6 +385,7 @@ premise:
             world_id: "stw_job_ledger".to_owned(),
             extra_visual_jobs: vec![scene_job],
         })?;
+        let turn_cg_output = turn_cg_path.display().to_string();
 
         assert!(jobs.iter().any(|job| {
             job.slot == "menu_background"
@@ -312,13 +396,28 @@ premise:
             job.slot == "stage_background"
                 && job.kind == WorldJobKind::UiAsset
                 && job.status == WorldJobStatus::Claimed
+                && job.claim_owner.as_deref() == Some("test-worker")
+                && job.claim_id.is_some()
+                && job.claim_path.is_some()
         }));
         assert!(jobs.iter().any(|job| {
             job.slot == "turn_cg:turn_0001"
                 && job.kind == WorldJobKind::SceneCg
                 && job.status == WorldJobStatus::Pending
                 && job.turn_id.as_deref() == Some("turn_0001")
+                && job.output_ref.as_deref() == Some(turn_cg_output.as_str())
         }));
         Ok(())
+    }
+
+    #[test]
+    fn job_status_lifecycle_groups_dispatch_and_terminal_states() {
+        assert!(WorldJobStatus::Pending.is_dispatchable());
+        assert!(WorldJobStatus::FailedRetryable.is_dispatchable());
+        assert!(WorldJobStatus::Claimed.is_in_flight());
+        assert!(WorldJobStatus::Running.is_in_flight());
+        assert!(WorldJobStatus::Completed.is_terminal());
+        assert!(WorldJobStatus::FailedTerminal.is_terminal());
+        assert!(WorldJobStatus::Cancelled.is_terminal());
     }
 }
