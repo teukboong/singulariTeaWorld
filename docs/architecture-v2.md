@@ -118,6 +118,12 @@ of importing every family directly.
 6. Split `world_db` indexing into family-owned index providers.
 7. Keep fresh-clone end-to-end smoke as the public-alpha release proof.
 
+Current implementation note: the first extraction step now lives under
+`src/runtime/`. `runtime::host_worker` owns the loop, lane dispatch, events, and
+visual job claiming; `runtime::webgpt` owns WebGPT MCP runtime isolation,
+conversation bindings, prompt construction, dispatch records, and adapter
+tests.
+
 ## Non-Goals
 
 - Do not add another player-facing chat UI.
