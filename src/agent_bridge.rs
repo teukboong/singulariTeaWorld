@@ -1,11 +1,23 @@
+use crate::body_resource::{BodyResourcePacket, compile_body_resource_packet};
+use crate::character_text_design::{
+    CharacterTextDesignPacket, compile_character_text_design_packet,
+};
 use crate::extra_memory::{
     ExtraMemoryPacket, commit_extra_memory_projection_terminal, compile_extra_memory_projection,
     retrieve_extra_memory_packet,
 };
+use crate::location_graph::{LocationGraphPacket, compile_location_graph_packet};
 use crate::models::{
     AdjudicationGate, CharacterVoiceAnchor, FREEFORM_CHOICE_SLOT, GUIDE_CHOICE_SLOT, HiddenState,
     NARRATIVE_SCENE_SCHEMA_VERSION, NarrativeScene, TurnChoice, TurnSnapshot,
     default_freeform_choice, default_turn_choices, is_guide_choice_tag, normalize_turn_choices,
+};
+use crate::plot_thread::{
+    PlotThreadEvent, PlotThreadPacket, append_plot_thread_audit, append_plot_thread_event_plan,
+    compile_plot_thread_packet, prepare_plot_thread_event_plan,
+};
+use crate::scene_pressure::{
+    ScenePressurePacket, append_scene_pressure_audit, compile_scene_pressure_packet,
 };
 use crate::store::{WorldFilePaths, read_json, resolve_store_paths, world_file_paths, write_json};
 use crate::turn::{AdvanceTurnOptions, advance_turn};
@@ -77,6 +89,16 @@ pub struct AgentVisibleContext {
     pub voice_anchors: Vec<AgentVoiceAnchor>,
     #[serde(default)]
     pub extra_memory: ExtraMemoryPacket,
+    #[serde(default)]
+    pub active_scene_pressure: ScenePressurePacket,
+    #[serde(default)]
+    pub active_plot_threads: PlotThreadPacket,
+    #[serde(default)]
+    pub active_body_resource_state: BodyResourcePacket,
+    #[serde(default)]
+    pub active_location_graph: LocationGraphPacket,
+    #[serde(default)]
+    pub active_character_text_design: CharacterTextDesignPacket,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -156,6 +178,8 @@ pub struct AgentTurnResponse {
     pub entity_updates: Vec<Value>,
     #[serde(default)]
     pub relationship_updates: Vec<Value>,
+    #[serde(default)]
+    pub plot_thread_events: Vec<PlotThreadEvent>,
     #[serde(default)]
     pub extra_contacts: Vec<AgentExtraContact>,
     #[serde(default)]
@@ -258,21 +282,28 @@ pub fn enqueue_agent_turn(options: &AgentSubmitTurnOptions) -> Result<PendingAge
     })?;
     let turn_id = next_turn_id(snapshot.turn_id.as_str())?;
     let pending_ref = pending_path.display().to_string();
+    let pending_choice = selected_choice(player_input, &snapshot);
+    let private_adjudication_context = private_context(&hidden_state);
+    let visible_context = visible_context(
+        &files,
+        &snapshot,
+        &entities,
+        &current_packet,
+        pending_choice.as_ref(),
+        &private_adjudication_context,
+        player_input,
+    )?;
+    append_scene_pressure_audit(files.dir.as_path(), &visible_context.active_scene_pressure)?;
+    append_plot_thread_audit(files.dir.as_path(), &visible_context.active_plot_threads)?;
     let pending = PendingAgentTurn {
         schema_version: AGENT_PENDING_TURN_SCHEMA_VERSION.to_owned(),
         world_id: options.world_id.clone(),
         turn_id,
         status: "pending".to_owned(),
         player_input: player_input.to_owned(),
-        selected_choice: selected_choice(player_input, &snapshot),
-        visible_context: visible_context(
-            &files,
-            &snapshot,
-            &entities,
-            &current_packet,
-            player_input,
-        )?,
-        private_adjudication_context: private_context(&hidden_state),
+        selected_choice: pending_choice,
+        visible_context,
+        private_adjudication_context,
         output_contract: AgentOutputContract {
             language: "ko".to_owned(),
             must_return_json: true,
@@ -380,6 +411,10 @@ pub fn commit_agent_turn(options: &AgentCommitTurnOptions) -> Result<CommittedAg
         load_pending_agent_turn(options.store_root.as_deref(), options.world_id.as_str())?;
     let response = canonical_agent_turn_response(options.response.clone());
     validate_agent_response(&pending, &response)?;
+    let plot_thread_event_plan = prepare_plot_thread_event_plan(
+        &pending.visible_context.active_plot_threads,
+        &response.plot_thread_events,
+    )?;
     let extra_memory_projection = compile_extra_memory_projection(
         files.dir.as_path(),
         options.world_id.as_str(),
@@ -427,6 +462,7 @@ pub fn commit_agent_turn(options: &AgentCommitTurnOptions) -> Result<CommittedAg
         .with_context(|| format!("failed to create {}", turn_dir.display()))?;
     let response_path = turn_dir.join("agent_response.json");
     write_json(&response_path, &response)?;
+    append_plot_thread_event_plan(files.dir.as_path(), &plot_thread_event_plan)?;
 
     let packet = build_vn_packet(&BuildVnPacketOptions {
         store_root: options.store_root.clone(),
@@ -679,8 +715,27 @@ fn visible_context(
     snapshot: &TurnSnapshot,
     entities: &crate::models::EntityRecords,
     current_packet: &VnPacket,
+    selected_choice: Option<&PendingAgentChoice>,
+    private_context: &AgentPrivateAdjudicationContext,
     player_input: &str,
 ) -> Result<AgentVisibleContext> {
+    let extra_memory = retrieve_extra_memory_packet(
+        files.dir.as_path(),
+        current_packet.world_id.as_str(),
+        snapshot,
+        player_input,
+    )?;
+    let active_scene_pressure = compile_scene_pressure_packet(
+        snapshot,
+        selected_choice,
+        &extra_memory,
+        private_context,
+        player_input,
+    )?;
+    let active_plot_threads = compile_plot_thread_packet(snapshot);
+    let active_body_resource_state = compile_body_resource_packet(snapshot);
+    let active_location_graph = compile_location_graph_packet(snapshot, entities);
+    let active_character_text_design = compile_character_text_design_packet(entities);
     Ok(AgentVisibleContext {
         location: snapshot.protagonist_state.location.clone(),
         recent_scene: current_packet.scene.text_blocks.clone(),
@@ -695,12 +750,12 @@ fn visible_context(
                 anchor: character.voice_anchor.clone(),
             })
             .collect(),
-        extra_memory: retrieve_extra_memory_packet(
-            files.dir.as_path(),
-            current_packet.world_id.as_str(),
-            snapshot,
-            player_input,
-        )?,
+        extra_memory,
+        active_scene_pressure,
+        active_plot_threads,
+        active_body_resource_state,
+        active_location_graph,
+        active_character_text_design,
     })
 }
 
@@ -916,6 +971,7 @@ premise:
             canon_event: None,
             entity_updates: Vec::new(),
             relationship_updates: Vec::new(),
+            plot_thread_events: Vec::new(),
             extra_contacts: Vec::new(),
             hidden_state_delta: Vec::new(),
             next_choices: legacy_slot_contract_choices(),
@@ -999,6 +1055,7 @@ premise:
                 canon_event: None,
                 entity_updates: Vec::new(),
                 relationship_updates: Vec::new(),
+                plot_thread_events: Vec::new(),
                 extra_contacts: Vec::new(),
                 hidden_state_delta: Vec::new(),
                 next_choices: scene_specific_choices(),
@@ -1066,6 +1123,7 @@ premise:
                 canon_event: None,
                 entity_updates: Vec::new(),
                 relationship_updates: Vec::new(),
+                plot_thread_events: Vec::new(),
                 extra_contacts: vec![AgentExtraContact {
                     surface_label: "gate porter".to_owned(),
                     known_name: None,
@@ -1148,6 +1206,7 @@ premise:
                 canon_event: None,
                 entity_updates: Vec::new(),
                 relationship_updates: Vec::new(),
+                plot_thread_events: Vec::new(),
                 extra_contacts: vec![AgentExtraContact {
                     surface_label: "gate porter".to_owned(),
                     known_name: None,
@@ -1212,6 +1271,7 @@ premise:
                 canon_event: None,
                 entity_updates: Vec::new(),
                 relationship_updates: Vec::new(),
+                plot_thread_events: Vec::new(),
                 extra_contacts: Vec::new(),
                 hidden_state_delta: Vec::new(),
                 next_choices: Vec::new(),
@@ -1262,6 +1322,7 @@ premise:
                 canon_event: None,
                 entity_updates: Vec::new(),
                 relationship_updates: Vec::new(),
+                plot_thread_events: Vec::new(),
                 extra_contacts: Vec::new(),
                 hidden_state_delta: Vec::new(),
                 next_choices: default_turn_choices(),
@@ -1316,6 +1377,7 @@ premise:
                 canon_event: None,
                 entity_updates: Vec::new(),
                 relationship_updates: Vec::new(),
+                plot_thread_events: Vec::new(),
                 extra_contacts: vec![AgentExtraContact {
                     surface_label: "player-visible 주변 인물 표지".to_owned(),
                     known_name: None,

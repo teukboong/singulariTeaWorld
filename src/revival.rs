@@ -1,8 +1,12 @@
 use crate::agent_bridge::PendingAgentTurn;
 use crate::codex_view::{BuildCodexViewOptions, build_codex_view};
+use crate::relationship_graph::compile_relationship_graph_packet;
 use crate::resume::{BuildResumePackOptions, build_resume_pack};
 use crate::store::{resolve_store_paths, world_file_paths};
-use crate::world_db::{recent_entity_updates, recent_relationship_updates, search_world_db};
+use crate::world_db::{
+    recent_entity_updates, recent_relationship_updates, search_world_db, visible_world_facts,
+};
+use crate::world_lore::compile_world_lore_packet;
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -78,6 +82,21 @@ pub fn build_agent_revival_packet(options: &AgentRevivalCompileOptions<'_>) -> R
         pending.world_id.as_str(),
         WEBGPT_REVIVAL_UPDATE_LIMIT,
     )?;
+    let active_relationship_graph = compile_relationship_graph_packet(
+        pending.world_id.as_str(),
+        pending.turn_id.as_str(),
+        &relationship_updates,
+    );
+    let world_facts = visible_world_facts(
+        files.dir.as_path(),
+        pending.world_id.as_str(),
+        WEBGPT_REVIVAL_UPDATE_LIMIT,
+    )?;
+    let active_world_lore = compile_world_lore_packet(
+        pending.world_id.as_str(),
+        pending.turn_id.as_str(),
+        &world_facts,
+    );
 
     Ok(serde_json::json!({
         "schema_version": AGENT_REVIVAL_PACKET_SCHEMA_VERSION,
@@ -110,6 +129,11 @@ pub fn build_agent_revival_packet(options: &AgentRevivalCompileOptions<'_>) -> R
             "known_facts": pending.visible_context.known_facts,
             "voice_anchors": pending.visible_context.voice_anchors,
             "extra_memory": pending.visible_context.extra_memory,
+            "active_scene_pressure": pending.visible_context.active_scene_pressure,
+            "active_plot_threads": pending.visible_context.active_plot_threads,
+            "active_body_resource_state": pending.visible_context.active_body_resource_state,
+            "active_location_graph": pending.visible_context.active_location_graph,
+            "active_character_text_design": pending.visible_context.active_character_text_design,
             "active_memory_revival": {
                 "player_visible_archive_view": archive_view,
                 "query_recall": {
@@ -117,7 +141,9 @@ pub fn build_agent_revival_packet(options: &AgentRevivalCompileOptions<'_>) -> R
                     "hits": query_recall_hits
                 },
                 "recent_entity_updates": entity_updates,
-                "recent_relationship_updates": relationship_updates
+                "recent_relationship_updates": relationship_updates,
+                "active_relationship_graph": active_relationship_graph,
+                "active_world_lore": active_world_lore
             }
         },
         "private_adjudication_context": pending.private_adjudication_context,

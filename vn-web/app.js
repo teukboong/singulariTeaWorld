@@ -1306,17 +1306,39 @@ function worldJobLedgerRow(job) {
   const row = document.createElement("article");
   row.className = "world-job-ledger-row";
   row.dataset.status = job.status || "unknown";
+  row.title = job.job_id || job.slot || "";
   const head = document.createElement("div");
   head.className = "world-job-ledger-row-head";
   const name = document.createElement("strong");
-  name.textContent = job.job_id || "job";
+  name.textContent = displayJobLabel(job);
   const status = document.createElement("span");
   status.textContent = job.status || "unknown";
   head.append(name, status);
   const detail = document.createElement("p");
-  detail.textContent = `${job.kind || "kind"} · ${job.slot || "slot"}`;
+  detail.textContent = displayJobDetail(job);
   row.append(head, detail);
   return row;
+}
+
+function displayJobLabel(job) {
+  const slot = job?.slot || job?.job_id || "job";
+  if (slot === "menu_background") return "menu background";
+  if (slot === "stage_background") return "stage background";
+  if (slot.startsWith("turn_cg:")) return `${slot.replace("turn_cg:", "")} CG`;
+  if (slot.startsWith("character_sheet:")) {
+    return `${slot.split(":").filter(Boolean).at(-1) || "character"} sheet`;
+  }
+  if (slot.startsWith("location_sheet:")) {
+    return `${slot.split(":").filter(Boolean).at(-1) || "location"} sheet`;
+  }
+  if (slot.startsWith("text_turn:")) return slot.replace("text_turn:", "text ");
+  return slot;
+}
+
+function displayJobDetail(job) {
+  const kind = job?.kind || "kind";
+  const artifact = job?.artifact_kind || "";
+  return artifact ? `${kind} · ${artifact}` : kind;
 }
 
 function hostSupervisorLaneRow(lane) {
@@ -1353,7 +1375,8 @@ function hostSupervisorLaneRow(lane) {
 function hostSupervisorJobItem(status, job) {
   const item = document.createElement("li");
   item.dataset.status = status;
-  item.textContent = `${status} · ${job.job_id || "job"} · ${job.slot || "slot"}`;
+  item.title = job.job_id || job.slot || "";
+  item.textContent = `${status} · ${displayJobLabel(job)} · ${displayJobDetail(job)}`;
   return item;
 }
 

@@ -1932,7 +1932,7 @@ premise:
             input: "1".to_owned(),
         })?;
         let state = VnServerState {
-            store_root: Some(store),
+            store_root: Some(store.clone()),
             world_id: Mutex::new("stw_vn_server".to_owned()),
         };
         let response = choose_response(&state, &choose_request_body("6 세아에게 낮게 묻는다"));
@@ -1940,6 +1940,9 @@ premise:
         let pending: VnAgentPendingResponse = serde_json::from_slice(&response.body)?;
         assert_eq!(pending.status, "waiting_agent");
         assert_eq!(pending.turn_id, "turn_0002");
+        let world_dir = store.join("worlds").join("stw_vn_server");
+        assert!(world_dir.join("scene_pressure_audit.jsonl").is_file());
+        assert!(world_dir.join("plot_thread_audit.jsonl").is_file());
         Ok(())
     }
 

@@ -339,6 +339,7 @@ premise:
                 canon_event: None,
                 entity_updates: Vec::new(),
                 relationship_updates: Vec::new(),
+                plot_thread_events: Vec::new(),
                 extra_contacts: Vec::new(),
                 hidden_state_delta: Vec::new(),
                 next_choices: scene_specific_choices(),

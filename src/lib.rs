@@ -1,30 +1,39 @@
 pub mod adjudication;
 pub mod agent_bridge;
 pub mod backend_selection;
+pub mod body_resource;
+pub mod character_text_design;
 pub mod chat;
 pub mod codex_view;
 pub mod entity_update;
 pub mod extra_memory;
 pub mod host_supervisor;
 pub mod job_ledger;
+pub mod location_graph;
 pub mod models;
+pub mod plot_thread;
 pub mod projection_health;
+pub mod relationship_graph;
 pub mod render;
 pub mod resume;
 pub mod revival;
+pub mod scene_pressure;
 pub mod sqlite;
 pub mod start;
 pub mod store;
 pub mod transfer;
 pub mod turn;
 pub mod turn_commit;
+pub mod turn_context;
 pub mod validate;
+pub mod visual_asset_graph;
 pub mod visual_assets;
 pub mod vn;
 pub mod vn_server;
 pub mod voice_anchor;
 pub mod world_db;
 pub mod world_docs;
+pub mod world_lore;
 
 pub use adjudication::{AdjudicationInput, adjudicate_turn};
 pub use agent_bridge::{
@@ -39,6 +48,16 @@ pub use backend_selection::{
     WORLD_BACKEND_SELECTION_FILENAME, WORLD_BACKEND_SELECTION_SCHEMA_VERSION,
     WorldBackendSelection, WorldTextBackend, WorldVisualBackend, backend_selection_path,
     load_world_backend_selection, save_world_backend_selection,
+};
+pub use body_resource::{
+    BODY_CONSTRAINT_SCHEMA_VERSION, BODY_RESOURCE_PACKET_SCHEMA_VERSION, BodyConstraint,
+    BodyResourcePacket, BodyResourcePolicy, BodyResourceVisibility, RESOURCE_ITEM_SCHEMA_VERSION,
+    ResourceItem, ResourceKind, compile_body_resource_packet,
+};
+pub use character_text_design::{
+    CHARACTER_TEXT_DESIGN_PACKET_SCHEMA_VERSION, CHARACTER_TEXT_DESIGN_SCHEMA_VERSION,
+    CharacterTextDesign, CharacterTextDesignPacket, CharacterTextDesignPolicy,
+    compile_character_text_design_packet,
 };
 pub use chat::{
     CHAT_ROUTE_SCHEMA_VERSION, ChatRoute, ChatRouteOptions, render_chat_route, route_chat_input,
@@ -68,6 +87,10 @@ pub use job_ledger::{
     ReadWorldJobsOptions, WORLD_JOB_LEDGER_SCHEMA_VERSION, WorldJob, WorldJobKind, WorldJobStatus,
     read_world_jobs,
 };
+pub use location_graph::{
+    LOCATION_GRAPH_PACKET_SCHEMA_VERSION, LOCATION_NODE_SCHEMA_VERSION, LocationGraphPacket,
+    LocationGraphPolicy, LocationKnowledgeState, LocationNode, compile_location_graph_packet,
+};
 pub use models::{
     ADJUDICATION_SCHEMA_VERSION, ANCHOR_CHARACTER_ID, ANCHOR_CHARACTER_INVARIANT, AdjudicationGate,
     AdjudicationReport, AnchorCharacter, CANON_EVENT_SCHEMA_VERSION, CODEX_VIEW_SCHEMA_VERSION,
@@ -83,9 +106,21 @@ pub use models::{
     TurnChoice, TurnInputKind, TurnLogEntry, TurnSnapshot, VisibleState, WorldPremise, WorldRecord,
     WorldSeed, default_freeform_choice, default_turn_choices, normalize_turn_choices,
 };
+pub use plot_thread::{
+    PLOT_THREAD_AUDIT_FILENAME, PLOT_THREAD_AUDIT_SCHEMA_VERSION, PLOT_THREAD_EVENT_SCHEMA_VERSION,
+    PLOT_THREAD_EVENTS_FILENAME, PLOT_THREAD_PACKET_SCHEMA_VERSION, PLOT_THREAD_SCHEMA_VERSION,
+    PlotThread, PlotThreadAuditRecord, PlotThreadChange, PlotThreadEvent, PlotThreadEventPlan,
+    PlotThreadEventRecord, PlotThreadKind, PlotThreadPacket, PlotThreadPolicy, PlotThreadStatus,
+    PlotThreadUrgency, append_plot_thread_audit, append_plot_thread_event_plan,
+    compile_plot_thread_packet, prepare_plot_thread_event_plan,
+};
 pub use projection_health::{
     PROJECTION_HEALTH_SCHEMA_VERSION, ProjectionComponentHealth, ProjectionHealthReport,
     ProjectionHealthStatus, build_projection_health_report, render_projection_health_report,
+};
+pub use relationship_graph::{
+    RELATIONSHIP_EDGE_SCHEMA_VERSION, RELATIONSHIP_GRAPH_PACKET_SCHEMA_VERSION, RelationshipEdge,
+    RelationshipGraphPacket, RelationshipGraphPolicy, compile_relationship_graph_packet,
 };
 pub use render::{RenderPacketLoadOptions, load_render_packet, render_packet_markdown};
 pub use resume::{
@@ -94,6 +129,13 @@ pub use resume::{
 };
 pub use revival::{
     AGENT_REVIVAL_PACKET_SCHEMA_VERSION, AgentRevivalCompileOptions, build_agent_revival_packet,
+};
+pub use scene_pressure::{
+    SCENE_PRESSURE_AUDIT_FILENAME, SCENE_PRESSURE_AUDIT_SCHEMA_VERSION,
+    SCENE_PRESSURE_PACKET_SCHEMA_VERSION, SCENE_PRESSURE_SCHEMA_VERSION, ScenePressure,
+    ScenePressureAuditRecord, ScenePressureKind, ScenePressurePacket, ScenePressurePolicy,
+    ScenePressureProseEffect, ScenePressureUrgency, ScenePressureVisibility,
+    append_scene_pressure_audit, compile_scene_pressure_packet,
 };
 pub use start::{
     StartWorldOptions, StartedWorld, render_started_world_report, start_world,
@@ -115,7 +157,16 @@ pub use turn_commit::{
     TurnCommitStatus, TurnMaterializationRepairReport, append_turn_commit_envelope,
     repair_turn_materializations,
 };
+pub use turn_context::{
+    TURN_CONTEXT_PACKET_SCHEMA_VERSION, TurnContextAssemblyPolicy, TurnContextPacket,
+    assemble_turn_context_packet,
+};
 pub use validate::{ValidationReport, ValidationStatus, validate_world};
+pub use visual_asset_graph::{
+    VISUAL_ASSET_GRAPH_PACKET_SCHEMA_VERSION, VISUAL_ASSET_NODE_SCHEMA_VERSION,
+    VisualAssetBoundary, VisualAssetGraphPacket, VisualAssetGraphPolicy, VisualAssetJobNode,
+    VisualAssetNode, compile_visual_asset_graph_packet,
+};
 pub use visual_assets::{
     BuildWorldVisualAssetsOptions, CHARACTER_SHEETS_DIR, ClaimVisualJobOptions,
     CompiledVisualPrompt, CompleteVisualJobOptions, HostImageGenerationCall, IMAGE_GENERATION_TOOL,
@@ -146,3 +197,7 @@ pub use world_db::{
     world_db_stats,
 };
 pub use world_docs::{WORLD_DOCS_DIR, refresh_world_docs, world_docs_dir};
+pub use world_lore::{
+    WORLD_LORE_ENTRY_SCHEMA_VERSION, WORLD_LORE_PACKET_SCHEMA_VERSION, WorldLoreDomain,
+    WorldLoreEntry, WorldLorePacket, WorldLorePolicy, compile_world_lore_packet,
+};

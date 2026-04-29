@@ -1301,7 +1301,7 @@ select {
 .runtime-status-panel {
   display: grid;
   gap: 8px;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
 }
 
 .runtime-status-pill,
@@ -1414,6 +1414,10 @@ select {
   font-family: var(--font-mono);
   font-size: 0.72rem;
   letter-spacing: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .world-job-ledger-title span,
@@ -1425,12 +1429,14 @@ select {
   font-size: 0.66rem;
   letter-spacing: 0;
   overflow-wrap: anywhere;
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .world-job-ledger-list,
 .host-supervisor-list {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 6px;
 }
 
@@ -1441,6 +1447,8 @@ select {
   border-left: 2px solid var(--line-soft);
   padding: 6px 8px;
   background: rgba(238, 238, 238, 0.03);
+  min-width: 0;
+  overflow: hidden;
 }
 
 .world-job-ledger-row[data-status="completed"],
@@ -1472,15 +1480,20 @@ select {
   display: grid;
   gap: 3px;
   margin: 0;
-  padding-left: 15px;
+  padding-left: 0;
+  list-style: none;
   color: var(--muted);
   font-family: var(--font-mono);
   font-size: 0.66rem;
   line-height: 1.35;
+  min-width: 0;
 }
 
 .host-supervisor-jobs li {
-  overflow-wrap: anywhere;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .projection-health-title,
@@ -1939,7 +1952,9 @@ select {
   right: 24px;
   top: 76px;
   z-index: 11;
-  width: min(520px, calc(100vw - 48px));
+  width: min(680px, calc(100vw - 48px));
+  max-height: calc(100vh - 96px);
+  overflow: auto;
   display: grid;
   gap: 10px;
   padding-bottom: 12px;

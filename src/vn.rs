@@ -7,6 +7,7 @@ use crate::models::{
 };
 use crate::render::{RenderPacketLoadOptions, load_render_packet, render_packet_markdown};
 use crate::store::{TURN_LOG_FILENAME, load_world_record, resolve_store_paths, world_file_paths};
+use crate::visual_asset_graph::{VisualAssetGraphPacket, compile_visual_asset_graph_packet};
 use crate::visual_assets::{
     BuildWorldVisualAssetsOptions, ImageGenerationJob, VN_ASSETS_DIR, VisualArtifactKind,
     VisualBudgetPolicy, WorldVisualAssets, build_world_visual_assets, compile_turn_visual_prompt,
@@ -58,6 +59,7 @@ pub struct VnPacket {
     pub scene: VnScene,
     pub image: VnSceneImage,
     pub visual_assets: WorldVisualAssets,
+    pub visual_asset_graph: VisualAssetGraphPacket,
     pub choices: Vec<VnChoice>,
     pub codex_surface: VnCodexSurface,
     pub hidden_filter: VnHiddenFilter,
@@ -226,6 +228,7 @@ pub fn build_vn_packet(options: &BuildVnPacketOptions) -> Result<VnPacket> {
         retry_requested,
         &visual_assets.budget_policy,
     );
+    let visual_asset_graph = compile_visual_asset_graph_packet(&visual_assets);
     let turn_visual_prompt = compile_turn_visual_prompt(&world, &render_packet, &visual_assets);
     let turn_cg_job = if turn_cg_decision.requested && (!turn_cg_exists || retry_requested) {
         Some(turn_cg_image_generation_job(
@@ -268,6 +271,7 @@ pub fn build_vn_packet(options: &BuildVnPacketOptions) -> Result<VnPacket> {
             prompt_policy: turn_visual_prompt.prompt_policy,
         },
         visual_assets,
+        visual_asset_graph,
         choices: vn_choices(&world, &render_packet.visible_state.choices),
         codex_surface,
         hidden_filter: VnHiddenFilter {

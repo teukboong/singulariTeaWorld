@@ -6,16 +6,16 @@ use singulari_world::{
     ACTIVE_WORLD_FILENAME, AdvanceTurnOptions, AgentCommitTurnOptions, AgentRevivalCompileOptions,
     AgentSubmitTurnOptions, AgentTurnResponse, ApplyCharacterAnchorOptions, InitWorldOptions,
     RenderPacketLoadOptions, ValidationStatus, WorldTextBackend, WorldVisualBackend, advance_turn,
-    apply_character_anchor, build_agent_revival_packet, build_codex_view, build_resume_pack,
-    commit_agent_turn, enqueue_agent_turn, force_chapter_summary, init_world, load_active_world,
-    load_latest_snapshot, load_pending_agent_turn, load_render_packet,
-    load_world_backend_selection, load_world_record, recent_entity_updates,
-    recent_relationship_updates, refresh_world_docs, render_advanced_turn_report,
-    render_chat_route, render_codex_view_section_markdown, render_host_supervisor_plan,
-    render_packet_markdown, render_projection_health_report, render_resume_pack_markdown,
-    render_started_world_report, repair_extra_memory_projection, repair_turn_materializations,
-    repair_world_db, resolve_store_paths, resolve_world_id, route_chat_input, search_world_db,
-    start_world, validate_world, world_db_stats,
+    apply_character_anchor, assemble_turn_context_packet, build_agent_revival_packet,
+    build_codex_view, build_resume_pack, commit_agent_turn, enqueue_agent_turn,
+    force_chapter_summary, init_world, load_active_world, load_latest_snapshot,
+    load_pending_agent_turn, load_render_packet, load_world_backend_selection, load_world_record,
+    recent_entity_updates, recent_relationship_updates, refresh_world_docs,
+    render_advanced_turn_report, render_chat_route, render_codex_view_section_markdown,
+    render_host_supervisor_plan, render_packet_markdown, render_projection_health_report,
+    render_resume_pack_markdown, render_started_world_report, repair_extra_memory_projection,
+    repair_turn_materializations, repair_world_db, resolve_store_paths, resolve_world_id,
+    route_chat_input, search_world_db, start_world, validate_world, world_db_stats,
 };
 use singulari_world::{
     BuildCodexViewOptions, BuildResumePackOptions, BuildVnPacketOptions,
@@ -3352,12 +3352,17 @@ fn ensure_image_job_matches_session_kind(
                 && job.canonical_use == job.artifact_kind.canonical_use()
         }
         WebGptImageSessionKind::ReferenceAsset => {
-            matches!(
+            let design_reference = matches!(
                 job.artifact_kind,
                 VisualArtifactKind::CharacterDesignSheet | VisualArtifactKind::LocationDesignSheet
             ) && !job.display_allowed
                 && job.reference_allowed
-                && job.canonical_use == job.artifact_kind.canonical_use()
+                && job.canonical_use == job.artifact_kind.canonical_use();
+            let ui_background = job.artifact_kind == VisualArtifactKind::UiBackground
+                && job.display_allowed
+                && !job.reference_allowed
+                && job.canonical_use == job.artifact_kind.canonical_use();
+            design_reference || ui_background
         }
     };
     if valid {
@@ -3602,6 +3607,16 @@ const AGENT_TURN_RESPONSE_SCHEMA_GUIDE: &str = r#"AgentTurnResponse 스키마:
   },
   "entity_updates": [],
   "relationship_updates": [],
+  "plot_thread_events": [
+    {
+      "thread_id": "source_revival.memory_revival.active_plot_threads.active_visible 중 이번 턴에서 실제로 변한 thread_id",
+      "change": "advanced",
+      "status_after": "active",
+      "urgency_after": "soon",
+      "summary": "이번 visible_scene에서 이 thread가 어떻게 변했는지 한 문장",
+      "evidence_refs": ["visible_scene.text_blocks[0]"]
+    }
+  ],
   "extra_contacts": [],
   "hidden_state_delta": [],
   "next_choices": [
@@ -3618,16 +3633,28 @@ const AGENT_TURN_RESPONSE_SCHEMA_GUIDE: &str = r#"AgentTurnResponse 스키마:
 - next_choices는 서사 생성과 같은 응답에서 반드시 함께 작성한다. 별도 선택지 재생성 턴을 만들지 않는다.
 - slot 1,2,3,4,5의 tag/intent는 템플릿 문구가 아니라 이번 visible_scene에서 바로 이어지는 구체 선택지여야 한다.
 - next_choices 안에는 label/preview/choices 필드를 쓰지 않는다. 오직 slot/tag/intent만 쓴다.
+- plot_thread_events는 이번 턴에서 실제로 진행/복잡화/차단/해결/실패/퇴장한 active_visible thread만 적는다. 변화가 없으면 빈 배열이다.
+- plot_thread_events.thread_id는 source_revival.memory_revival.active_plot_threads.active_visible에 있는 thread_id만 쓴다. 새 thread를 임의로 만들거나 hidden/dormant 상태로 바꾸지 않는다.
 - slot 번호가 기능 계약이다. tag는 UI 문구이므로 장면에 맞게 짧게 바꿔도 된다. 단 slot 7 tag는 "판단 위임"으로 유지한다.
 - extra_contacts는 주변 인물이 플레이어와 직접 상호작용했거나, 의미 있는 목격/거래/도움/위협/감정 흔적을 남겼을 때만 쓴다.
 - extra_contacts 항목을 쓸 때는 surface_label, contact_summary를 반드시 실제 장면 내용으로 채운다. 스키마 설명 문구나 예시 문구를 값으로 복사하지 않는다.
 - 단순 배경 군중은 extra_contacts에 넣지 않는다. 한 번 스쳐간 인물은 memory_action "trace", 다시 떠올릴 이유가 분명하면 "remember"를 쓴다."#;
 
-const NARRATIVE_TEXT_DESIGN_DIRECTIVE: &str = r"- 캐릭터 voice_anchors는 캐릭터 텍스트 디자인이다. speech는 화법, endings는 어미/말끝, tone은 어투/거리감/어휘, gestures는 반복 제스처, habits는 행동 습관, drift는 변화 방향으로 적용한다.
+const SEEDLESS_PROSE_CONTRACT: &str = r"- 이 계약은 seedless style contract다. 여기 있는 문체/작법 규칙은 소재, 사건, 인물, 장소, 장르 장치, 과거사, 상징을 새로 만들 권한이 없다.
+- scene_fact_boundaries: 오직 revival packet의 player-visible facts, current player_input, visible canon, active memory revival에서 허용된 사실만 쓴다. style contract, schema examples, previous WebGPT phrasing, UI labels는 장면 사실이 아니다.
+- 캐릭터 voice_anchors는 캐릭터 텍스트 디자인이다. speech는 화법, endings는 어미/말끝, tone은 어투/거리감/어휘, gestures는 반복 제스처, habits는 행동 습관, drift는 변화 방향으로 적용한다.
 - 문체와 서사 작법은 캐릭터에 귀속하지 말고 visible_scene의 전역 서사에만 적용한다. 기본 문체는 감각 단서 -> 행동/반응 -> 유보된 추론 -> 선택 압박 -> 여운 순서로 문단을 쌓는 VN prose다.
-- 한국어 문체는 자연스러운 구어 기반 서사다. 번역체/보고서체/만연체를 피하고, 긴 인과문은 감각·반응·판단으로 쪼갠다.
+- paragraph_grammar: 각 문단은 감각 변화, 몸의 반응, 외부 압력, 해석을 유보한 단서, 다음 행동을 압박하는 변화 중 최소 둘을 포함한다.
+- 시작 문단은 배경 설명이 아니라 현재 장면에서 감각적으로 바뀐 것과 visible constraint를 연다.
+- 상호작용 문단은 말 한 줄, 작은 몸짓, 끊긴 반응, 침묵, 거리 변화 중 하나를 중심으로 둔다. 대사 뒤에는 설명 대신 행동이나 사물 반응을 붙인다.
+- 마감 문단은 요약이나 교훈으로 닫지 말고, 바로 다음 선택을 압박하는 미해결 상태로 닫는다.
+- dialogue_contract: 대사는 설명문이 아니다. 인물이 자기 상태, 세계 규칙, 선택지 의도를 길게 해설하지 않게 하고, 말은 짧은 호흡·망설임·생략·상대와의 거리감으로 구분한다.
+- style_vector: sentence_pressure=high, exposition_directness=low, sensory_density=medium_high, dialogue_explanation=low, paragraph_closure=unresolved, metaphor_density=low_medium, interior_monologue=restrained, scene_continuity=strict.
+- anti_translation_rules: 한국어 문체는 자연스러운 구어 기반 서사다. 번역체/보고서체/만연체를 피하고, 긴 인과문은 감각·반응·판단으로 쪼갠다.
 - 문장은 보통 25~55자 안팎으로 끊고, 90자를 넘는 문장은 드물게만 쓴다. 한 문장에 원인, 감각, 판단, 결과를 모두 넣지 마라.
 - `해당`, `진행`, `확인`, `수행`, `위치하다`, `존재하다`, `~하는 것이 필요했다`, `~하는 것으로 보였다`, `~할 수 있었다` 같은 번역체/보고서체 표현을 남발하지 마라.
+- prohibited_seed_leakage: Style source는 리듬, 생략, 문단 배열, 대사 압력, 금지 표현만 제어한다. Style source를 content source로 해석하지 마라.
+- 유명 작품명, 작가명, 장르 관습, 예시 문장, 문체 설명에서 소재를 빌려오지 마라. seed/canon에 없는 사물·인물·사건·상징·시대감은 품질 향상 명목으로도 추가하지 않는다.
 - 추상 감정 설명보다 몸, 시선, 호흡, 손, 거리, 소리, 냄새, 온도 같은 관찰 가능한 흔적으로 보여준다.
 - 문단 끝에는 다음 행동을 압박하는 작은 불편함이나 미해결 감각을 남긴다. 다만 선택지 의도나 시스템 판단을 본문에서 해설하지 않는다.
 - 문체를 설명문으로 노출하지 마라. 대사 말끝, 행동 습관, 문단 박자, 장면 압력으로만 체감되게 써라.
@@ -3637,13 +3664,14 @@ fn build_webgpt_turn_prompt(
     store_root: Option<&Path>,
     pending: &singulari_world::PendingAgentTurn,
 ) -> Result<String> {
-    let revival_packet = build_agent_revival_packet(&AgentRevivalCompileOptions {
+    let source_revival_packet = build_agent_revival_packet(&AgentRevivalCompileOptions {
         store_root,
         pending,
         engine_session_kind: "webgpt_project_session",
     })?;
-    let revival_packet = serde_json::to_string_pretty(&revival_packet)
-        .context("failed to serialize webgpt revival packet")?;
+    let turn_context_packet = assemble_turn_context_packet(pending, source_revival_packet);
+    let turn_context_packet = serde_json::to_string_pretty(&turn_context_packet)
+        .context("failed to serialize webgpt turn context packet")?;
     let narrative_budget = &pending.output_contract.narrative_budget;
     Ok(format!(
         r#"Singulari World web frontend에서 pending turn 하나가 들어왔어. 너는 WebGPT narrative engine adapter다.
@@ -3655,11 +3683,11 @@ fn build_webgpt_turn_prompt(
 
 역할:
 - 너는 Singulari World의 trusted narrative agent다.
-- 플레이어에게 다시 묻지 말고, 아래 revival packet만 보고 바로 서사 턴을 작성한다.
+- 플레이어에게 다시 묻지 말고, 아래 turn context packet만 보고 바로 서사 턴을 작성한다.
 - hidden/private context는 판정에만 쓰고, visible_scene/canon_event/choice text에는 절대 누출하지 않는다.
 - 출력 서사는 한국어 VN prose다. 대화, 제스처, 말버릇을 살리고, 게임식 수치 계산처럼 보이게 쓰지 않는다.
 {text_design_directive}
-- 출력량은 revival packet의 output_contract.narrative_level과 narrative_budget을 따른다. 레벨 간 차이는 확연해야 한다.
+- 출력량은 turn context packet의 source_revival.output_contract.narrative_level과 narrative_budget을 따른다. 레벨 간 차이는 확연해야 한다.
 - 레벨 1은 표준 VN 밀도, 레벨 2는 장면 확장 밀도, 레벨 3은 장편 연재 밀도다. 레벨 2/3에서는 같은 사건도 감각, 행동, 반응, 여운, 압박을 더 길게 쌓는다.
 - player_input이 "세계 개막"이면 그것은 선택지가 아니라 시드에서 첫 서사를 여는 bootstrap turn이다.
 - 시드나 visible facts에 명시되지 않은 장르 문법을 추론해서 주입하지 마라. 특히 현대인 전생, 환생, 빙의, 회귀, 이세계 전이, 시스템/치트/상태창은 seed premise나 player-visible canon에 명시된 경우에만 쓴다.
@@ -3669,17 +3697,25 @@ fn build_webgpt_turn_prompt(
 - slot 7은 항상 판단 위임이고 preview는 숨긴다: "맡긴다. 세부 내용은 선택 후 드러난다."
 - slot 6은 항상 자유서술이며 inline prose를 요구하는 선택지로 둔다.
 - 이 WebGPT conversation의 이전 turn들은 말맛, 직전 감정선, 장면 리듬을 잇는 working context다.
-- ChatGPT Project의 새 세션이나 기존 conversation history는 기억 저장소가 아니다. 세계 연속성은 revival packet으로만 회생한다.
-- WebGPT는 기억 회생을 더 적극적으로 한다. memory_revival.active_memory_revival의 Archive View, query recall, recent entity/relationship updates를 먼저 훑고 이번 player_input과 이어지는 장면 압력을 반영한다.
-- 세계의 사실/상태/source of truth는 아래 revival packet과 world store다. 웹 채팅 UI나 이전 MCP tool 결과를 source of truth로 쓰지 마라.
-- conversation/project context가 compact 되었거나 revival packet과 충돌하면 revival packet을 우선한다.
+- ChatGPT Project의 새 세션이나 기존 conversation history는 기억 저장소가 아니다. 세계 연속성은 turn_context_packet.source_revival로만 회생한다.
+- WebGPT는 기억 회생을 더 적극적으로 한다. source_revival.memory_revival.active_memory_revival의 Archive View, query recall, recent entity/relationship updates를 먼저 훑고 이번 player_input과 이어지는 장면 압력을 반영한다.
+- source_revival.memory_revival.active_scene_pressure는 이번 턴 선택지와 문단 박자를 누르는 압력 계약이다. visible_active는 visible_scene/next_choices에 반영하고, hidden_adjudication_only는 판정에만 쓰며 본문/선택지/요약에 누출하지 마라.
+- source_revival.memory_revival.active_plot_threads는 현재 열린 문제와 미해결 질문이다. quest-log처럼 설명하지 말고, 이번 장면이 자연스럽게 건드리는 thread만 선택지와 장면 압력으로 이어라.
+- source_revival.memory_revival.active_body_resource_state는 주인공의 몸 상태와 실제 보유 자원이다. 없는 물건을 선택지 해결책으로 만들지 말고, 몸 제약은 행동/감각/타인 반응에 필요한 만큼만 반영해라.
+- source_revival.memory_revival.active_location_graph는 현재 장소와 알려진 주변 장소다. 이동 선택지는 이 표면의 known/visited 장소 또는 visible_scene에서 정당화된 탐색 행동으로만 열어라.
+- source_revival.memory_revival.active_character_text_design은 캐릭터별 화법/어미/어투/제스처/습관/drift 계약이다. 전역 문체와 섞지 말고, 인물이 말하거나 행동할 때만 자연스럽게 반영해라.
+- source_revival.memory_revival.active_memory_revival.active_relationship_graph는 최근 관계 업데이트를 edge로 정규화한 표면이다. stance는 대사 거리감과 협조/거절/의심을 조절하지만, 본문에서 관계도를 해설하지 마라.
+- source_revival.memory_revival.active_memory_revival.active_world_lore는 player-visible world fact를 lore entry로 정규화한 표면이다. 세계 규칙/언어/법칙 제약으로만 쓰고, seed/canon에 없는 종교·제국·마법체계·역사를 새로 만들지 마라.
+- turn_context_packet.assembly_policy.adjudication_only_sections에 있는 섹션은 판정 전용이다. visible_scene, canon_event, choices, image prompt, player projection에 복사하지 마라.
+- 세계의 사실/상태/source of truth는 아래 turn context packet과 world store다. 웹 채팅 UI나 이전 MCP tool 결과를 source of truth로 쓰지 마라.
+- conversation/project context가 compact 되었거나 turn context packet과 충돌하면 turn context packet을 우선한다.
 - 웹 검색, 외부 사이트 탐색, repo 탐색, 소스 파일 읽기를 하지 마라. 필요한 스키마와 revival packet은 이 프롬프트 안에 있다.
 
 {agent_schema}
 
-revival packet JSON:
+turn context packet JSON:
 ```json
-{revival_packet}
+{turn_context_packet}
 ```
 
 출력:
@@ -3692,9 +3728,9 @@ revival packet JSON:
         target_chars = narrative_budget.target_chars,
         major_blocks = narrative_budget.major_turn_blocks,
         major_target_chars = narrative_budget.major_target_chars,
-        text_design_directive = NARRATIVE_TEXT_DESIGN_DIRECTIVE,
+        text_design_directive = SEEDLESS_PROSE_CONTRACT,
         agent_schema = AGENT_TURN_RESPONSE_SCHEMA_GUIDE,
-        revival_packet = revival_packet,
+        turn_context_packet = turn_context_packet,
         world_id = pending.world_id,
         turn_id = pending.turn_id,
     ))
@@ -3944,6 +3980,63 @@ mod tests {
     }
 
     #[test]
+    fn webgpt_image_session_accepts_ui_background_jobs_as_asset_lane() -> anyhow::Result<()> {
+        let job = test_image_job(
+            "menu_background",
+            VisualArtifactKind::UiBackground,
+            true,
+            false,
+        );
+
+        ensure_image_job_matches_session_kind(&job, WebGptImageSessionKind::ReferenceAsset)?;
+        Ok(())
+    }
+
+    #[test]
+    fn webgpt_image_session_rejects_ui_background_on_turn_cg_lane() {
+        let job = test_image_job(
+            "menu_background",
+            VisualArtifactKind::UiBackground,
+            true,
+            false,
+        );
+
+        assert!(
+            ensure_image_job_matches_session_kind(&job, WebGptImageSessionKind::TurnCg).is_err()
+        );
+    }
+
+    fn test_image_job(
+        slot: &str,
+        artifact_kind: VisualArtifactKind,
+        display_allowed: bool,
+        reference_allowed: bool,
+    ) -> ImageGenerationJob {
+        ImageGenerationJob {
+            tool: "worldsim.image.generate".to_owned(),
+            image_generation_call: singulari_world::HostImageGenerationCall {
+                capability: "image_generation".to_owned(),
+                slot: slot.to_owned(),
+                prompt: "prompt".to_owned(),
+                destination_path: format!("assets/{slot}.png"),
+                reference_paths: Vec::new(),
+                overwrite: false,
+            },
+            slot: slot.to_owned(),
+            artifact_kind,
+            canonical_use: artifact_kind.canonical_use().to_owned(),
+            display_allowed,
+            reference_allowed,
+            prompt: "prompt".to_owned(),
+            destination_path: format!("assets/{slot}.png"),
+            reference_asset_urls: Vec::new(),
+            reference_paths: Vec::new(),
+            overwrite: false,
+            register_policy: "test".to_owned(),
+        }
+    }
+
+    #[test]
     fn webgpt_lane_runtime_defaults_are_isolated() -> anyhow::Result<()> {
         let options = HostWorkerOptions {
             interval_ms: 750,
@@ -4178,11 +4271,23 @@ premise:
         for required in [
             "너는 Singulari World의 trusted narrative agent다.",
             "출력 서사는 한국어 VN prose다. 대화, 제스처, 말버릇을 살리고",
+            "이 계약은 seedless style contract다.",
+            "문체/작법 규칙은 소재, 사건, 인물, 장소, 장르 장치, 과거사, 상징을 새로 만들 권한이 없다.",
+            "scene_fact_boundaries: 오직 revival packet의 player-visible facts",
             "speech는 화법, endings는 어미/말끝, tone은 어투/거리감/어휘",
             "문체와 서사 작법은 캐릭터에 귀속하지 말고 visible_scene의 전역 서사에만 적용한다.",
+            "paragraph_grammar: 각 문단은 감각 변화, 몸의 반응, 외부 압력, 해석을 유보한 단서, 다음 행동을 압박하는 변화 중 최소 둘을 포함한다.",
+            "시작 문단은 배경 설명이 아니라 현재 장면에서 감각적으로 바뀐 것과 visible constraint를 연다.",
+            "상호작용 문단은 말 한 줄, 작은 몸짓, 끊긴 반응, 침묵, 거리 변화 중 하나를 중심으로 둔다.",
+            "마감 문단은 요약이나 교훈으로 닫지 말고",
+            "dialogue_contract: 대사는 설명문이 아니다.",
+            "style_vector: sentence_pressure=high",
+            "anti_translation_rules: 한국어 문체는 자연스러운 구어 기반 서사다.",
             "번역체/보고서체/만연체를 피하고, 긴 인과문은 감각·반응·판단으로 쪼갠다.",
             "문장은 보통 25~55자 안팎으로 끊고, 90자를 넘는 문장은 드물게만 쓴다.",
             "`해당`, `진행`, `확인`, `수행`, `위치하다`, `존재하다`",
+            "prohibited_seed_leakage: Style source는 리듬, 생략, 문단 배열, 대사 압력, 금지 표현만 제어한다.",
+            "유명 작품명, 작가명, 장르 관습, 예시 문장, 문체 설명에서 소재를 빌려오지 마라.",
             "추상 감정 설명보다 몸, 시선, 호흡, 손, 거리, 소리, 냄새, 온도 같은 관찰 가능한 흔적으로 보여준다.",
             "선택지 의도나 시스템 판단을 본문에서 해설하지 않는다.",
             "레벨 1은 표준 VN 밀도, 레벨 2는 장면 확장 밀도, 레벨 3은 장편 연재 밀도다.",
@@ -4190,9 +4295,12 @@ premise:
             "현대인 전생, 환생, 빙의, 회귀, 이세계 전이, 시스템/치트/상태창은 seed premise나 player-visible canon에 명시된 경우에만 쓴다.",
             "병원/전기/주소 같은 현대 대비",
             "이 WebGPT conversation의 이전 turn들은 말맛, 직전 감정선, 장면 리듬을 잇는 working context다.",
-            "conversation/project context가 compact 되었거나 revival packet과 충돌하면 revival packet을 우선한다.",
+            "conversation/project context가 compact 되었거나 turn context packet과 충돌하면 turn context packet을 우선한다.",
             "WebGPT는 기억 회생을 더 적극적으로 한다.",
+            "turn_context_packet.assembly_policy.adjudication_only_sections",
             "웹 검색, 외부 사이트 탐색, repo 탐색, 소스 파일 읽기를 하지 마라.",
+            "\"schema_version\": \"singulari.turn_context_packet.v1\"",
+            "\"source_revival\"",
             "\"schema_version\": \"singulari.agent_revival_packet.v1\"",
             "\"retrieval_profile\"",
             "\"name\": \"webgpt_active_memory\"",
@@ -4203,6 +4311,14 @@ premise:
             "\"query_recall\"",
             "\"recent_entity_updates\"",
             "\"recent_relationship_updates\"",
+            "\"active_relationship_graph\"",
+            "\"active_scene_pressure\"",
+            "\"active_plot_threads\"",
+            "\"plot_thread_events\"",
+            "\"change\": \"advanced\"",
+            "\"active_body_resource_state\"",
+            "\"active_location_graph\"",
+            "\"active_character_text_design\"",
             "\"source_of_truth_policy\"",
             "\"continuity_source\": \"memory_revival.resume_pack + memory_revival.active_memory_revival\"",
             "\"conflict_rule\": \"revival_packet_wins\"",
