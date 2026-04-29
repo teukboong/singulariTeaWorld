@@ -18,6 +18,10 @@ mkdir -p "$DIST_DIR"
 cp target/release/singulari-world "$DIST_DIR/"
 cp target/release/singulari-world-mcp "$DIST_DIR/"
 cp README.md AGENTS.md LICENSE "$DIST_DIR/"
-cp -R docs examples scripts webgpt-mcp-checkout "$DIST_DIR/"
+cp -R docs examples scripts "$DIST_DIR/"
+rsync -a \
+  --exclude 'target/' \
+  --exclude 'chatgpt-worker/node_modules/' \
+  webgpt-mcp-checkout/ "$DIST_DIR/webgpt-mcp-checkout/"
 
 echo "release artifacts: $DIST_DIR"

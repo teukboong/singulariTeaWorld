@@ -1962,8 +1962,7 @@ fn dispatch_visual_job_via_webgpt_with_claim_release(
             let released_claim_id = release
                 .claim
                 .as_ref()
-                .map(|released| released.claim_id.as_str())
-                .unwrap_or("<none>");
+                .map_or("<none>", |released| released.claim_id.as_str());
             Err(dispatch_error).with_context(|| {
                 format!(
                     "released visual job claim after WebGPT image dispatch failed: world_id={}, slot={}, claim_id={}, released_claim_id={released_claim_id}",

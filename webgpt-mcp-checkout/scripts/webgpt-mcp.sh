@@ -2,9 +2,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="${HESPERIDES_REPO_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
-RELEASE_BIN="${WEBGPT_MCP_BIN:-${REPO_ROOT}/target/release/webgpt-mcp}"
-DEBUG_BIN="${WEBGPT_MCP_DEBUG_BIN:-${REPO_ROOT}/target/debug/webgpt-mcp}"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+RELEASE_BIN="${REPO_ROOT}/target/release/webgpt-mcp"
+DEBUG_BIN="${REPO_ROOT}/target/debug/webgpt-mcp"
 DEFAULT_MCP_PROFILE_DIR="${HOME}/.hesperides/chatgpt-chrome-profile-mcp"
 INTERACTIVE_PROFILE_DIR="${WEBGPT_INTERACTIVE_PROFILE_DIR:-${HOME}/.hesperides/chatgpt-chrome-profile}"
 MANUAL_PROFILE_DIR="${WEBGPT_MCP_MANUAL_PROFILE_DIR:-${HOME}/.hesperides/chatgpt-chrome-profile-manual}"

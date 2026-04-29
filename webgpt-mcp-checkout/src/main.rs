@@ -413,7 +413,7 @@ impl ServerHandler for WebGptMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
-                "WebGPT MCP server. Uses a separate stdio surface and a fail-closed profile root so browser automation stays outside the existing chrysomela-mcp main binary."
+                "WebGPT MCP server. Uses a separate stdio surface and a fail-closed profile root so browser automation stays outside the main local MCP binary."
                     .to_string(),
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),

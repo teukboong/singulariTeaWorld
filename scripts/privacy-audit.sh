@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOCAL_DENYLIST="${SINGULARI_PRIVACY_DENYLIST:-$ROOT_DIR/.privacy-denylist}"
+HISTORY_BASELINE="${SINGULARI_PRIVACY_HISTORY_BASELINE:-$ROOT_DIR/scripts/privacy-history-baseline.txt}"
 
 cd "$ROOT_DIR"
 
@@ -82,6 +83,56 @@ report_regex_matches() {
   fi
 }
 
+history_match_key() {
+  local label="$1"
+  local pattern="$2"
+  local match="$3"
+  printf '%s\t%s\t%s' "$label" "$pattern" "$match" | shasum -a 256 | awk '{print $1}'
+}
+
+filter_history_baseline() {
+  local label="$1"
+  local pattern="$2"
+  local matches="$3"
+  local match
+  local key
+
+  if [[ -z "$matches" ]]; then
+    return 0
+  fi
+
+  while IFS= read -r match || [[ -n "$match" ]]; do
+    [[ -n "$match" ]] || continue
+    key="$(history_match_key "$label" "$pattern" "$match")"
+    if [[ -f "$HISTORY_BASELINE" ]] && grep -qx -F -- "$key" "$HISTORY_BASELINE"; then
+      continue
+    fi
+    printf '%s\n' "$match"
+  done <<<"$matches"
+}
+
+report_history_regex_matches() {
+  local label="$1"
+  local pattern="$2"
+  local matches="$3"
+  matches="$(filter_history_baseline "$label" "$pattern" "$matches")"
+  report_regex_matches "$label" "$pattern" "$matches"
+}
+
+report_fixed_matches() {
+  local label="$1"
+  local pattern="$2"
+  local matches="$3"
+  local history_scoped="${4:-0}"
+  if [[ "$history_scoped" == "1" ]]; then
+    matches="$(filter_history_baseline "$label" "$pattern" "$matches")"
+  fi
+  if [[ -n "$matches" ]]; then
+    printf '%s\n' "$matches"
+    report_failure "$label matched local pattern"
+  fi
+}
+
 check_regex_pattern() {
   local pattern="$1"
   local matches
@@ -93,33 +144,30 @@ check_regex_pattern() {
   report_regex_matches "tracked content" "$pattern" "$matches"
 
   matches="$(grep -n -E -- "$pattern" "$LOG_FILE" || true)"
-  report_regex_matches "git history" "$pattern" "$matches"
+  report_history_regex_matches "git history" "$pattern" "$matches"
 
   while IFS= read -r rev; do
     matches="$(git grep -I -n -E -- "$pattern" "$rev" -- . ":(exclude)scripts/privacy-audit.sh" || true)"
-    report_regex_matches "tracked historical content" "$pattern" "$matches"
+    report_history_regex_matches "tracked historical content" "$pattern" "$matches"
   done < <(git rev-list "$HISTORY_REF")
 }
 
 check_fixed_pattern() {
   local pattern="$1"
+  local matches
 
-  if grep -n -F -- "$pattern" "$PATH_FILE"; then
-    report_failure "tracked path matched local pattern"
-  fi
+  matches="$(grep -n -F -- "$pattern" "$PATH_FILE" || true)"
+  report_fixed_matches "tracked path" "$pattern" "$matches"
 
-  if git grep -I -n -F -- "$pattern" -- . ":(exclude)scripts/privacy-audit.sh"; then
-    report_failure "tracked content matched local pattern"
-  fi
+  matches="$(git grep -I -n -F -- "$pattern" -- . ":(exclude)scripts/privacy-audit.sh" || true)"
+  report_fixed_matches "tracked content" "$pattern" "$matches"
 
-  if grep -n -F -- "$pattern" "$LOG_FILE"; then
-    report_failure "git history matched local pattern"
-  fi
+  matches="$(grep -n -F -- "$pattern" "$LOG_FILE" || true)"
+  report_fixed_matches "git history" "$pattern" "$matches" 1
 
   while IFS= read -r rev; do
-    if git grep -I -n -F -- "$pattern" "$rev" -- .; then
-      report_failure "tracked historical content matched local pattern"
-    fi
+    matches="$(git grep -I -n -F -- "$pattern" "$rev" -- . ":(exclude)scripts/privacy-audit.sh" || true)"
+    report_fixed_matches "tracked historical content" "$pattern" "$matches" 1
   done < <(git rev-list "$HISTORY_REF")
 }
 

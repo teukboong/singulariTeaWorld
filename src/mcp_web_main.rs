@@ -5,7 +5,11 @@ use rmcp::transport::{
     StreamableHttpServerConfig, StreamableHttpService,
     streamable_http_server::session::local::LocalSessionManager,
 };
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
@@ -59,16 +63,14 @@ async fn main() {
 
 async fn run_main() -> Result<()> {
     let args = Args::parse();
-    validate_web_bind(&args)?;
+    let addr = parse_bind_addr(args.host.as_str(), args.port)?;
+    validate_web_bind(&args, addr)?;
 
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter("singulari_world_mcp_web=info,rmcp=info")
         .init();
 
-    let addr: SocketAddr = format!("{}:{}", args.host, args.port)
-        .parse()
-        .with_context(|| format!("invalid MCP web bind address: {}:{}", args.host, args.port))?;
     let path = normalize_mount_path(args.path.as_str())?;
     let ct = CancellationToken::new();
     let profile = args.profile.to_mcp_profile();
@@ -105,11 +107,24 @@ async fn run_main() -> Result<()> {
     Ok(())
 }
 
-fn validate_web_bind(args: &Args) -> Result<()> {
-    if args.host == "0.0.0.0" && !args.allow_public_bind {
-        bail!("refusing public bind without --allow-public-bind");
+fn parse_bind_addr(host: &str, port: u16) -> Result<SocketAddr> {
+    let host = host.trim();
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Ok(SocketAddr::new(ip, port));
     }
-    Ok(())
+    format!("{host}:{port}")
+        .parse()
+        .with_context(|| format!("invalid MCP web bind address: {host}:{port}"))
+}
+
+fn validate_web_bind(args: &Args, addr: SocketAddr) -> Result<()> {
+    if args.allow_public_bind || addr.ip().is_loopback() {
+        return Ok(());
+    }
+    bail!(
+        "refusing non-loopback bind without --allow-public-bind: {}",
+        addr.ip()
+    );
 }
 
 fn normalize_mount_path(raw: &str) -> Result<String> {
@@ -124,4 +139,47 @@ fn normalize_mount_path(raw: &str) -> Result<String> {
         return Ok(trimmed.trim_end_matches('/').to_owned());
     }
     Ok(trimmed.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args_for_host(host: &str, allow_public_bind: bool) -> Args {
+        Args {
+            host: host.to_owned(),
+            port: 4187,
+            path: "/mcp".to_owned(),
+            profile: WebToolProfile::Play,
+            allow_public_bind,
+        }
+    }
+
+    #[test]
+    fn web_bind_allows_loopback_without_public_override() -> Result<()> {
+        for host in ["127.0.0.1", "::1"] {
+            let args = args_for_host(host, false);
+            let addr = parse_bind_addr(args.host.as_str(), args.port)?;
+            validate_web_bind(&args, addr)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn web_bind_rejects_non_loopback_without_public_override() -> Result<()> {
+        for host in ["0.0.0.0", "::", "192.168.0.10", "100.64.0.1"] {
+            let args = args_for_host(host, false);
+            let addr = parse_bind_addr(args.host.as_str(), args.port)?;
+            assert!(validate_web_bind(&args, addr).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn web_bind_allows_non_loopback_with_explicit_override() -> Result<()> {
+        let args = args_for_host("0.0.0.0", true);
+        let addr = parse_bind_addr(args.host.as_str(), args.port)?;
+        validate_web_bind(&args, addr)?;
+        Ok(())
+    }
 }

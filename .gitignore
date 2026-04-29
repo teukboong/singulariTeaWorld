@@ -39,3 +39,4 @@ docs/world-simulation-refactor-execution.local.md
 
 # Local-only privacy scrub terms. Never commit personal identifiers here.
 .privacy-denylist
+scripts/privacy-history-baseline.txt
