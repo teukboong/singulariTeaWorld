@@ -174,6 +174,16 @@ pub(super) enum WebGptDispatchOutcome {
 }
 
 #[derive(Debug, Serialize)]
+pub(super) struct WebGptLanePrewarmRecord {
+    lane: &'static str,
+    cdp_port: u16,
+    cdp_url: String,
+    profile_dir: String,
+    status: &'static str,
+    exit_code: Option<i32>,
+}
+
+#[derive(Debug, Serialize)]
 pub(super) struct WebGptDispatchRecord {
     pub(super) schema_version: &'static str,
     pub(super) status: String,
@@ -210,7 +220,7 @@ pub(super) fn dispatch_pending_agent_turn_via_webgpt(
     pending: &singulari_world::PendingAgentTurn,
     options: &HostWorkerOptions,
 ) -> Result<WebGptDispatchOutcome> {
-    let dispatch_dir = dispatch_dir_for_pending(pending)?;
+    let dispatch_dir = dispatch_dir_for_pending(store_root, pending)?;
     fs::create_dir_all(&dispatch_dir)
         .with_context(|| format!("failed to create {}", dispatch_dir.display()))?;
     let record_path = dispatch_dir.join(format!("{}-webgpt.json", pending.turn_id));
@@ -472,6 +482,87 @@ struct WebGptDispatchResult {
     current_model: Option<String>,
     current_reasoning_level: Option<String>,
     error: Option<String>,
+}
+
+pub(super) fn prewarm_webgpt_lane_sessions(
+    options: &HostWorkerOptions,
+    include_text: bool,
+    include_visual: bool,
+) -> Result<Vec<WebGptLanePrewarmRecord>> {
+    let wrapper = resolve_webgpt_mcp_wrapper(options)?;
+    let mut lanes = Vec::new();
+    if include_text {
+        lanes.push((
+            "text",
+            WebGptLaneRuntime::new(WebGptConversationLane::Text, options)?,
+        ));
+    }
+    if include_visual {
+        lanes.push((
+            "turn_cg_image",
+            WebGptLaneRuntime::new_image(WebGptImageSessionKind::TurnCg, options)?,
+        ));
+        lanes.push((
+            "reference_image",
+            WebGptLaneRuntime::new_image(WebGptImageSessionKind::ReferenceAsset, options)?,
+        ));
+    }
+
+    lanes
+        .into_iter()
+        .map(|(lane, runtime)| prewarm_webgpt_lane_session(wrapper.as_path(), lane, &runtime))
+        .collect()
+}
+
+fn prewarm_webgpt_lane_session(
+    wrapper: &Path,
+    lane: &'static str,
+    runtime: &WebGptLaneRuntime,
+) -> Result<WebGptLanePrewarmRecord> {
+    let mut command = Command::new(wrapper);
+    runtime.apply_to_command(&mut command);
+    let output = command
+        .arg("client-call")
+        .arg("--wrapper")
+        .arg(wrapper)
+        .arg("--client-name")
+        .arg(format!("singulari-world-webgpt-prewarm-{lane}"))
+        .arg("--require-tool")
+        .arg("--tool")
+        .arg("webgpt_health")
+        .arg("--arguments")
+        .arg(r#"{"probe_live":false,"auto_recover":false}"#)
+        .arg("--output")
+        .arg("first-text")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to prewarm WebGPT lane: lane={lane}, wrapper={}, cdp_url={}, profile_dir={}",
+                wrapper.display(),
+                runtime.cdp_url(),
+                runtime.profile_dir.display()
+            )
+        })?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "WebGPT lane prewarm failed: lane={lane}, cdp_url={}, profile_dir={}, exit_code={:?}, stderr={}, stdout={}",
+            runtime.cdp_url(),
+            runtime.profile_dir.display(),
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+    Ok(WebGptLanePrewarmRecord {
+        lane,
+        cdp_port: runtime.cdp_port,
+        cdp_url: runtime.cdp_url(),
+        profile_dir: runtime.profile_dir.display().to_string(),
+        status: "ready",
+        exit_code: output.status.code(),
+    })
 }
 
 enum WebGptDispatcher {
@@ -1081,17 +1172,16 @@ fn read_json_value_if_present(path: &Path) -> Result<Option<serde_json::Value>> 
     Ok(Some(value))
 }
 
-fn dispatch_dir_for_pending(pending: &singulari_world::PendingAgentTurn) -> Result<PathBuf> {
-    let pending_ref = Path::new(pending.pending_ref.as_str());
-    let Some(agent_bridge_dir) = pending_ref.parent() else {
-        anyhow::bail!(
-            "pending turn has invalid pending_ref: world_id={}, turn_id={}, pending_ref={}",
-            pending.world_id,
-            pending.turn_id,
-            pending.pending_ref
-        );
-    };
-    Ok(agent_bridge_dir.join("dispatches"))
+fn dispatch_dir_for_pending(
+    store_root: Option<&Path>,
+    pending: &singulari_world::PendingAgentTurn,
+) -> Result<PathBuf> {
+    let paths = singulari_world::resolve_store_paths(store_root)?;
+    Ok(paths
+        .worlds_dir
+        .join(pending.world_id.as_str())
+        .join("agent_bridge")
+        .join("dispatches"))
 }
 
 fn write_dispatch_claim(path: &Path, claim: &serde_json::Value) -> Result<bool> {
@@ -1100,9 +1190,23 @@ fn write_dispatch_claim(path: &Path, claim: &serde_json::Value) -> Result<bool> 
             file.write_all(serde_json::to_vec_pretty(claim)?.as_slice())?;
             Ok(true)
         }
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            if existing_dispatch_is_retryable(path)? {
+                fs::write(path, serde_json::to_vec_pretty(claim)?)
+                    .with_context(|| format!("failed to replace retryable {}", path.display()))?;
+                return Ok(true);
+            }
+            Ok(false)
+        }
         Err(error) => Err(error).with_context(|| format!("failed to create {}", path.display())),
     }
+}
+
+fn existing_dispatch_is_retryable(path: &Path) -> Result<bool> {
+    let Some(value) = read_json_value_if_present(path)? else {
+        return Ok(false);
+    };
+    Ok(value.get("status").and_then(serde_json::Value::as_str) == Some("failed"))
 }
 
 pub(super) fn safe_file_component(value: &str) -> String {
@@ -1129,6 +1233,99 @@ mod tests {
         InitWorldOptions, VisualArtifactKind, compile_prompt_context_packet, enqueue_agent_turn,
         init_world,
     };
+
+    #[test]
+    fn dispatch_claim_replaces_failed_record_for_retry() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("turn_0001-webgpt.json");
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema_version": "singulari.webgpt_dispatch_record.v1",
+                "status": "failed",
+                "turn_id": "turn_0001",
+            }))?,
+        )?;
+
+        let claim = serde_json::json!({
+            "schema_version": "singulari.webgpt_dispatch_record.v1",
+            "status": "dispatching",
+            "turn_id": "turn_0001",
+            "attempt": "retry",
+        });
+
+        assert!(write_dispatch_claim(&path, &claim)?);
+        let value: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
+        assert_eq!(value["status"], serde_json::json!("dispatching"));
+        assert_eq!(value["attempt"], serde_json::json!("retry"));
+        Ok(())
+    }
+
+    #[test]
+    fn dispatch_claim_keeps_non_retryable_record() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("turn_0001-webgpt.json");
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema_version": "singulari.webgpt_dispatch_record.v1",
+                "status": "completed",
+                "turn_id": "turn_0001",
+            }))?,
+        )?;
+
+        let claim = serde_json::json!({
+            "schema_version": "singulari.webgpt_dispatch_record.v1",
+            "status": "dispatching",
+            "turn_id": "turn_0001",
+        });
+
+        assert!(!write_dispatch_claim(&path, &claim)?);
+        let value: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
+        assert_eq!(value["status"], serde_json::json!("completed"));
+        Ok(())
+    }
+
+    #[test]
+    fn dispatch_dir_uses_explicit_store_root() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = temp.path().join("explicit-store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(
+            &seed_path,
+            r#"
+schema_version: singulari.world_seed.v1
+world_id: stw_dispatch_root
+title: "dispatch root test"
+premise:
+  genre: "fantasy"
+  protagonist: "scout"
+"#,
+        )?;
+        init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+        let mut pending = enqueue_agent_turn(&AgentSubmitTurnOptions {
+            store_root: Some(store.clone()),
+            world_id: "stw_dispatch_root".to_owned(),
+            input: "1".to_owned(),
+            narrative_level: None,
+        })?;
+        pending.pending_ref =
+            ".world-store/worlds/stw_dispatch_root/agent_bridge/pending_turn.json".to_owned();
+
+        assert_eq!(
+            dispatch_dir_for_pending(Some(store.as_path()), &pending)?,
+            store
+                .join("worlds")
+                .join("stw_dispatch_root")
+                .join("agent_bridge")
+                .join("dispatches")
+        );
+        Ok(())
+    }
 
     #[test]
     fn webgpt_answer_json_extractor_accepts_fenced_response() -> anyhow::Result<()> {

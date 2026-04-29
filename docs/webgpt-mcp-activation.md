@@ -119,9 +119,18 @@ selection.
 
 ## Optional Prewarm
 
-Usually `host-worker` starts the WebGPT browser sessions only when needed. To
-prewarm or manually solve a login/challenge before play, start the lane sessions
-directly:
+For a WebGPT/WebGPT world, `host-worker` prewarms all three dedicated browser
+sessions before dispatching work, so operators should see one text lane, one
+turn-CG image lane, and one reference/design image lane:
+
+```text
+9238 -> text-profile
+9239 -> image-profile
+9240 -> reference-image-profile
+```
+
+To prewarm or manually solve a login/challenge before play, start the lane
+sessions directly:
 
 ```bash
 WEBGPT_MCP_CDP_PORT=9238 \
@@ -130,6 +139,10 @@ WEBGPT_MCP_MANUAL_PROFILE_DIR="$HOME/.hesperides/singulari-world/webgpt/text-pro
 
 WEBGPT_MCP_CDP_PORT=9239 \
 WEBGPT_MCP_MANUAL_PROFILE_DIR="$HOME/.hesperides/singulari-world/webgpt/image-profile" \
+  /absolute/path/to/webgpt-mcp-checkout/scripts/webgpt-cdp-session.sh start
+
+WEBGPT_MCP_CDP_PORT=9240 \
+WEBGPT_MCP_MANUAL_PROFILE_DIR="$HOME/.hesperides/singulari-world/webgpt/reference-image-profile" \
   /absolute/path/to/webgpt-mcp-checkout/scripts/webgpt-cdp-session.sh start
 ```
 

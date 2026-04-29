@@ -18,7 +18,8 @@ use std::time::Duration;
 use super::webgpt::{
     WebGptDispatchOutcome, WebGptDispatchRecord, WebGptImageDispatchRecord, WebGptImageSessionKind,
     dispatch_pending_agent_turn_via_webgpt, dispatch_visual_job_via_webgpt,
-    ensure_webgpt_lane_runtime_isolated, safe_file_component, visual_dispatch_dir_for_world,
+    ensure_webgpt_lane_runtime_isolated, prewarm_webgpt_lane_sessions, safe_file_component,
+    visual_dispatch_dir_for_world,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -114,13 +115,21 @@ pub(crate) fn handle_host_worker(
     ensure_webgpt_lane_runtime_isolated(options)?;
     let mut emitted = HashSet::new();
     let initial_world_id = resolve_host_worker_world_id(store_root, world_id)?;
+    let (initial_text_backend, initial_visual_backend) =
+        if let Some(initial_world_id) = initial_world_id.as_deref() {
+            effective_host_worker_backends(store_root, initial_world_id, options)?
+        } else {
+            (options.text_backend, options.visual_backend)
+        };
     emit_host_event(&serde_json::json!({
         "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
         "event": "worker_started",
         "world_id": initial_world_id.as_deref(),
-        "text_backend": options.text_backend.as_str(),
-        "visual_backend": options.visual_backend.as_str(),
-        "visual_jobs": host_worker_visual_jobs_label(options.visual_backend),
+        "text_backend": initial_text_backend.as_str(),
+        "visual_backend": initial_visual_backend.as_str(),
+        "requested_text_backend": options.text_backend.as_str(),
+        "requested_visual_backend": options.visual_backend.as_str(),
+        "visual_jobs": host_worker_visual_jobs_label(initial_visual_backend),
         "consumer": HOST_WORKER_CONSUMER,
     }))?;
 
@@ -152,6 +161,7 @@ pub(crate) fn handle_host_worker(
         };
         let (text_backend, visual_backend) =
             effective_host_worker_backends(store_root, world_id.as_str(), options)?;
+        prewarm_effective_webgpt_lanes_once(&mut emitted, text_backend, visual_backend, options)?;
         let mut emitted_this_tick = false;
         if visual_backend == HostWorkerVisualBackend::None {
             if emit_host_pending_agent_turn_event(
@@ -189,6 +199,31 @@ pub(crate) fn handle_host_worker(
         }
         thread::sleep(interval);
     }
+    Ok(())
+}
+
+fn prewarm_effective_webgpt_lanes_once(
+    emitted: &mut HashSet<String>,
+    text_backend: HostWorkerTextBackend,
+    visual_backend: HostWorkerVisualBackend,
+    options: &HostWorkerOptions,
+) -> Result<()> {
+    let include_text = matches!(text_backend, HostWorkerTextBackend::Webgpt)
+        && options.webgpt_turn_command.is_none();
+    let include_visual = matches!(visual_backend, HostWorkerVisualBackend::Webgpt);
+    if !include_text && !include_visual {
+        return Ok(());
+    }
+    if !emitted.insert("webgpt-lane-prewarm".to_owned()) {
+        return Ok(());
+    }
+    let lanes = prewarm_webgpt_lane_sessions(options, include_text, include_visual)?;
+    emit_host_event(&serde_json::json!({
+        "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
+        "event": "webgpt_lanes_prewarmed",
+        "lanes": lanes,
+        "consumer": HOST_WORKER_CONSUMER,
+    }))?;
     Ok(())
 }
 

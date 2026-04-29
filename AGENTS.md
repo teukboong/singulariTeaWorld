@@ -132,10 +132,12 @@ Each world has separate WebGPT URL bindings for text and image. Text uses
 `agent_bridge/webgpt_image_conversation_binding.json` and treats prior generated
 images in that same ChatGPT conversation as visual continuity references.
 WebGPT text and image lanes must run as separate browser sessions, not as one
-window that switches tools. Text defaults to CDP port `9238` and image defaults
-to CDP port `9239`; the profile dirs are separate under
-`~/.hesperides/singulari-world/webgpt/`. Starting with a shared port or shared
-profile is a contract violation.
+window that switches tools. Text defaults to CDP port `9238`, turn CG image
+defaults to `9239`, and reference/design image defaults to `9240`; the profile
+dirs are separate under `~/.hesperides/singulari-world/webgpt/`. For a
+WebGPT/WebGPT world, `host-worker` prewarms all three lane sessions before
+dispatch. Starting with a shared port or shared profile is a contract
+violation.
 The VN launcher also writes a locked `agent_bridge/backend_selection.json` on
 world creation. The only valid text/visual backend is WebGPT. Old local
 `codex-app-server` selections are legacy data and must not start Codex App
@@ -356,11 +358,13 @@ validator, so hidden redaction and schema checks stay identical. WebGPT is not
 trusted to remember canon from opaque project memory alone; host-worker
 proactively injects DB-backed revival context every turn. Use
 `--webgpt-turn-command` only to replace the built-in MCP adapter.
-The visual lane uses the separate per-world image conversation binding
+The visual lane uses separate per-world image conversation bindings
 for ChatGPT image generation and closes visual jobs with the saved extracted
-PNG. The built-in WebGPT text and image lanes must use separate browser
-sessions: text defaults to CDP port `9238`, image defaults to `9239`, and each
-lane has its own profile dir under `~/.hesperides/singulari-world/webgpt/`.
+PNG. The built-in WebGPT lanes must use separate browser sessions: text
+defaults to CDP port `9238`, turn CG image defaults to `9239`, reference/design
+image defaults to `9240`, and each lane has its own profile dir under
+`~/.hesperides/singulari-world/webgpt/`. `host-worker` prewarms all three lane
+sessions for WebGPT/WebGPT worlds before dispatch.
 Worlds created by the VN launcher write a locked
 `agent_bridge/backend_selection.json`. That file records WebGPT/WebGPT and keeps
 old backend flags from reintroducing a second engine. The default WebGPT cadence

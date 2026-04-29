@@ -142,7 +142,7 @@ impl McpStdioClient {
         let mut child = Command::new(wrapper)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::inherit())
             .spawn()
             .with_context(|| format!("failed to start {}", wrapper.display()))?;
         let stdin = child.stdin.take().context("webgpt-mcp stdin unavailable")?;
