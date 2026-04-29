@@ -124,6 +124,7 @@ const els = {
   currentTextLog: document.getElementById("currentTextLog"),
   fullTurnMarkdown: document.getElementById("fullTurnMarkdown"),
   monitoringGrid: document.getElementById("monitoringGrid"),
+  contextSurfacePanel: document.getElementById("contextSurfacePanel"),
   cgGallery: document.getElementById("cgGallery"),
   galleryStatus: document.getElementById("galleryStatus"),
   refreshGalleryButton: document.getElementById("refreshGalleryButton"),
@@ -1005,6 +1006,7 @@ function renderCodexSurface(packet) {
   renderCurrentTurnStatus(surface.current_turn || {});
   renderProtagonistStatus(surface.protagonist || {});
   renderMonitoring(surface, packet);
+  renderContextSurface(surface, packet);
   renderScan(surface.scan_targets || []);
   state.turnLogEntries = surface.turn_log || [];
   renderTurnLogPage();
@@ -1072,6 +1074,103 @@ function renderMonitoring(surface, packet) {
   appendKeyValue(els.monitoringGrid, "outcome", surface.adjudication?.outcome);
   appendKeyValue(els.monitoringGrid, "hidden filter", packet.hidden_filter?.policy);
   appendKeyValue(els.monitoringGrid, "generated", packet.generated_at);
+}
+
+function renderContextSurface(surface, packet) {
+  if (!els.contextSurfacePanel) {
+    return;
+  }
+  els.contextSurfacePanel.replaceChildren();
+  const events = Array.isArray(surface.context_events) ? surface.context_events : [];
+  const projection = surface.context_projection || {};
+  const counts = projection.counts || {};
+  const visualGraph = packet.visual_asset_graph || {};
+  const cards = [
+    contextSurfaceCard(
+      "context projection",
+      Number(counts.entity || 0) +
+        Number(counts.relationship || 0) +
+        Number(counts.world_lore || 0) +
+        Number(counts.character_text_design || 0),
+      projection.schema_version || "agent_context_projection"
+    ),
+    contextSurfaceCard(
+      "visual assets",
+      Array.isArray(visualGraph.display_assets) ? visualGraph.display_assets.length : 0,
+      visualGraph.schema_version || "visual_asset_graph"
+    ),
+    contextSurfaceCard(
+      "reference assets",
+      Array.isArray(visualGraph.reference_assets) ? visualGraph.reference_assets.length : 0,
+      "reference only"
+    ),
+  ];
+  for (const card of cards) {
+    els.contextSurfacePanel.append(card);
+  }
+  const projectionList = projectionSummaryList(projection);
+  if (projectionList) {
+    els.contextSurfacePanel.append(projectionList);
+  }
+  if (!events.length) {
+    const empty = document.createElement("p");
+    empty.className = "surface-empty";
+    empty.textContent = "아직 WebGPT typed context event가 없다.";
+    els.contextSurfacePanel.append(empty);
+    return;
+  }
+  const list = document.createElement("div");
+  list.className = "context-event-list";
+  for (const event of events.slice(0, 6)) {
+    const row = document.createElement("article");
+    row.className = "context-event-row";
+    const title = document.createElement("strong");
+    title.textContent = `${event.event_kind || "event"} · ${event.target || "target"}`;
+    const summary = document.createElement("p");
+    summary.textContent = event.summary || "summary missing";
+    row.append(title, summary);
+    list.append(row);
+  }
+  els.contextSurfacePanel.append(list);
+}
+
+function projectionSummaryList(projection) {
+  const sections = [
+    ["entity", projection.entity_summaries],
+    ["relationship", projection.relationship_summaries],
+    ["world lore", projection.world_lore_summaries],
+    ["character text", projection.character_text_design_summaries],
+  ];
+  const list = document.createElement("div");
+  list.className = "context-event-list";
+  let appended = 0;
+  for (const [label, items] of sections) {
+    for (const item of (Array.isArray(items) ? items : []).slice(-2).reverse()) {
+      const row = document.createElement("article");
+      row.className = "context-event-row";
+      const title = document.createElement("strong");
+      title.textContent = `${label} · ${item.target || "target"}`;
+      const summary = document.createElement("p");
+      summary.textContent = item.summary || "summary missing";
+      row.append(title, summary);
+      list.append(row);
+      appended += 1;
+    }
+  }
+  return appended ? list : null;
+}
+
+function contextSurfaceCard(label, count, detail) {
+  const card = document.createElement("div");
+  card.className = "context-surface-card";
+  const labelElement = document.createElement("span");
+  labelElement.textContent = label;
+  const countElement = document.createElement("strong");
+  countElement.textContent = String(count);
+  const detailElement = document.createElement("small");
+  detailElement.textContent = detail;
+  card.append(labelElement, countElement, detailElement);
+  return card;
 }
 
 async function refreshRuntimeStatus() {

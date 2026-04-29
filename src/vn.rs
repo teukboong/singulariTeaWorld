@@ -6,6 +6,10 @@ use crate::models::{
     normalize_turn_choices, redact_guide_choice_public_hints,
 };
 use crate::render::{RenderPacketLoadOptions, load_render_packet, render_packet_markdown};
+use crate::response_context::{
+    AgentContextEventRecord, AgentContextProjection, load_agent_context_event_records,
+    load_agent_context_projection,
+};
 use crate::store::{TURN_LOG_FILENAME, load_world_record, resolve_store_paths, world_file_paths};
 use crate::visual_asset_graph::{VisualAssetGraphPacket, compile_visual_asset_graph_packet};
 use crate::visual_assets::{
@@ -131,6 +135,10 @@ pub struct VnCodexSurface {
     pub current_turn: VnCurrentTurnStatus,
     pub protagonist: VnProtagonistStatus,
     pub turn_log: Vec<VnTurnLogSummary>,
+    #[serde(default)]
+    pub context_events: Vec<AgentContextEventRecord>,
+    #[serde(default)]
+    pub context_projection: AgentContextProjection,
     pub redaction_policy: String,
 }
 
@@ -597,6 +605,10 @@ fn vn_codex_surface(
         .find(|place| place.id == packet.visible_state.dashboard.location);
     let turn_log = recent_turn_log(world, files, latest_snapshot.session_id.as_str())?;
     let scan_targets = player_visible_scan_targets(&packet.visible_state.scan_targets);
+    let mut context_events = load_agent_context_event_records(files.dir.as_path())?;
+    context_events.reverse();
+    context_events.truncate(12);
+    let context_projection = load_agent_context_projection(files.dir.as_path())?;
     Ok(VnCodexSurface {
         full_markdown: redact_guide_choice_public_hints(&render_packet_markdown(packet)),
         dashboard: player_visible_dashboard(world, &packet.visible_state.dashboard, place_record),
@@ -612,6 +624,8 @@ fn vn_codex_surface(
             protagonist_record,
         ),
         turn_log,
+        context_events,
+        context_projection,
         redaction_policy:
             "player-visible Codex surface only; deprecated Guide-choice hints and hidden truth stay filtered"
                 .to_owned(),

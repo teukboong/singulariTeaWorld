@@ -1,3 +1,4 @@
+use crate::response_context::{AgentContextProjection, ContextVisibility};
 use crate::world_db::WorldFactRow;
 use serde::{Deserialize, Serialize};
 
@@ -101,6 +102,56 @@ pub fn compile_world_lore_packet(
     }
 }
 
+#[must_use]
+pub fn compile_world_lore_from_projection(
+    world_id: &str,
+    turn_id: &str,
+    projection: &AgentContextProjection,
+    fallback_facts: &[WorldFactRow],
+) -> WorldLorePacket {
+    if projection.world_lore_summaries.is_empty() {
+        return compile_world_lore_packet(world_id, turn_id, fallback_facts);
+    }
+    let entries = projection
+        .world_lore_summaries
+        .iter()
+        .filter(|item| item.visibility == ContextVisibility::PlayerVisible)
+        .take(WORLD_LORE_ENTRY_BUDGET)
+        .map(|item| {
+            let (category, name) = parse_lore_projection_target(item.target.as_str());
+            WorldLoreEntry {
+                schema_version: WORLD_LORE_ENTRY_SCHEMA_VERSION.to_owned(),
+                lore_id: format!("lore:agent_context:{}", item.source_event_id),
+                domain: domain_for_category(category.as_str()),
+                name,
+                summary: item.summary.clone(),
+                visibility: "player_visible".to_owned(),
+                confidence: "confirmed".to_owned(),
+                authority: "agent_context_projection".to_owned(),
+                source_refs: vec![format!("agent_context_event:{}", item.source_event_id)],
+                mechanical_axis: mechanical_axis_for_category(category.as_str()),
+            }
+        })
+        .collect();
+    WorldLorePacket {
+        schema_version: WORLD_LORE_PACKET_SCHEMA_VERSION.to_owned(),
+        world_id: world_id.to_owned(),
+        turn_id: turn_id.to_owned(),
+        entries,
+        compiler_policy: WorldLorePolicy {
+            source: "compiled_from_agent_context_projection_v1".to_owned(),
+            ..WorldLorePolicy::default()
+        },
+    }
+}
+
+fn parse_lore_projection_target(target: &str) -> (String, String) {
+    let mut parts = target.split(':');
+    let category = parts.next().unwrap_or("world").to_owned();
+    let subject = parts.next().unwrap_or(target).to_owned();
+    (category, subject)
+}
+
 fn world_fact_lore_entry(fact: &WorldFactRow) -> WorldLoreEntry {
     WorldLoreEntry {
         schema_version: WORLD_LORE_ENTRY_SCHEMA_VERSION.to_owned(),
@@ -156,5 +207,30 @@ mod tests {
             packet.entries[0].mechanical_axis,
             vec!["knowledge", "moral_cost"]
         );
+    }
+
+    #[test]
+    fn projection_overrides_world_facts() {
+        let projection = AgentContextProjection {
+            world_id: "stw_lore".to_owned(),
+            turn_id: "turn_0002".to_owned(),
+            world_lore_summaries: vec![crate::response_context::AgentContextProjectionItem {
+                target: "customs:gate_tax:requires".to_owned(),
+                summary: "gate tax requires a stamped token".to_owned(),
+                source_event_id: "ctx_1".to_owned(),
+                turn_id: "turn_0002".to_owned(),
+                visibility: ContextVisibility::PlayerVisible,
+            }],
+            ..AgentContextProjection::default()
+        };
+
+        let packet = compile_world_lore_from_projection("stw_lore", "turn_0002", &projection, &[]);
+
+        assert_eq!(
+            packet.compiler_policy.source,
+            "compiled_from_agent_context_projection_v1"
+        );
+        assert_eq!(packet.entries[0].name, "gate_tax");
+        assert_eq!(packet.entries[0].authority, "agent_context_projection");
     }
 }

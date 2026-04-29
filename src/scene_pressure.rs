@@ -5,12 +5,15 @@ use crate::store::append_jsonl;
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::path::Path;
 
 pub const SCENE_PRESSURE_PACKET_SCHEMA_VERSION: &str = "singulari.scene_pressure_packet.v1";
 pub const SCENE_PRESSURE_SCHEMA_VERSION: &str = "singulari.scene_pressure.v1";
 pub const SCENE_PRESSURE_AUDIT_SCHEMA_VERSION: &str = "singulari.scene_pressure_audit.v1";
 pub const SCENE_PRESSURE_AUDIT_FILENAME: &str = "scene_pressure_audit.jsonl";
+pub const SCENE_PRESSURE_EVENT_SCHEMA_VERSION: &str = "singulari.scene_pressure_event.v1";
+pub const SCENE_PRESSURE_EVENTS_FILENAME: &str = "scene_pressure_events.jsonl";
 
 const VISIBLE_PRESSURE_BUDGET: usize = 3;
 const HIDDEN_PRESSURE_BUDGET: usize = 2;
@@ -87,6 +90,50 @@ pub struct ScenePressureAuditRecord {
     pub visible_pressure_ids: Vec<String>,
     #[serde(default)]
     pub hidden_pressure_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScenePressureEvent {
+    pub pressure_id: String,
+    pub change: ScenePressureChange,
+    pub intensity_after: u8,
+    pub urgency_after: ScenePressureUrgency,
+    pub summary: String,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScenePressureChange {
+    Surfaced,
+    Increased,
+    Softened,
+    Redirected,
+    Resolved,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScenePressureEventRecord {
+    pub schema_version: String,
+    pub world_id: String,
+    pub turn_id: String,
+    pub event_id: String,
+    pub pressure_id: String,
+    pub change: ScenePressureChange,
+    pub intensity_after: u8,
+    pub urgency_after: ScenePressureUrgency,
+    pub summary: String,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+    pub recorded_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScenePressureEventPlan {
+    pub world_id: String,
+    pub turn_id: String,
+    pub records: Vec<ScenePressureEventRecord>,
 }
 
 impl Default for ScenePressurePolicy {
@@ -185,6 +232,88 @@ pub fn append_scene_pressure_audit(world_dir: &Path, packet: &ScenePressurePacke
             .collect(),
     };
     append_jsonl(&world_dir.join(SCENE_PRESSURE_AUDIT_FILENAME), &record)
+}
+
+pub fn prepare_scene_pressure_event_plan(
+    packet: &ScenePressurePacket,
+    events: &[ScenePressureEvent],
+) -> Result<ScenePressureEventPlan> {
+    let known_visible_pressures = packet
+        .visible_active
+        .iter()
+        .map(|pressure| pressure.pressure_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let recorded_at = Utc::now().to_rfc3339();
+    let mut records = Vec::with_capacity(events.len());
+    for (index, event) in events.iter().enumerate() {
+        validate_scene_pressure_event(packet, &known_visible_pressures, event)
+            .with_context(|| format!("invalid scene_pressure_events[{index}]"))?;
+        records.push(ScenePressureEventRecord {
+            schema_version: SCENE_PRESSURE_EVENT_SCHEMA_VERSION.to_owned(),
+            world_id: packet.world_id.clone(),
+            turn_id: packet.turn_id.clone(),
+            event_id: format!("scene_pressure_event:{}:{index:02}", packet.turn_id),
+            pressure_id: event.pressure_id.trim().to_owned(),
+            change: event.change,
+            intensity_after: event.intensity_after,
+            urgency_after: event.urgency_after,
+            summary: event.summary.trim().to_owned(),
+            evidence_refs: event
+                .evidence_refs
+                .iter()
+                .map(|reference| reference.trim().to_owned())
+                .collect(),
+            recorded_at: recorded_at.clone(),
+        });
+    }
+    Ok(ScenePressureEventPlan {
+        world_id: packet.world_id.clone(),
+        turn_id: packet.turn_id.clone(),
+        records,
+    })
+}
+
+pub fn append_scene_pressure_event_plan(
+    world_dir: &Path,
+    plan: &ScenePressureEventPlan,
+) -> Result<()> {
+    for record in &plan.records {
+        append_jsonl(&world_dir.join(SCENE_PRESSURE_EVENTS_FILENAME), record)?;
+    }
+    Ok(())
+}
+
+fn validate_scene_pressure_event(
+    packet: &ScenePressurePacket,
+    known_visible_pressures: &BTreeSet<&str>,
+    event: &ScenePressureEvent,
+) -> Result<()> {
+    let pressure_id = event.pressure_id.trim();
+    if pressure_id.is_empty() {
+        bail!("scene pressure event pressure_id must not be empty");
+    }
+    if !known_visible_pressures.contains(pressure_id) {
+        bail!(
+            "scene pressure event references inactive visible pressure: world_id={}, turn_id={}, pressure_id={pressure_id}",
+            packet.world_id,
+            packet.turn_id
+        );
+    }
+    if event.intensity_after == 0 || event.intensity_after > 5 {
+        bail!("scene pressure event intensity_after must be 1..5");
+    }
+    if event.summary.trim().is_empty() {
+        bail!("scene pressure event summary must not be empty");
+    }
+    if event.evidence_refs.is_empty()
+        || event
+            .evidence_refs
+            .iter()
+            .any(|reference| reference.trim().is_empty())
+    {
+        bail!("scene pressure event evidence_refs must contain non-empty visible refs");
+    }
+    Ok(())
 }
 
 fn collect_choice_pressure(
@@ -541,5 +670,94 @@ mod tests {
                 .is_empty()
         );
         Ok(())
+    }
+
+    #[test]
+    fn prepares_scene_pressure_event_records_for_visible_pressure() -> anyhow::Result<()> {
+        let snapshot = TurnSnapshot {
+            schema_version: TURN_SNAPSHOT_SCHEMA_VERSION.to_owned(),
+            world_id: "stw_pressure".to_owned(),
+            session_id: "session".to_owned(),
+            turn_id: "turn_0003".to_owned(),
+            phase: "choice".to_owned(),
+            current_event: None,
+            protagonist_state: ProtagonistState {
+                location: "place:gate".to_owned(),
+                inventory: Vec::new(),
+                body: vec!["left wrist aches".to_owned()],
+                mind: Vec::new(),
+            },
+            open_questions: Vec::new(),
+            last_choices: Vec::new(),
+        };
+        let packet = compile_scene_pressure_packet(
+            &snapshot,
+            None,
+            &ExtraMemoryPacket::default(),
+            &AgentPrivateAdjudicationContext {
+                hidden_timers: Vec::new(),
+                unrevealed_constraints: Vec::new(),
+                plausibility_gates: Vec::new(),
+            },
+            "listen",
+        )?;
+
+        let plan = prepare_scene_pressure_event_plan(
+            &packet,
+            &[ScenePressureEvent {
+                pressure_id: packet.visible_active[0].pressure_id.clone(),
+                change: ScenePressureChange::Increased,
+                intensity_after: 3,
+                urgency_after: ScenePressureUrgency::Soon,
+                summary: "the visible pressure shaped the next beat".to_owned(),
+                evidence_refs: vec!["visible_scene.text_blocks[0]".to_owned()],
+            }],
+        )?;
+
+        assert_eq!(plan.records.len(), 1);
+        assert!(
+            plan.records[0]
+                .event_id
+                .starts_with("scene_pressure_event:")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_scene_pressure_events_for_hidden_pressure() {
+        let mut packet = ScenePressurePacket::default();
+        packet.world_id = "stw_pressure".to_owned();
+        packet.turn_id = "turn_0001".to_owned();
+        packet.hidden_adjudication_only.push(ScenePressure {
+            schema_version: SCENE_PRESSURE_SCHEMA_VERSION.to_owned(),
+            pressure_id: "pressure:hidden:timer_hidden".to_owned(),
+            kind: ScenePressureKind::TimePressure,
+            visibility: ScenePressureVisibility::Hidden,
+            intensity: 3,
+            urgency: ScenePressureUrgency::Soon,
+            source_refs: vec!["timer:private".to_owned()],
+            observable_signals: Vec::new(),
+            choice_affordances: Vec::new(),
+            prose_effect: prose("tight", vec!["clock"], "restrained"),
+        });
+
+        let error = prepare_scene_pressure_event_plan(
+            &packet,
+            &[ScenePressureEvent {
+                pressure_id: "pressure:hidden:timer_hidden".to_owned(),
+                change: ScenePressureChange::Resolved,
+                intensity_after: 1,
+                urgency_after: ScenePressureUrgency::Ambient,
+                summary: "hidden timer resolved".to_owned(),
+                evidence_refs: vec!["visible_scene.text_blocks[0]".to_owned()],
+            }],
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("invalid scene_pressure_events[0]")
+        );
     }
 }

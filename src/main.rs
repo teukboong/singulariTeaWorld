@@ -3605,8 +3605,25 @@ const AGENT_TURN_RESPONSE_SCHEMA_GUIDE: &str = r#"AgentTurnResponse 스키마:
     "kind": "guided_choice",
     "summary": "플레이어-visible 사건 요약"
   },
-  "entity_updates": [],
-  "relationship_updates": [],
+  "entity_updates": [
+    {
+      "entity_id": "char_or_place_or_item_id",
+      "update_kind": "seen_action",
+      "visibility": "player_visible",
+      "summary": "이번 턴에서 player-visible entity state가 어떻게 변했는지",
+      "evidence_refs": ["visible_scene.text_blocks[0]"]
+    }
+  ],
+  "relationship_updates": [
+    {
+      "source_entity_id": "char:a",
+      "target_entity_id": "char:b",
+      "relation_kind": "suspicion|trust|debt|fear|distance",
+      "visibility": "player_visible",
+      "summary": "이번 턴에서 대사 거리감/협조/의심에 영향을 주는 관계 변화",
+      "evidence_refs": ["visible_scene.text_blocks[0]"]
+    }
+  ],
   "plot_thread_events": [
     {
       "thread_id": "source_revival.memory_revival.active_plot_threads.active_visible 중 이번 턴에서 실제로 변한 thread_id",
@@ -3617,8 +3634,46 @@ const AGENT_TURN_RESPONSE_SCHEMA_GUIDE: &str = r#"AgentTurnResponse 스키마:
       "evidence_refs": ["visible_scene.text_blocks[0]"]
     }
   ],
+  "scene_pressure_events": [
+    {
+      "pressure_id": "source_revival.memory_revival.active_scene_pressure.visible_active 중 이번 턴에서 실제로 변한 pressure_id",
+      "change": "increased",
+      "intensity_after": 3,
+      "urgency_after": "soon",
+      "summary": "이번 visible_scene에서 압력이 어떻게 변했는지",
+      "evidence_refs": ["visible_scene.text_blocks[0]"]
+    }
+  ],
+  "world_lore_updates": [
+    {
+      "subject": "player-visible subject",
+      "predicate": "is|has|requires|forbids",
+      "object": "이번 턴에서 확정된 세계 규칙/관습/장소 사실",
+      "category": "customs|geography|social_order|danger_model|language_register",
+      "visibility": "player_visible",
+      "summary": "세계관에 남길 player-visible 사실",
+      "evidence_refs": ["visible_scene.text_blocks[0]"]
+    }
+  ],
+  "character_text_design_updates": [
+    {
+      "character_id": "char:id",
+      "speech_pattern": "화법/어미/말버릇",
+      "gesture_pattern": "습관적 제스처",
+      "drift_note": "이번 턴 이후 조정할 말맛",
+      "visibility": "player_visible",
+      "evidence_refs": ["visible_scene.text_blocks[0]"]
+    }
+  ],
   "extra_contacts": [],
-  "hidden_state_delta": [],
+  "hidden_state_delta": [
+    {
+      "delta_kind": "secret_status",
+      "target_id": "secret_or_timer_id",
+      "summary": "판정 전용 hidden delta. visible text에 복사 금지",
+      "evidence_refs": ["private_adjudication_context"]
+    }
+  ],
   "next_choices": [
     {"slot":1,"tag":"현재 장면에 맞춘 짧은 선택명","intent":"현재 장면 단서와 player_input에서 이어지는 구체 행동"},
     {"slot":2,"tag":"현재 장면에 맞춘 짧은 선택명","intent":"몸, 장소, 물건, 흔적 중 이번 장면에 실제로 나온 단서를 살핀다"},
@@ -3635,6 +3690,8 @@ const AGENT_TURN_RESPONSE_SCHEMA_GUIDE: &str = r#"AgentTurnResponse 스키마:
 - next_choices 안에는 label/preview/choices 필드를 쓰지 않는다. 오직 slot/tag/intent만 쓴다.
 - plot_thread_events는 이번 턴에서 실제로 진행/복잡화/차단/해결/실패/퇴장한 active_visible thread만 적는다. 변화가 없으면 빈 배열이다.
 - plot_thread_events.thread_id는 source_revival.memory_revival.active_plot_threads.active_visible에 있는 thread_id만 쓴다. 새 thread를 임의로 만들거나 hidden/dormant 상태로 바꾸지 않는다.
+- scene_pressure_events는 이번 턴에서 실제로 강해지거나 약해진 visible_active pressure만 적는다. hidden_adjudication_only pressure_id는 절대 쓰지 않는다.
+- entity_updates/relationship_updates/world_lore_updates/character_text_design_updates는 전부 typed schema다. 변화가 없으면 빈 배열이며, 임의 key/value JSON을 넣지 않는다.
 - slot 번호가 기능 계약이다. tag는 UI 문구이므로 장면에 맞게 짧게 바꿔도 된다. 단 slot 7 tag는 "판단 위임"으로 유지한다.
 - extra_contacts는 주변 인물이 플레이어와 직접 상호작용했거나, 의미 있는 목격/거래/도움/위협/감정 흔적을 남겼을 때만 쓴다.
 - extra_contacts 항목을 쓸 때는 surface_label, contact_summary를 반드시 실제 장면 내용으로 채운다. 스키마 설명 문구나 예시 문구를 값으로 복사하지 않는다.
@@ -4316,6 +4373,10 @@ premise:
             "\"active_plot_threads\"",
             "\"plot_thread_events\"",
             "\"change\": \"advanced\"",
+            "\"scene_pressure_events\"",
+            "\"world_lore_updates\"",
+            "\"character_text_design_updates\"",
+            "\"hidden_state_delta\"",
             "\"active_body_resource_state\"",
             "\"active_location_graph\"",
             "\"active_character_text_design\"",

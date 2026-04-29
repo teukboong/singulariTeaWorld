@@ -15,6 +15,7 @@ pub mod plot_thread;
 pub mod projection_health;
 pub mod relationship_graph;
 pub mod render;
+pub mod response_context;
 pub mod resume;
 pub mod revival;
 pub mod scene_pressure;
@@ -57,7 +58,7 @@ pub use body_resource::{
 pub use character_text_design::{
     CHARACTER_TEXT_DESIGN_PACKET_SCHEMA_VERSION, CHARACTER_TEXT_DESIGN_SCHEMA_VERSION,
     CharacterTextDesign, CharacterTextDesignPacket, CharacterTextDesignPolicy,
-    compile_character_text_design_packet,
+    compile_character_text_design_packet, compile_character_text_design_with_projection,
 };
 pub use chat::{
     CHAT_ROUTE_SCHEMA_VERSION, ChatRoute, ChatRouteOptions, render_chat_route, route_chat_input,
@@ -120,9 +121,21 @@ pub use projection_health::{
 };
 pub use relationship_graph::{
     RELATIONSHIP_EDGE_SCHEMA_VERSION, RELATIONSHIP_GRAPH_PACKET_SCHEMA_VERSION, RelationshipEdge,
-    RelationshipGraphPacket, RelationshipGraphPolicy, compile_relationship_graph_packet,
+    RelationshipGraphPacket, RelationshipGraphPolicy, compile_relationship_graph_from_projection,
+    compile_relationship_graph_packet,
 };
 pub use render::{RenderPacketLoadOptions, load_render_packet, render_packet_markdown};
+pub use response_context::{
+    AGENT_CONTEXT_EVENT_SCHEMA_VERSION, AGENT_CONTEXT_EVENTS_FILENAME,
+    AGENT_CONTEXT_PROJECTION_FILENAME, AGENT_CONTEXT_PROJECTION_SCHEMA_VERSION,
+    AgentCharacterTextDesignUpdate, AgentContextEventInput, AgentContextEventPlan,
+    AgentContextEventRecord, AgentContextProjection, AgentContextProjectionCounts,
+    AgentContextProjectionItem, AgentEntityUpdate, AgentHiddenStateDelta, AgentRelationshipUpdate,
+    AgentWorldLoreUpdate, ContextEventKind, ContextVisibility, HiddenDeltaKind,
+    append_agent_context_event_plan, build_agent_context_projection,
+    load_agent_context_event_records, load_agent_context_projection,
+    prepare_agent_context_event_plan, rebuild_agent_context_projection,
+};
 pub use resume::{
     BuildResumePackOptions, HiddenStateSummary, RESUME_PACK_SCHEMA_VERSION, ResumePack,
     build_resume_pack, render_resume_pack_markdown,
@@ -132,10 +145,13 @@ pub use revival::{
 };
 pub use scene_pressure::{
     SCENE_PRESSURE_AUDIT_FILENAME, SCENE_PRESSURE_AUDIT_SCHEMA_VERSION,
+    SCENE_PRESSURE_EVENT_SCHEMA_VERSION, SCENE_PRESSURE_EVENTS_FILENAME,
     SCENE_PRESSURE_PACKET_SCHEMA_VERSION, SCENE_PRESSURE_SCHEMA_VERSION, ScenePressure,
-    ScenePressureAuditRecord, ScenePressureKind, ScenePressurePacket, ScenePressurePolicy,
+    ScenePressureAuditRecord, ScenePressureChange, ScenePressureEvent, ScenePressureEventPlan,
+    ScenePressureEventRecord, ScenePressureKind, ScenePressurePacket, ScenePressurePolicy,
     ScenePressureProseEffect, ScenePressureUrgency, ScenePressureVisibility,
-    append_scene_pressure_audit, compile_scene_pressure_packet,
+    append_scene_pressure_audit, append_scene_pressure_event_plan, compile_scene_pressure_packet,
+    prepare_scene_pressure_event_plan,
 };
 pub use start::{
     StartWorldOptions, StartedWorld, render_started_world_report, start_world,
@@ -199,5 +215,6 @@ pub use world_db::{
 pub use world_docs::{WORLD_DOCS_DIR, refresh_world_docs, world_docs_dir};
 pub use world_lore::{
     WORLD_LORE_ENTRY_SCHEMA_VERSION, WORLD_LORE_PACKET_SCHEMA_VERSION, WorldLoreDomain,
-    WorldLoreEntry, WorldLorePacket, WorldLorePolicy, compile_world_lore_packet,
+    WorldLoreEntry, WorldLorePacket, WorldLorePolicy, compile_world_lore_from_projection,
+    compile_world_lore_packet,
 };

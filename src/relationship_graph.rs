@@ -1,4 +1,5 @@
 use crate::models::RelationshipUpdateRecord;
+use crate::response_context::{AgentContextProjection, ContextVisibility};
 use serde::{Deserialize, Serialize};
 
 pub const RELATIONSHIP_GRAPH_PACKET_SCHEMA_VERSION: &str = "singulari.relationship_graph_packet.v1";
@@ -88,6 +89,75 @@ pub fn compile_relationship_graph_packet(
     }
 }
 
+#[must_use]
+pub fn compile_relationship_graph_from_projection(
+    world_id: &str,
+    turn_id: &str,
+    projection: &AgentContextProjection,
+    fallback_updates: &[RelationshipUpdateRecord],
+) -> RelationshipGraphPacket {
+    if projection.relationship_summaries.is_empty() {
+        return compile_relationship_graph_packet(world_id, turn_id, fallback_updates);
+    }
+    let mut active_edges = projection
+        .relationship_summaries
+        .iter()
+        .rev()
+        .filter(|item| item.visibility == ContextVisibility::PlayerVisible)
+        .map(|item| {
+            let (source_entity_id, target_entity_id, stance) =
+                parse_relationship_projection_target(item.target.as_str());
+            RelationshipEdge {
+                schema_version: RELATIONSHIP_EDGE_SCHEMA_VERSION.to_owned(),
+                edge_id: format!("rel:{source_entity_id}->{target_entity_id}:{stance}"),
+                source_entity_id,
+                target_entity_id,
+                stance,
+                visibility: "player_visible".to_owned(),
+                visible_summary: item.summary.clone(),
+                source_refs: vec![format!("agent_context_event:{}", item.source_event_id)],
+                voice_effects: vec![
+                    "dialogue stance follows current agent context projection".to_owned(),
+                ],
+            }
+        })
+        .collect::<Vec<_>>();
+    active_edges.truncate(RELATIONSHIP_EDGE_BUDGET);
+    active_edges.reverse();
+    RelationshipGraphPacket {
+        schema_version: RELATIONSHIP_GRAPH_PACKET_SCHEMA_VERSION.to_owned(),
+        world_id: world_id.to_owned(),
+        turn_id: turn_id.to_owned(),
+        active_edges,
+        compiler_policy: RelationshipGraphPolicy {
+            source: "compiled_from_agent_context_projection_v1".to_owned(),
+            ..RelationshipGraphPolicy::default()
+        },
+    }
+}
+
+fn parse_relationship_projection_target(target: &str) -> (String, String, String) {
+    let Some((source_entity_id, rest)) = target.split_once("->") else {
+        return (
+            target.to_owned(),
+            "unknown".to_owned(),
+            "context".to_owned(),
+        );
+    };
+    let Some((target_entity_id, stance)) = rest.rsplit_once(':') else {
+        return (
+            source_entity_id.to_owned(),
+            rest.to_owned(),
+            "context".to_owned(),
+        );
+    };
+    (
+        source_entity_id.to_owned(),
+        target_entity_id.to_owned(),
+        stance.to_owned(),
+    )
+}
+
 fn relationship_edge(update: &RelationshipUpdateRecord) -> RelationshipEdge {
     RelationshipEdge {
         schema_version: RELATIONSHIP_EDGE_SCHEMA_VERSION.to_owned(),
@@ -135,5 +205,32 @@ mod tests {
             packet.active_edges[0].edge_id,
             "rel:char:guard->char:protagonist:procedural_suspicion"
         );
+    }
+
+    #[test]
+    fn projection_overrides_recent_relationship_updates() {
+        let projection = AgentContextProjection {
+            world_id: "stw_rel".to_owned(),
+            turn_id: "turn_0002".to_owned(),
+            relationship_summaries: vec![crate::response_context::AgentContextProjectionItem {
+                target: "char:a->char:b:trust".to_owned(),
+                summary: "a trusts b after the scene".to_owned(),
+                source_event_id: "ctx_1".to_owned(),
+                turn_id: "turn_0002".to_owned(),
+                visibility: ContextVisibility::PlayerVisible,
+            }],
+            ..AgentContextProjection::default()
+        };
+
+        let packet =
+            compile_relationship_graph_from_projection("stw_rel", "turn_0002", &projection, &[]);
+
+        assert_eq!(
+            packet.compiler_policy.source,
+            "compiled_from_agent_context_projection_v1"
+        );
+        assert_eq!(packet.active_edges[0].source_entity_id, "char:a");
+        assert_eq!(packet.active_edges[0].target_entity_id, "char:b");
+        assert_eq!(packet.active_edges[0].stance, "trust");
     }
 }

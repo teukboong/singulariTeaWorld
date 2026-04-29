@@ -1148,6 +1148,58 @@ select {
   gap: 8px;
 }
 
+.context-surface-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.context-surface-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 10px;
+  align-items: baseline;
+  padding: 10px 12px;
+  border: 1px solid rgba(230, 230, 230, 0.22);
+  background: rgba(12, 14, 18, 0.72);
+}
+
+.context-surface-card span,
+.context-event-row strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: 0.86rem;
+}
+
+.context-surface-card strong {
+  font-family: var(--font-mono);
+  font-size: 1.1rem;
+}
+
+.context-surface-card small {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.context-event-list {
+  display: grid;
+  gap: 8px;
+}
+
+.context-event-row {
+  padding: 10px 12px;
+  border-left: 2px solid rgba(236, 224, 202, 0.52);
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.context-event-row p,
+.surface-empty {
+  margin: 6px 0 0;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
 .turn-summary {
   border: 1px solid var(--line-soft);
   border-left: 2px solid var(--gold);

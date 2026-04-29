@@ -1,12 +1,13 @@
 use crate::agent_bridge::PendingAgentTurn;
 use crate::codex_view::{BuildCodexViewOptions, build_codex_view};
-use crate::relationship_graph::compile_relationship_graph_packet;
+use crate::relationship_graph::compile_relationship_graph_from_projection;
+use crate::response_context::{load_agent_context_event_records, load_agent_context_projection};
 use crate::resume::{BuildResumePackOptions, build_resume_pack};
 use crate::store::{resolve_store_paths, world_file_paths};
 use crate::world_db::{
     recent_entity_updates, recent_relationship_updates, search_world_db, visible_world_facts,
 };
-use crate::world_lore::compile_world_lore_packet;
+use crate::world_lore::compile_world_lore_from_projection;
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -82,9 +83,12 @@ pub fn build_agent_revival_packet(options: &AgentRevivalCompileOptions<'_>) -> R
         pending.world_id.as_str(),
         WEBGPT_REVIVAL_UPDATE_LIMIT,
     )?;
-    let active_relationship_graph = compile_relationship_graph_packet(
+    let context_events = load_agent_context_event_records(files.dir.as_path())?;
+    let context_projection = load_agent_context_projection(files.dir.as_path())?;
+    let active_relationship_graph = compile_relationship_graph_from_projection(
         pending.world_id.as_str(),
         pending.turn_id.as_str(),
+        &context_projection,
         &relationship_updates,
     );
     let world_facts = visible_world_facts(
@@ -92,11 +96,18 @@ pub fn build_agent_revival_packet(options: &AgentRevivalCompileOptions<'_>) -> R
         pending.world_id.as_str(),
         WEBGPT_REVIVAL_UPDATE_LIMIT,
     )?;
-    let active_world_lore = compile_world_lore_packet(
+    let active_world_lore = compile_world_lore_from_projection(
         pending.world_id.as_str(),
         pending.turn_id.as_str(),
+        &context_projection,
         &world_facts,
     );
+    let recent_context_events = context_events
+        .iter()
+        .rev()
+        .take(WEBGPT_REVIVAL_UPDATE_LIMIT)
+        .cloned()
+        .collect::<Vec<_>>();
 
     Ok(serde_json::json!({
         "schema_version": AGENT_REVIVAL_PACKET_SCHEMA_VERSION,
@@ -143,7 +154,9 @@ pub fn build_agent_revival_packet(options: &AgentRevivalCompileOptions<'_>) -> R
                 "recent_entity_updates": entity_updates,
                 "recent_relationship_updates": relationship_updates,
                 "active_relationship_graph": active_relationship_graph,
-                "active_world_lore": active_world_lore
+                "active_world_lore": active_world_lore,
+                "recent_agent_context_events": recent_context_events,
+                "agent_context_projection": context_projection
             }
         },
         "private_adjudication_context": pending.private_adjudication_context,
