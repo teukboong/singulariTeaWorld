@@ -120,7 +120,9 @@ of importing every family directly.
    packets as internal evidence. The text prompt renderer now accepts a
    compiled `PromptContextPacket`; source revival is consumed only by the
    prompt-context compiler.
-6. Split `world_db` indexing into family-owned index providers.
+6. Split `world_db` indexing into family-owned index providers. Search rebuild
+   now dispatches through named providers, which gives each projection family a
+   migration target instead of keeping one long hard-coded call chain.
 7. Keep fresh-clone end-to-end smoke as the public-alpha release proof.
 
 Current implementation note: the first extraction step now lives under
@@ -143,7 +145,10 @@ worlds without persisted visual records still get a synthetic read view from
 the asset manifest and claim files. WebGPT text dispatch also writes the exact
 compiled `*-webgpt-prompt-context.json` beside the human-readable prompt. The
 prompt renderer accepts that packet as its input, so broad revival assembly
-stays behind the prompt-context compiler boundary.
+stays behind the prompt-context compiler boundary. `world_db` search rebuild now
+routes through named index providers; the provider bodies still live in
+`world_db`, but the call path is ready for moving projection-specific providers
+next to their projection families.
 
 ## Non-Goals
 

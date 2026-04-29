@@ -199,6 +199,14 @@ pub struct RecordTurnDbInput<'a> {
     pub structured_updates: &'a StructuredEntityUpdates,
 }
 
+type WorldSearchIndexFn = fn(&Connection, &str) -> Result<()>;
+
+#[derive(Debug, Clone, Copy)]
+struct WorldSearchIndexProvider {
+    provider_id: &'static str,
+    index: WorldSearchIndexFn,
+}
+
 /// Initialize the per-world `SQLite` database and seed its first projections.
 ///
 /// # Errors
@@ -2456,22 +2464,14 @@ fn rebuild_world_search_index_for_conn(conn: &Connection, world_id: &str) -> Res
         params![world_id],
     )
     .context("world.db search index clear failed")?;
-    index_world_facts(conn, world_id)?;
-    index_canon_events(conn, world_id)?;
-    index_character_memories(conn, world_id)?;
-    index_entity_records(conn, world_id)?;
-    index_entity_updates(conn, world_id)?;
-    index_relationship_updates(conn, world_id)?;
-    index_materialized_projections(conn, world_id)?;
-    index_world_lore_entries(conn, world_id)?;
-    index_relationship_edges(conn, world_id)?;
-    index_character_text_designs(conn, world_id)?;
-    index_turn_retrieval_goals(conn, world_id)?;
-    index_turn_retrieval_cues(conn, world_id)?;
-    index_context_capsules(conn, world_id)?;
-    index_context_capsule_selection_events(conn, world_id)?;
-    index_autobiographical_periods(conn, world_id)?;
-    index_autobiographical_general_events(conn, world_id)?;
+    for provider in WORLD_SEARCH_INDEX_PROVIDERS {
+        (provider.index)(conn, world_id).with_context(|| {
+            format!(
+                "world.db search index provider failed: {}",
+                provider.provider_id
+            )
+        })?;
+    }
     Ok(())
 }
 
@@ -3287,6 +3287,73 @@ const WORLD_REPAIR_CLEAR_TABLES: &[&str] = &[
     "worlds",
 ];
 
+const WORLD_SEARCH_INDEX_PROVIDERS: &[WorldSearchIndexProvider] = &[
+    WorldSearchIndexProvider {
+        provider_id: "core.world_facts",
+        index: index_world_facts,
+    },
+    WorldSearchIndexProvider {
+        provider_id: "core.canon_events",
+        index: index_canon_events,
+    },
+    WorldSearchIndexProvider {
+        provider_id: "memory.character_memories",
+        index: index_character_memories,
+    },
+    WorldSearchIndexProvider {
+        provider_id: "entities.records",
+        index: index_entity_records,
+    },
+    WorldSearchIndexProvider {
+        provider_id: "entities.updates",
+        index: index_entity_updates,
+    },
+    WorldSearchIndexProvider {
+        provider_id: "relationships.updates",
+        index: index_relationship_updates,
+    },
+    WorldSearchIndexProvider {
+        provider_id: "projections.materialized",
+        index: index_materialized_projections,
+    },
+    WorldSearchIndexProvider {
+        provider_id: "projections.world_lore",
+        index: index_world_lore_entries,
+    },
+    WorldSearchIndexProvider {
+        provider_id: "projections.relationship_graph",
+        index: index_relationship_edges,
+    },
+    WorldSearchIndexProvider {
+        provider_id: "projections.character_text_design",
+        index: index_character_text_designs,
+    },
+    WorldSearchIndexProvider {
+        provider_id: "projections.turn_retrieval_goals",
+        index: index_turn_retrieval_goals,
+    },
+    WorldSearchIndexProvider {
+        provider_id: "projections.turn_retrieval_cues",
+        index: index_turn_retrieval_cues,
+    },
+    WorldSearchIndexProvider {
+        provider_id: "context_capsules.entries",
+        index: index_context_capsules,
+    },
+    WorldSearchIndexProvider {
+        provider_id: "context_capsules.selection_events",
+        index: index_context_capsule_selection_events,
+    },
+    WorldSearchIndexProvider {
+        provider_id: "autobiographical_index.periods",
+        index: index_autobiographical_periods,
+    },
+    WorldSearchIndexProvider {
+        provider_id: "autobiographical_index.general_events",
+        index: index_autobiographical_general_events,
+    },
+];
+
 struct MaterializedProjectionFile {
     id: &'static str,
     kind: &'static str,
@@ -3427,6 +3494,41 @@ mod tests {
         WorldLorePacket,
     };
     use tempfile::tempdir;
+
+    #[test]
+    fn search_index_provider_registry_lists_current_rebuild_order() {
+        let providers = super::WORLD_SEARCH_INDEX_PROVIDERS
+            .iter()
+            .map(|provider| provider.provider_id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            providers,
+            vec![
+                "core.world_facts",
+                "core.canon_events",
+                "memory.character_memories",
+                "entities.records",
+                "entities.updates",
+                "relationships.updates",
+                "projections.materialized",
+                "projections.world_lore",
+                "projections.relationship_graph",
+                "projections.character_text_design",
+                "projections.turn_retrieval_goals",
+                "projections.turn_retrieval_cues",
+                "context_capsules.entries",
+                "context_capsules.selection_events",
+                "autobiographical_index.periods",
+                "autobiographical_index.general_events",
+            ]
+        );
+        let unique = providers
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(unique.len(), providers.len());
+    }
 
     #[test]
     fn init_creates_queryable_world_db() -> anyhow::Result<()> {
