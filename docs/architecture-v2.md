@@ -111,6 +111,7 @@ of importing every family directly.
 1. Extract `runtime::webgpt`, `runtime::host_worker`, and `surface::cli` from
    `src/main.rs` without behavior changes.
 2. Move one projection family behind a `ProjectionFamily` registry as a pilot.
+   Pilot started with `BodyResourceProjectionFamily`.
 3. Promote `JobLedgerV2` from read-only view to write path for text dispatches.
 4. Move visual claims/completions onto the same job ledger.
 5. Make `PromptContextPacket` the only WebGPT adapter input and keep revival
@@ -126,7 +127,10 @@ and adapter tests. The WebGPT adapter is now split into focused submodules:
 `webgpt::prompt` builds the backend prompt contract, `webgpt::image` owns visual
 job dispatch and session-kind validation, and `webgpt::json_extract` keeps
 answer parsing separate from transport. `surface::cli` owns clap parsing and
-command handlers, leaving `src/main.rs` as a binary bootstrap only.
+command handlers, leaving `src/main.rs` as a binary bootstrap only. The
+projection registry pilot lives in `src/projection_registry.rs`; it routes
+`active_body_resource_state` prompt packets through `BodyResourceProjectionFamily`
+instead of composing compile/load calls inline in `agent_bridge`.
 
 ## Non-Goals
 

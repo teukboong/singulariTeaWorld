@@ -7,8 +7,7 @@ use crate::belief_graph::{
 };
 use crate::body_resource::{
     BodyResourceEvent, BodyResourcePacket, append_body_resource_event_plan,
-    compile_body_resource_packet, load_body_resource_state, prepare_body_resource_event_plan,
-    rebuild_body_resource_state,
+    prepare_body_resource_event_plan, rebuild_body_resource_state,
 };
 use crate::change_ledger::{
     ChangeEventPlanInput, ChangeLedgerPacket, append_change_event_plan, load_change_ledger_state,
@@ -53,6 +52,7 @@ use crate::plot_thread::{
     compile_plot_thread_packet, load_plot_threads, prepare_plot_thread_event_plan,
     rebuild_plot_threads,
 };
+use crate::projection_registry::load_body_resource_prompt_packet;
 use crate::relationship_graph::{
     RelationshipGraphPacket, append_relationship_graph_event_plan,
     compile_relationship_graph_from_projection, load_relationship_graph_state,
@@ -1296,7 +1296,7 @@ fn visible_context(input: &VisibleContextInput<'_>) -> Result<AgentVisibleContex
     let active_plot_threads =
         load_plot_threads(files.dir.as_path(), compile_plot_thread_packet(snapshot))?;
     let active_body_resource_state =
-        load_body_resource_state(files.dir.as_path(), compile_body_resource_packet(snapshot))?;
+        load_body_resource_prompt_packet(files.dir.as_path(), snapshot)?;
     let active_location_graph = load_location_graph_state(
         files.dir.as_path(),
         compile_location_graph_packet(snapshot, input.entities),

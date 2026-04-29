@@ -25,6 +25,7 @@ pub mod pattern_debt;
 pub mod player_intent;
 pub mod plot_thread;
 pub mod projection_health;
+pub mod projection_registry;
 pub mod prompt_context;
 pub mod prompt_context_budget;
 pub mod relationship_graph;
@@ -214,6 +215,10 @@ pub use plot_thread::{
 pub use projection_health::{
     PROJECTION_HEALTH_SCHEMA_VERSION, ProjectionComponentHealth, ProjectionHealthReport,
     ProjectionHealthStatus, build_projection_health_report, render_projection_health_report,
+};
+pub use projection_registry::{
+    BodyResourceProjectionFamily, PROJECTION_FAMILY_REGISTRY, ProjectionFamily,
+    ProjectionFamilyDescriptor, SnapshotProjectionFamily, load_body_resource_prompt_packet,
 };
 pub use prompt_context::{
     PROMPT_CONTEXT_PACKET_SCHEMA_VERSION, PromptAdjudicationContext, PromptContextPacket,
