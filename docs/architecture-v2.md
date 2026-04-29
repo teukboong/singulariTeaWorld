@@ -119,13 +119,14 @@ of importing every family directly.
 7. Keep fresh-clone end-to-end smoke as the public-alpha release proof.
 
 Current implementation note: the first extraction step now lives under
-`src/runtime/`. `runtime::host_worker` owns the loop, lane dispatch, events, and
-visual job claiming; `runtime::webgpt` owns WebGPT MCP runtime isolation,
-conversation bindings, prompt construction, dispatch records, and adapter
-tests. The WebGPT adapter is now split into focused submodules:
+`src/runtime/` and `src/surface/`. `runtime::host_worker` owns the loop, lane
+dispatch, events, and visual job claiming; `runtime::webgpt` owns WebGPT MCP
+runtime isolation, conversation bindings, prompt construction, dispatch records,
+and adapter tests. The WebGPT adapter is now split into focused submodules:
 `webgpt::prompt` builds the backend prompt contract, `webgpt::image` owns visual
 job dispatch and session-kind validation, and `webgpt::json_extract` keeps
-answer parsing separate from transport.
+answer parsing separate from transport. `surface::cli` owns clap parsing and
+command handlers, leaving `src/main.rs` as a binary bootstrap only.
 
 ## Non-Goals
 
