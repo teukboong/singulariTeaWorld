@@ -958,6 +958,7 @@ fn handle_start(
         seed_text,
         world_id,
         title,
+        randomize_opening_seed: false,
         store_root: store_root.map(Path::to_path_buf),
         session_id,
     })?;
@@ -3806,8 +3807,9 @@ fn build_webgpt_turn_prompt(
 - 출력량은 turn context packet의 source_revival.output_contract.narrative_level과 narrative_budget을 따른다. 레벨 간 차이는 확연해야 한다.
 - 레벨 1은 표준 VN 밀도, 레벨 2는 장면 확장 밀도, 레벨 3은 장편 연재 밀도다. 레벨 2/3에서는 같은 사건도 감각, 행동, 반응, 여운, 압박을 더 길게 쌓는다.
 - player_input이 "세계 개막"이면 그것은 선택지가 아니라 시드에서 첫 서사를 여는 bootstrap turn이다.
-- 시드가 짧거나 장르명뿐이면 turn_context_packet.source_revival.world_id, current_turn.created_at, title을 variation entropy로 삼아 첫 장면을 구체화한다. 단 이 entropy는 소재가 아니라 반복 수렴을 피하기 위한 분산 키다.
-- sparse seed 개막에서 이전 conversation 문구나 일반적인 bootstrap 기본값을 재사용하지 마라. 같은 seed라도 세계마다 첫 장소, 즉시 압력, 첫 관찰 대상, 첫 선택 압력이 달라져야 한다.
+- turn_context_packet.source_revival.opening_randomizer가 있으면 사용자의 시드에 덧붙은 player-visible 개막 seed로 취급한다. 그 안의 location_frame, protagonist_frame, immediate_pressure, first_visible_object, social_weather, opening_question을 첫 장면의 시작 조건으로 반영한다.
+- opening_randomizer가 없으면 사용자 시드와 visible facts만으로 시작한다. 이전 conversation 문구나 일반적인 bootstrap 기본값을 재사용하지 마라.
+- opening_randomizer는 반복 수렴을 피하기 위한 시작 조건이지, 시드에 없는 장르 장치·숨은 과거사·고정 인물 설정을 만드는 권한이 아니다.
 - 시드나 visible facts에 명시되지 않은 장르 장치, 과거사, 외부 세계 대비, 게임 인터페이스식 능력 구조를 추론해서 주입하지 마라. 이런 장치는 explicit positive evidence가 있을 때만 쓴다.
 - protagonist가 현재 정보를 모른다는 사실만으로 장면 밖 배경, 과거사, 시대 대비 독백, 정체성 상실 클리셰를 만들지 마라.
 - 매 턴 survival/social/material/threat/mystery/desire/moral_cost/time_pressure 중 최소 하나의 장면 압력을 visible_scene과 next_choices에 반영한다. 편향을 지우더라도 무미건조한 로그로 쓰지 마라.
@@ -4371,6 +4373,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "prompt contract regression test intentionally keeps the full expectation list together"
+    )]
     fn webgpt_prompt_carries_realtime_agent_contract() -> anyhow::Result<()> {
         let temp = tempfile::tempdir()?;
         let store = temp.path().join("store");
@@ -4422,8 +4428,9 @@ premise:
             "추상 감정 설명보다 몸, 시선, 호흡, 손, 거리, 소리, 냄새, 온도 같은 관찰 가능한 흔적으로 보여준다.",
             "선택지 의도나 내부 판정을 본문에서 해설하지 않는다.",
             "레벨 1은 표준 VN 밀도, 레벨 2는 장면 확장 밀도, 레벨 3은 장편 연재 밀도다.",
-            "시드가 짧거나 장르명뿐이면 turn_context_packet.source_revival.world_id, current_turn.created_at, title을 variation entropy로 삼아 첫 장면을 구체화한다.",
-            "같은 seed라도 세계마다 첫 장소, 즉시 압력, 첫 관찰 대상, 첫 선택 압력이 달라져야 한다.",
+            "turn_context_packet.source_revival.opening_randomizer가 있으면 사용자의 시드에 덧붙은 player-visible 개막 seed로 취급한다.",
+            "opening_randomizer가 없으면 사용자 시드와 visible facts만으로 시작한다.",
+            "opening_randomizer는 반복 수렴을 피하기 위한 시작 조건이지, 시드에 없는 장르 장치·숨은 과거사·고정 인물 설정을 만드는 권한이 아니다.",
             "시드나 visible facts에 명시되지 않은 장르 장치, 과거사, 외부 세계 대비, 게임 인터페이스식 능력 구조를 추론해서 주입하지 마라.",
             "protagonist가 현재 정보를 모른다는 사실만으로 장면 밖 배경, 과거사, 시대 대비 독백, 정체성 상실 클리셰를 만들지 마라.",
             "이 WebGPT conversation의 이전 turn들은 말맛, 직전 감정선, 장면 리듬을 잇는 working context다.",

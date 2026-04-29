@@ -13,6 +13,7 @@ pub const ADJUDICATION_SCHEMA_VERSION: &str = "singulari.adjudication.v1";
 pub const CODEX_VIEW_SCHEMA_VERSION: &str = "singulari.codex_view.v1";
 pub const ENTITY_UPDATE_SCHEMA_VERSION: &str = "singulari.entity_update.v1";
 pub const NARRATIVE_SCENE_SCHEMA_VERSION: &str = "singulari.narrative_scene.v1";
+pub const OPENING_RANDOMIZER_SCHEMA_VERSION: &str = "singulari.opening_randomizer.v1";
 
 pub const ANCHOR_CHARACTER_INVARIANT: &str = "anchor_character";
 pub const ANCHOR_CHARACTER_ID: &str = "char:anchor";
@@ -80,8 +81,25 @@ pub struct WorldSeed {
     pub language: LanguagePolicy,
     #[serde(default)]
     pub laws: WorldLaws,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opening_randomizer: Option<OpeningRandomizer>,
     #[serde(default)]
     pub non_goals: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpeningRandomizer {
+    #[serde(default = "default_opening_randomizer_schema")]
+    pub schema_version: String,
+    pub enabled_by_user: bool,
+    pub variation_key: String,
+    pub user_seed_policy: String,
+    pub location_frame: String,
+    pub protagonist_frame: String,
+    pub immediate_pressure: String,
+    pub first_visible_object: String,
+    pub social_weather: String,
+    pub opening_question: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -204,6 +222,8 @@ pub struct WorldRecord {
     pub anchor_character: AnchorCharacter,
     pub language: LanguagePolicy,
     pub laws: WorldLaws,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opening_randomizer: Option<OpeningRandomizer>,
     pub non_goals: Vec<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -223,6 +243,7 @@ impl WorldRecord {
             anchor_character,
             language: seed.language,
             laws: seed.laws,
+            opening_randomizer: seed.opening_randomizer,
             non_goals: seed.non_goals,
             created_at: created_at.clone(),
             updated_at: created_at,
@@ -1085,6 +1106,10 @@ fn apply_default_when_empty(value: &mut String, default_value: &str) {
 
 fn default_world_seed_schema() -> String {
     WORLD_SEED_SCHEMA_VERSION.to_owned()
+}
+
+fn default_opening_randomizer_schema() -> String {
+    OPENING_RANDOMIZER_SCHEMA_VERSION.to_owned()
 }
 
 fn default_created_by() -> String {

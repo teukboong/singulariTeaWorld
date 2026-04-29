@@ -175,6 +175,7 @@ mod tests {
                 anchor_character: AnchorCharacter::default(),
                 language: LanguagePolicy::default(),
                 laws: WorldLaws::default(),
+                opening_randomizer: None,
                 non_goals: Vec::new(),
             },
             "2026-04-27T00:00:00Z".to_owned(),

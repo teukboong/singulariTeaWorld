@@ -919,6 +919,7 @@ fn worldsim_start_world(params: WorldsimStartWorldParams) -> Result<WorldsimStar
         seed_text: params.seed_text,
         world_id: params.world_id,
         title: params.title,
+        randomize_opening_seed: false,
         store_root: store_root(params.store_root),
         session_id: params.session_id,
     })?;

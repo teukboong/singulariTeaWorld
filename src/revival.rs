@@ -4,7 +4,7 @@ use crate::memory_revival_policy::MemoryRevivalPolicy;
 use crate::relationship_graph::compile_relationship_graph_from_projection;
 use crate::response_context::{load_agent_context_event_records, load_agent_context_projection};
 use crate::resume::{BuildResumePackOptions, build_resume_pack};
-use crate::store::{resolve_store_paths, world_file_paths};
+use crate::store::{load_world_record, resolve_store_paths, world_file_paths};
 use crate::world_db::{
     recent_entity_updates, recent_relationship_updates, search_world_db, visible_world_facts,
 };
@@ -34,6 +34,13 @@ pub fn build_agent_revival_packet(options: &AgentRevivalCompileOptions<'_>) -> R
     let policy = MemoryRevivalPolicy::for_engine_session(options.engine_session_kind);
     let store_paths = resolve_store_paths(options.store_root)?;
     let files = world_file_paths(&store_paths, pending.world_id.as_str());
+    let world =
+        load_world_record(options.store_root, pending.world_id.as_str()).with_context(|| {
+            format!(
+                "failed to load revival world record: world_id={}",
+                pending.world_id
+            )
+        })?;
     let mut resume_options = BuildResumePackOptions::new(pending.world_id.clone());
     resume_options.store_root = options.store_root.map(Path::to_path_buf);
     resume_options.recent_events = policy.recent_events;
@@ -110,6 +117,7 @@ pub fn build_agent_revival_packet(options: &AgentRevivalCompileOptions<'_>) -> R
         "world_id": pending.world_id,
         "turn_id": pending.turn_id,
         "engine_session_kind": options.engine_session_kind,
+        "opening_randomizer": world.opening_randomizer,
         "retrieval_profile": policy,
         "current_turn": {
             "schema_version": pending.schema_version,

@@ -96,6 +96,8 @@ pub struct VnNewWorldRequest {
     pub seed_text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(default)]
+    pub randomize_opening_seed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_backend: Option<WorldTextBackend>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1396,6 +1398,7 @@ fn new_world(state: &VnServerState, request: VnNewWorldRequest) -> Result<VnWorl
         seed_text: request.seed_text,
         world_id: None,
         title: request.title,
+        randomize_opening_seed: request.randomize_opening_seed,
         store_root: state.store_root.clone(),
         session_id: None,
     })?;
@@ -2027,6 +2030,7 @@ premise:
             VnNewWorldRequest {
                 seed_text: "중세 변경 마을, 남자 순찰자, 마법 길표식".to_owned(),
                 title: Some("런처 새 세계".to_owned()),
+                randomize_opening_seed: false,
                 text_backend: Some(WorldTextBackend::Webgpt),
                 visual_backend: Some(WorldVisualBackend::Webgpt),
             },

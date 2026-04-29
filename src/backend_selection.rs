@@ -159,6 +159,7 @@ mod tests {
             "중세 판타지, 변경 순찰자 남주",
             Some("stw_backend_lock"),
             None,
+            false,
         )?;
         init_world_from_seed(seed, Some(store.as_path()), None)?;
 

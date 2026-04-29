@@ -399,6 +399,41 @@ select {
   font-size: 0.74rem;
 }
 
+.opening-randomizer-option {
+  min-height: 58px;
+  grid-template-columns: 18px 1fr;
+  align-items: center;
+  border: 1px solid var(--line-soft);
+  padding: 9px;
+  background: rgba(238, 238, 238, 0.04);
+  cursor: pointer;
+}
+
+.opening-randomizer-option:has(input:checked) {
+  border-color: var(--gold);
+  background:
+    linear-gradient(180deg, rgba(216, 226, 236, 0.13), rgba(216, 226, 236, 0.06)),
+    rgba(7, 8, 10, 0.72);
+}
+
+.opening-randomizer-option input {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--gold);
+}
+
+.opening-randomizer-option span {
+  display: grid;
+  gap: 3px;
+  color: var(--paper);
+  line-height: 1.2;
+}
+
+.opening-randomizer-option small {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
 .launch-hint {
   margin: 0;
   color: var(--muted);

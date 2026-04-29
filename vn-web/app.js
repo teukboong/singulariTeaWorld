@@ -79,6 +79,7 @@ const els = {
   previousWorldPanel: document.getElementById("previousWorldPanel"),
   newWorldTitle: document.getElementById("newWorldTitle"),
   newWorldSeed: document.getElementById("newWorldSeed"),
+  newWorldOpeningRandomizer: document.getElementById("newWorldOpeningRandomizer"),
   newWorldBackendOptions: Array.from(document.querySelectorAll("[data-backend-lane]")),
   startNewWorldButton: document.getElementById("startNewWorldButton"),
   worldList: document.getElementById("worldList"),
@@ -404,6 +405,7 @@ async function startNewWorld() {
       body: JSON.stringify({
         seed_text: seedText,
         title: title || null,
+        randomize_opening_seed: els.newWorldOpeningRandomizer.checked,
         text_backend: backendSelection.text,
         visual_backend: backendSelection.visual,
       }),
