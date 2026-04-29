@@ -4,6 +4,7 @@ use serde::Serialize;
 use singulari_world::{
     AgentCommitTurnOptions, AgentTurnResponse, commit_agent_turn, resolve_store_paths,
 };
+use singulari_world::{WorldJobStatus, WriteTextTurnJobOptions, write_text_turn_job};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -31,6 +32,7 @@ use image::{
 pub(crate) const DEFAULT_WEBGPT_TEXT_CDP_PORT: u16 = 9238;
 pub(crate) const DEFAULT_WEBGPT_IMAGE_CDP_PORT: u16 = 9239;
 pub(crate) const DEFAULT_WEBGPT_REFERENCE_IMAGE_CDP_PORT: u16 = 9240;
+const WEBGPT_TEXT_JOB_OWNER: &str = "webgpt_host_worker";
 
 fn ensure_control_safe_runtime_value(field: &str, value: &str) -> Result<()> {
     if value.chars().any(char::is_control) {
@@ -242,6 +244,14 @@ pub(super) fn dispatch_pending_agent_turn_via_webgpt(
             record_path.display().to_string(),
         ));
     }
+    write_webgpt_text_job(
+        store_root,
+        pending,
+        WorldJobStatus::Running,
+        Some(record_path.display().to_string()),
+        Some(format!("webgpt:{}", pending.turn_id)),
+        None,
+    )?;
 
     let dispatch_result = dispatcher.run(paths)?;
     if let Some(raw_conversation_id) = dispatch_result.raw_conversation_id.as_deref() {
@@ -260,7 +270,56 @@ pub(super) fn dispatch_pending_agent_turn_via_webgpt(
         &dispatch_result,
     );
 
-    let record = WebGptDispatchRecord {
+    let record = webgpt_dispatch_record(
+        pending,
+        &dispatcher,
+        paths,
+        record_path.as_path(),
+        dispatch_result,
+        commit_result,
+    );
+    fs::write(&record_path, serde_json::to_vec_pretty(&record)?)
+        .with_context(|| format!("failed to update {}", record_path.display()))?;
+    write_webgpt_text_job(
+        store_root,
+        pending,
+        text_job_status_from_record(&record),
+        Some(text_job_output_ref(&record)),
+        Some(format!("webgpt:{}", pending.turn_id)),
+        record.error.clone(),
+    )?;
+    Ok(WebGptDispatchOutcome::Started(Box::new(record)))
+}
+
+fn write_webgpt_text_job(
+    store_root: Option<&Path>,
+    pending: &singulari_world::PendingAgentTurn,
+    status: WorldJobStatus,
+    output_ref: Option<String>,
+    attempt_id: Option<String>,
+    last_error: Option<String>,
+) -> Result<()> {
+    write_text_turn_job(&WriteTextTurnJobOptions {
+        store_root,
+        pending,
+        status,
+        output_ref,
+        claim_owner: Some(WEBGPT_TEXT_JOB_OWNER.to_owned()),
+        attempt_id,
+        last_error,
+    })?;
+    Ok(())
+}
+
+fn webgpt_dispatch_record(
+    pending: &singulari_world::PendingAgentTurn,
+    dispatcher: &WebGptDispatcher,
+    paths: WebGptTurnPaths<'_>,
+    record_path: &Path,
+    dispatch_result: WebGptDispatchResult,
+    commit_result: WebGptCommitResult,
+) -> WebGptDispatchRecord {
+    WebGptDispatchRecord {
         schema_version: "singulari.webgpt_dispatch_record.v1",
         status: commit_result.status,
         world_id: pending.world_id.clone(),
@@ -276,11 +335,11 @@ pub(super) fn dispatch_pending_agent_turn_via_webgpt(
         current_reasoning_level: dispatch_result.current_reasoning_level,
         pid: dispatch_result.pid,
         record_path: record_path.display().to_string(),
-        prompt_path: prompt_path.display().to_string(),
-        response_path: response_path.display().to_string(),
-        result_path: Some(result_path.display().to_string()),
-        stdout_path: stdout_path.display().to_string(),
-        stderr_path: stderr_path.display().to_string(),
+        prompt_path: paths.prompt_path.display().to_string(),
+        response_path: paths.response_path.display().to_string(),
+        result_path: Some(paths.result_path.display().to_string()),
+        stdout_path: paths.stdout_path.display().to_string(),
+        stderr_path: paths.stderr_path.display().to_string(),
         dispatched_at: Utc::now().to_rfc3339(),
         exit_code: dispatch_result.exit_code,
         committed_turn_id: commit_result
@@ -297,10 +356,25 @@ pub(super) fn dispatch_pending_agent_turn_via_webgpt(
             .map(|value| value.commit_record_path.clone()),
         error: dispatch_result.error.or(commit_result.error),
         completed_at: Utc::now().to_rfc3339(),
-    };
-    fs::write(&record_path, serde_json::to_vec_pretty(&record)?)
-        .with_context(|| format!("failed to update {}", record_path.display()))?;
-    Ok(WebGptDispatchOutcome::Started(Box::new(record)))
+    }
+}
+
+fn text_job_status_from_record(record: &WebGptDispatchRecord) -> WorldJobStatus {
+    match record.status.as_str() {
+        "completed" => WorldJobStatus::Completed,
+        "commit_failed" => WorldJobStatus::FailedTerminal,
+        _ => WorldJobStatus::FailedRetryable,
+    }
+}
+
+fn text_job_output_ref(record: &WebGptDispatchRecord) -> String {
+    record
+        .commit_record_path
+        .as_deref()
+        .or(record.render_packet_path.as_deref())
+        .or(record.result_path.as_deref())
+        .unwrap_or(record.record_path.as_str())
+        .to_owned()
 }
 
 fn webgpt_dispatch_claim(

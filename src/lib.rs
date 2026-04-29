@@ -150,7 +150,7 @@ pub use host_supervisor::{
 };
 pub use job_ledger::{
     ReadWorldJobsOptions, WORLD_JOB_LEDGER_SCHEMA_VERSION, WorldJob, WorldJobKind, WorldJobStatus,
-    read_world_jobs,
+    WriteTextTurnJobOptions, read_world_jobs, write_text_turn_job,
 };
 pub use location_graph::{
     LOCATION_EVENT_SCHEMA_VERSION, LOCATION_EVENTS_FILENAME, LOCATION_GRAPH_FILENAME,
