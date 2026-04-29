@@ -1,10 +1,12 @@
 use crate::body_resource::BODY_RESOURCE_STATE_FILENAME;
+use crate::character_text_design::CHARACTER_TEXT_DESIGN_FILENAME;
 use crate::location_graph::LOCATION_GRAPH_FILENAME;
 use crate::models::{
     CanonEvent, EntityRecords, HiddenState, PlayerKnowledge, TurnSnapshot, WorldRecord,
     redact_guide_choice_public_hints,
 };
 use crate::plot_thread::PLOT_THREADS_FILENAME;
+use crate::relationship_graph::RELATIONSHIP_GRAPH_FILENAME;
 use crate::scene_pressure::ACTIVE_SCENE_PRESSURES_FILENAME;
 use crate::store::{
     CANON_EVENTS_FILENAME, ENTITIES_FILENAME, HIDDEN_STATE_FILENAME, LATEST_SNAPSHOT_FILENAME,
@@ -12,6 +14,7 @@ use crate::store::{
 };
 use crate::visual_asset_graph::VISUAL_ASSET_GRAPH_FILENAME;
 use crate::world_db::{ChapterSummaryRecord, latest_chapter_summaries};
+use crate::world_lore::WORLD_LORE_FILENAME;
 use anyhow::{Context, Result};
 use std::fmt::Write as _;
 use std::fs;
@@ -388,6 +391,21 @@ const DOC_PROJECTION_FILES: &[DocProjectionFile] = &[
             ("reference_assets", "reference assets"),
             ("pending_jobs", "pending jobs"),
         ],
+    },
+    DocProjectionFile {
+        title: "World Lore",
+        filename: WORLD_LORE_FILENAME,
+        summary_fields: &[("entries", "entries")],
+    },
+    DocProjectionFile {
+        title: "Relationship Graph",
+        filename: RELATIONSHIP_GRAPH_FILENAME,
+        summary_fields: &[("active_edges", "active edges")],
+    },
+    DocProjectionFile {
+        title: "Character Text Design",
+        filename: CHARACTER_TEXT_DESIGN_FILENAME,
+        summary_fields: &[("active_designs", "active designs")],
     },
 ];
 

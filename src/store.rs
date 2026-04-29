@@ -1,11 +1,19 @@
+use crate::character_text_design::{
+    CHARACTER_TEXT_DESIGN_EVENTS_FILENAME, CHARACTER_TEXT_DESIGN_FILENAME,
+    compile_character_text_design_packet,
+};
 use crate::models::{
     ANCHOR_CHARACTER_INVARIANT, CanonEvent, DashboardSummary, EntityRecords, HiddenState,
     NARRATIVE_SCENE_SCHEMA_VERSION, NarrativeScene, PlayerKnowledge, RENDER_PACKET_SCHEMA_VERSION,
     RenderPacket, TurnSnapshot, VisibleState, WorldRecord, WorldSeed, default_turn_choices,
     initial_canon_event,
 };
+use crate::relationship_graph::{
+    RELATIONSHIP_GRAPH_EVENTS_FILENAME, RELATIONSHIP_GRAPH_FILENAME, RelationshipGraphPacket,
+};
 use crate::world_db::initialize_world_db;
 use crate::world_docs::refresh_world_docs;
+use crate::world_lore::{WORLD_LORE_FILENAME, WORLD_LORE_UPDATES_FILENAME, WorldLorePacket};
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -123,6 +131,7 @@ pub(crate) fn init_world_from_seed(
         &player_knowledge,
     )?;
     write_json(&world_dir.join(ENTITIES_FILENAME), &entities)?;
+    initialize_blueprint_projection_files(&world_dir, &world, &entities)?;
     append_canon_event(&world_dir.join(CANON_EVENTS_FILENAME), &initial_event)?;
     fs::write(world_dir.join(ENTITY_UPDATES_FILENAME), "").with_context(|| {
         format!(
@@ -130,6 +139,7 @@ pub(crate) fn init_world_from_seed(
             world_dir.join(ENTITY_UPDATES_FILENAME).display()
         )
     })?;
+    initialize_blueprint_event_logs(&world_dir)?;
 
     let snapshot = TurnSnapshot::initial(&world, session_id.clone());
     let snapshot_path = snapshot_dir.join("turn_0000.json");
@@ -162,6 +172,58 @@ pub(crate) fn init_world_from_seed(
         session_id,
         snapshot_path,
     })
+}
+
+fn initialize_blueprint_projection_files(
+    world_dir: &Path,
+    world: &WorldRecord,
+    entities: &EntityRecords,
+) -> Result<()> {
+    write_json(
+        &world_dir.join(CHARACTER_TEXT_DESIGN_FILENAME),
+        &compile_character_text_design_packet(entities),
+    )?;
+    write_json(
+        &world_dir.join(RELATIONSHIP_GRAPH_FILENAME),
+        &RelationshipGraphPacket {
+            world_id: world.world_id.clone(),
+            turn_id: "turn_0000".to_owned(),
+            ..RelationshipGraphPacket::default()
+        },
+    )?;
+    write_json(
+        &world_dir.join(WORLD_LORE_FILENAME),
+        &WorldLorePacket {
+            world_id: world.world_id.clone(),
+            turn_id: "turn_0000".to_owned(),
+            ..WorldLorePacket::default()
+        },
+    )?;
+    Ok(())
+}
+
+fn initialize_blueprint_event_logs(world_dir: &Path) -> Result<()> {
+    fs::write(world_dir.join(CHARACTER_TEXT_DESIGN_EVENTS_FILENAME), "").with_context(|| {
+        format!(
+            "failed to write {}",
+            world_dir
+                .join(CHARACTER_TEXT_DESIGN_EVENTS_FILENAME)
+                .display()
+        )
+    })?;
+    fs::write(world_dir.join(RELATIONSHIP_GRAPH_EVENTS_FILENAME), "").with_context(|| {
+        format!(
+            "failed to write {}",
+            world_dir.join(RELATIONSHIP_GRAPH_EVENTS_FILENAME).display()
+        )
+    })?;
+    fs::write(world_dir.join(WORLD_LORE_UPDATES_FILENAME), "").with_context(|| {
+        format!(
+            "failed to write {}",
+            world_dir.join(WORLD_LORE_UPDATES_FILENAME).display()
+        )
+    })?;
+    Ok(())
 }
 
 fn initial_render_packet_for_waiting_turn(

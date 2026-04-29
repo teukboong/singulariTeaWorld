@@ -61,9 +61,14 @@ pub use body_resource::{
     prepare_body_resource_event_plan, rebuild_body_resource_state,
 };
 pub use character_text_design::{
-    CHARACTER_TEXT_DESIGN_PACKET_SCHEMA_VERSION, CHARACTER_TEXT_DESIGN_SCHEMA_VERSION,
-    CharacterTextDesign, CharacterTextDesignPacket, CharacterTextDesignPolicy,
+    CHARACTER_TEXT_DESIGN_EVENT_SCHEMA_VERSION, CHARACTER_TEXT_DESIGN_EVENTS_FILENAME,
+    CHARACTER_TEXT_DESIGN_FILENAME, CHARACTER_TEXT_DESIGN_PACKET_SCHEMA_VERSION,
+    CHARACTER_TEXT_DESIGN_SCHEMA_VERSION, CharacterTextDesign, CharacterTextDesignEventPlan,
+    CharacterTextDesignEventRecord, CharacterTextDesignPacket, CharacterTextDesignPolicy,
+    append_character_text_design_event_plan, build_character_text_design_from_events,
     compile_character_text_design_packet, compile_character_text_design_with_projection,
+    load_character_text_design_event_records, load_character_text_design_state,
+    prepare_character_text_design_event_plan, rebuild_character_text_design,
 };
 pub use chat::{
     CHAT_ROUTE_SCHEMA_VERSION, ChatRoute, ChatRouteOptions, render_chat_route, route_chat_input,
@@ -131,9 +136,14 @@ pub use projection_health::{
     ProjectionHealthStatus, build_projection_health_report, render_projection_health_report,
 };
 pub use relationship_graph::{
-    RELATIONSHIP_EDGE_SCHEMA_VERSION, RELATIONSHIP_GRAPH_PACKET_SCHEMA_VERSION, RelationshipEdge,
-    RelationshipGraphPacket, RelationshipGraphPolicy, compile_relationship_graph_from_projection,
-    compile_relationship_graph_packet,
+    RELATIONSHIP_EDGE_SCHEMA_VERSION, RELATIONSHIP_GRAPH_EVENT_SCHEMA_VERSION,
+    RELATIONSHIP_GRAPH_EVENTS_FILENAME, RELATIONSHIP_GRAPH_FILENAME,
+    RELATIONSHIP_GRAPH_PACKET_SCHEMA_VERSION, RelationshipEdge, RelationshipGraphEventPlan,
+    RelationshipGraphEventRecord, RelationshipGraphPacket, RelationshipGraphPolicy,
+    append_relationship_graph_event_plan, build_relationship_graph_from_events,
+    compile_relationship_graph_from_projection, compile_relationship_graph_packet,
+    load_relationship_graph_event_records, load_relationship_graph_state,
+    prepare_relationship_graph_event_plan, rebuild_relationship_graph,
 };
 pub use render::{RenderPacketLoadOptions, load_render_packet, render_packet_markdown};
 pub use response_context::{
@@ -227,7 +237,10 @@ pub use world_db::{
 };
 pub use world_docs::{WORLD_DOCS_DIR, refresh_world_docs, world_docs_dir};
 pub use world_lore::{
-    WORLD_LORE_ENTRY_SCHEMA_VERSION, WORLD_LORE_PACKET_SCHEMA_VERSION, WorldLoreDomain,
-    WorldLoreEntry, WorldLorePacket, WorldLorePolicy, compile_world_lore_from_projection,
-    compile_world_lore_packet,
+    WORLD_LORE_ENTRY_SCHEMA_VERSION, WORLD_LORE_FILENAME, WORLD_LORE_PACKET_SCHEMA_VERSION,
+    WORLD_LORE_UPDATE_SCHEMA_VERSION, WORLD_LORE_UPDATES_FILENAME, WorldLoreDomain, WorldLoreEntry,
+    WorldLorePacket, WorldLorePolicy, WorldLoreUpdatePlan, WorldLoreUpdateRecord,
+    append_world_lore_update_plan, build_world_lore_from_updates,
+    compile_world_lore_from_projection, compile_world_lore_packet, load_world_lore_state,
+    load_world_lore_update_records, prepare_world_lore_update_plan, rebuild_world_lore,
 };

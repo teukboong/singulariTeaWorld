@@ -4,7 +4,9 @@ use crate::body_resource::{
     rebuild_body_resource_state,
 };
 use crate::character_text_design::{
-    CharacterTextDesignPacket, compile_character_text_design_with_projection,
+    CharacterTextDesignPacket, append_character_text_design_event_plan,
+    compile_character_text_design_with_projection, load_character_text_design_state,
+    prepare_character_text_design_event_plan, rebuild_character_text_design,
 };
 use crate::extra_memory::{
     ExtraMemoryPacket, commit_extra_memory_projection_terminal, compile_extra_memory_projection,
@@ -24,6 +26,10 @@ use crate::plot_thread::{
     compile_plot_thread_packet, load_plot_threads, prepare_plot_thread_event_plan,
     rebuild_plot_threads,
 };
+use crate::relationship_graph::{
+    RelationshipGraphPacket, append_relationship_graph_event_plan,
+    prepare_relationship_graph_event_plan, rebuild_relationship_graph,
+};
 use crate::response_context::{
     AgentCharacterTextDesignUpdate, AgentContextEventInput, AgentEntityUpdate,
     AgentHiddenStateDelta, AgentRelationshipUpdate, AgentWorldLoreUpdate,
@@ -39,6 +45,10 @@ use crate::store::{WorldFilePaths, read_json, resolve_store_paths, world_file_pa
 use crate::turn::{AdvanceTurnOptions, advance_turn};
 use crate::turn_commit::{TurnCommitEnvelope, append_turn_commit_envelope};
 use crate::vn::{BuildVnPacketOptions, VnPacket, build_vn_packet};
+use crate::world_lore::{
+    WorldLorePacket, append_world_lore_update_plan, prepare_world_lore_update_plan,
+    rebuild_world_lore,
+};
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -448,6 +458,21 @@ pub fn commit_agent_turn(options: &AgentCommitTurnOptions) -> Result<CommittedAg
             hidden_state_delta: &response.hidden_state_delta,
         },
     )?;
+    let relationship_graph_event_plan = prepare_relationship_graph_event_plan(
+        options.world_id.as_str(),
+        pending.turn_id.as_str(),
+        &response.relationship_updates,
+    )?;
+    let world_lore_update_plan = prepare_world_lore_update_plan(
+        options.world_id.as_str(),
+        pending.turn_id.as_str(),
+        &response.world_lore_updates,
+    )?;
+    let character_text_design_event_plan = prepare_character_text_design_event_plan(
+        options.world_id.as_str(),
+        pending.turn_id.as_str(),
+        &response.character_text_design_updates,
+    )?;
     let plot_thread_event_plan = prepare_plot_thread_event_plan(
         &pending.visible_context.active_plot_threads,
         &response.plot_thread_events,
@@ -515,6 +540,32 @@ pub fn commit_agent_turn(options: &AgentCommitTurnOptions) -> Result<CommittedAg
     write_json(&response_path, &response)?;
     append_agent_context_event_plan(files.dir.as_path(), &context_event_plan)?;
     rebuild_agent_context_projection(files.dir.as_path())?;
+    append_relationship_graph_event_plan(files.dir.as_path(), &relationship_graph_event_plan)?;
+    rebuild_relationship_graph(
+        files.dir.as_path(),
+        &RelationshipGraphPacket {
+            world_id: options.world_id.clone(),
+            turn_id: pending.turn_id.clone(),
+            ..RelationshipGraphPacket::default()
+        },
+    )?;
+    append_world_lore_update_plan(files.dir.as_path(), &world_lore_update_plan)?;
+    rebuild_world_lore(
+        files.dir.as_path(),
+        &WorldLorePacket {
+            world_id: options.world_id.clone(),
+            turn_id: pending.turn_id.clone(),
+            ..WorldLorePacket::default()
+        },
+    )?;
+    append_character_text_design_event_plan(
+        files.dir.as_path(),
+        &character_text_design_event_plan,
+    )?;
+    rebuild_character_text_design(
+        files.dir.as_path(),
+        &pending.visible_context.active_character_text_design,
+    )?;
     append_plot_thread_event_plan(files.dir.as_path(), &plot_thread_event_plan)?;
     rebuild_plot_threads(
         files.dir.as_path(),
@@ -849,8 +900,10 @@ fn visible_context(
         compile_location_graph_packet(snapshot, entities),
     )?;
     let context_projection = load_agent_context_projection(files.dir.as_path())?;
-    let active_character_text_design =
-        compile_character_text_design_with_projection(entities, &context_projection);
+    let active_character_text_design = load_character_text_design_state(
+        files.dir.as_path(),
+        compile_character_text_design_with_projection(entities, &context_projection),
+    )?;
     Ok(AgentVisibleContext {
         location: snapshot.protagonist_state.location.clone(),
         recent_scene: current_packet.scene.text_blocks.clone(),

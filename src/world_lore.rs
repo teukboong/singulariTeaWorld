@@ -1,9 +1,16 @@
-use crate::response_context::{AgentContextProjection, ContextVisibility};
+use crate::response_context::{AgentContextProjection, AgentWorldLoreUpdate, ContextVisibility};
+use crate::store::{append_jsonl, read_json, write_json};
 use crate::world_db::WorldFactRow;
+use anyhow::{Result, bail};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 pub const WORLD_LORE_PACKET_SCHEMA_VERSION: &str = "singulari.world_lore_packet.v1";
 pub const WORLD_LORE_ENTRY_SCHEMA_VERSION: &str = "singulari.world_lore_entry.v1";
+pub const WORLD_LORE_UPDATE_SCHEMA_VERSION: &str = "singulari.world_lore_update.v1";
+pub const WORLD_LORE_FILENAME: &str = "world_lore.json";
+pub const WORLD_LORE_UPDATES_FILENAME: &str = "world_lore_updates.jsonl";
 
 const WORLD_LORE_ENTRY_BUDGET: usize = 8;
 
@@ -43,6 +50,31 @@ pub struct WorldLoreEntry {
     pub source_refs: Vec<String>,
     #[serde(default)]
     pub mechanical_axis: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorldLoreUpdatePlan {
+    pub world_id: String,
+    pub turn_id: String,
+    #[serde(default)]
+    pub records: Vec<WorldLoreUpdateRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorldLoreUpdateRecord {
+    pub schema_version: String,
+    pub world_id: String,
+    pub turn_id: String,
+    pub update_id: String,
+    pub subject: String,
+    pub predicate: String,
+    pub object: String,
+    pub category: String,
+    pub visibility: ContextVisibility,
+    pub summary: String,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+    pub recorded_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -107,10 +139,10 @@ pub fn compile_world_lore_from_projection(
     world_id: &str,
     turn_id: &str,
     projection: &AgentContextProjection,
-    fallback_facts: &[WorldFactRow],
+    base_facts: &[WorldFactRow],
 ) -> WorldLorePacket {
     if projection.world_lore_summaries.is_empty() {
-        return compile_world_lore_packet(world_id, turn_id, fallback_facts);
+        return compile_world_lore_packet(world_id, turn_id, base_facts);
     }
     let entries = projection
         .world_lore_summaries
@@ -145,6 +177,159 @@ pub fn compile_world_lore_from_projection(
     }
 }
 
+/// Validate agent-authored lore updates before the turn is advanced.
+///
+/// # Errors
+///
+/// Returns an error when an update is missing required fields or visible
+/// evidence references.
+pub fn prepare_world_lore_update_plan(
+    world_id: &str,
+    turn_id: &str,
+    updates: &[AgentWorldLoreUpdate],
+) -> Result<WorldLoreUpdatePlan> {
+    let recorded_at = Utc::now().to_rfc3339();
+    let mut records = Vec::new();
+    for update in updates {
+        validate_world_lore_update(update)?;
+        records.push(WorldLoreUpdateRecord {
+            schema_version: WORLD_LORE_UPDATE_SCHEMA_VERSION.to_owned(),
+            world_id: world_id.to_owned(),
+            turn_id: turn_id.to_owned(),
+            update_id: format!("world_lore_update:{turn_id}:{:02}", records.len()),
+            subject: update.subject.trim().to_owned(),
+            predicate: update.predicate.trim().to_owned(),
+            object: update.object.trim().to_owned(),
+            category: update.category.trim().to_owned(),
+            visibility: update.visibility,
+            summary: update.summary.trim().to_owned(),
+            evidence_refs: update
+                .evidence_refs
+                .iter()
+                .map(|reference| reference.trim().to_owned())
+                .collect(),
+            recorded_at: recorded_at.clone(),
+        });
+    }
+    Ok(WorldLoreUpdatePlan {
+        world_id: world_id.to_owned(),
+        turn_id: turn_id.to_owned(),
+        records,
+    })
+}
+
+/// Append prevalidated world-lore update records to the durable event log.
+///
+/// # Errors
+///
+/// Returns an error when the update log cannot be written.
+pub fn append_world_lore_update_plan(world_dir: &Path, plan: &WorldLoreUpdatePlan) -> Result<()> {
+    for record in &plan.records {
+        append_jsonl(&world_dir.join(WORLD_LORE_UPDATES_FILENAME), record)?;
+    }
+    Ok(())
+}
+
+/// Rebuild the materialized world-lore packet from the durable update log.
+///
+/// # Errors
+///
+/// Returns an error when update records cannot be read or the materialized
+/// packet cannot be written.
+pub fn rebuild_world_lore(
+    world_dir: &Path,
+    base_packet: &WorldLorePacket,
+) -> Result<WorldLorePacket> {
+    let records = load_world_lore_update_records(world_dir)?;
+    let packet = build_world_lore_from_updates(base_packet, &records);
+    write_json(&world_dir.join(WORLD_LORE_FILENAME), &packet)?;
+    Ok(packet)
+}
+
+/// Load the materialized world-lore packet, or the supplied base packet for
+/// legacy worlds that do not have the dedicated file yet.
+///
+/// # Errors
+///
+/// Returns an error when an existing materialized packet cannot be parsed.
+pub fn load_world_lore_state(
+    world_dir: &Path,
+    base_packet: WorldLorePacket,
+) -> Result<WorldLorePacket> {
+    let path = world_dir.join(WORLD_LORE_FILENAME);
+    if path.is_file() {
+        return read_json(&path);
+    }
+    Ok(base_packet)
+}
+
+#[must_use]
+pub fn build_world_lore_from_updates(
+    base_packet: &WorldLorePacket,
+    records: &[WorldLoreUpdateRecord],
+) -> WorldLorePacket {
+    let mut entries = base_packet.entries.clone();
+    for record in records
+        .iter()
+        .filter(|record| record.visibility == ContextVisibility::PlayerVisible)
+    {
+        let entry = world_lore_entry_from_update(record);
+        if let Some(existing) = entries
+            .iter_mut()
+            .find(|existing| existing.lore_id == entry.lore_id)
+        {
+            *existing = entry;
+        } else {
+            entries.push(entry);
+        }
+    }
+    if entries.len() > WORLD_LORE_ENTRY_BUDGET {
+        let overflow = entries.len() - WORLD_LORE_ENTRY_BUDGET;
+        entries.drain(0..overflow);
+    }
+    WorldLorePacket {
+        schema_version: WORLD_LORE_PACKET_SCHEMA_VERSION.to_owned(),
+        world_id: base_packet.world_id.clone(),
+        turn_id: records.last().map_or_else(
+            || base_packet.turn_id.clone(),
+            |record| record.turn_id.clone(),
+        ),
+        entries,
+        compiler_policy: WorldLorePolicy {
+            source: "materialized_from_world_lore_updates_v1".to_owned(),
+            ..WorldLorePolicy::default()
+        },
+    }
+}
+
+/// Load world-lore update records from the durable event log.
+///
+/// # Errors
+///
+/// Returns an error when the update log cannot be read or contains malformed
+/// JSON lines.
+pub fn load_world_lore_update_records(world_dir: &Path) -> Result<Vec<WorldLoreUpdateRecord>> {
+    let path = world_dir.join(WORLD_LORE_UPDATES_FILENAME);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|error| anyhow::anyhow!("failed to read {}: {error}", path.display()))?;
+    raw.lines()
+        .enumerate()
+        .filter(|(_, line)| !line.trim().is_empty())
+        .map(|(index, line)| {
+            serde_json::from_str::<WorldLoreUpdateRecord>(line).map_err(|error| {
+                anyhow::anyhow!(
+                    "failed to parse {} line {} as WorldLoreUpdateRecord: {error}",
+                    path.display(),
+                    index + 1
+                )
+            })
+        })
+        .collect()
+}
+
 fn parse_lore_projection_target(target: &str) -> (String, String) {
     let mut parts = target.split(':');
     let category = parts.next().unwrap_or("world").to_owned();
@@ -165,6 +350,46 @@ fn world_fact_lore_entry(fact: &WorldFactRow) -> WorldLoreEntry {
         source_refs: vec![format!("world_facts:{}", fact.fact_id)],
         mechanical_axis: mechanical_axis_for_category(fact.category.as_str()),
     }
+}
+
+fn world_lore_entry_from_update(record: &WorldLoreUpdateRecord) -> WorldLoreEntry {
+    WorldLoreEntry {
+        schema_version: WORLD_LORE_ENTRY_SCHEMA_VERSION.to_owned(),
+        lore_id: format!(
+            "lore:{}:{}:{}",
+            record.category, record.subject, record.predicate
+        ),
+        domain: domain_for_category(record.category.as_str()),
+        name: record.subject.clone(),
+        summary: record.summary.clone(),
+        visibility: "player_visible".to_owned(),
+        confidence: "confirmed".to_owned(),
+        authority: "world_lore_updates".to_owned(),
+        source_refs: vec![format!("world_lore_update:{}", record.update_id)],
+        mechanical_axis: mechanical_axis_for_category(record.category.as_str()),
+    }
+}
+
+fn validate_world_lore_update(update: &AgentWorldLoreUpdate) -> Result<()> {
+    let fields = [
+        update.subject.as_str(),
+        update.predicate.as_str(),
+        update.object.as_str(),
+        update.category.as_str(),
+        update.summary.as_str(),
+    ];
+    if fields.iter().any(|field| field.trim().is_empty()) {
+        bail!("world_lore_updates contains an empty required field");
+    }
+    if update.evidence_refs.is_empty()
+        || update
+            .evidence_refs
+            .iter()
+            .any(|reference| reference.trim().is_empty())
+    {
+        bail!("world_lore_updates evidence_refs must contain non-empty visible refs");
+    }
+    Ok(())
 }
 
 fn domain_for_category(category: &str) -> WorldLoreDomain {
@@ -230,5 +455,37 @@ mod tests {
         );
         assert_eq!(packet.entries[0].name, "gate_tax");
         assert_eq!(packet.entries[0].authority, "agent_context_projection");
+    }
+
+    #[test]
+    fn materializes_world_lore_updates_over_base_packet() -> Result<()> {
+        let base_packet = WorldLorePacket {
+            world_id: "stw_lore".to_owned(),
+            turn_id: "turn_0001".to_owned(),
+            ..WorldLorePacket::default()
+        };
+        let plan = prepare_world_lore_update_plan(
+            "stw_lore",
+            "turn_0002",
+            &[AgentWorldLoreUpdate {
+                subject: "gate tax".to_owned(),
+                predicate: "requires".to_owned(),
+                object: "stamped token".to_owned(),
+                category: "customs".to_owned(),
+                visibility: ContextVisibility::PlayerVisible,
+                summary: "gate tax requires a stamped token".to_owned(),
+                evidence_refs: vec!["visible_scene.text_blocks[0]".to_owned()],
+            }],
+        )?;
+
+        let packet = build_world_lore_from_updates(&base_packet, &plan.records);
+
+        assert_eq!(packet.entries.len(), 1);
+        assert_eq!(packet.entries[0].authority, "world_lore_updates");
+        assert_eq!(
+            packet.compiler_policy.source,
+            "materialized_from_world_lore_updates_v1"
+        );
+        Ok(())
     }
 }

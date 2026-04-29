@@ -1,14 +1,16 @@
 use crate::agent_bridge::PendingAgentTurn;
 use crate::codex_view::{BuildCodexViewOptions, build_codex_view};
 use crate::memory_revival_policy::MemoryRevivalPolicy;
-use crate::relationship_graph::compile_relationship_graph_from_projection;
+use crate::relationship_graph::{
+    compile_relationship_graph_from_projection, load_relationship_graph_state,
+};
 use crate::response_context::{load_agent_context_event_records, load_agent_context_projection};
 use crate::resume::{BuildResumePackOptions, build_resume_pack};
 use crate::store::{load_world_record, resolve_store_paths, world_file_paths};
 use crate::world_db::{
     recent_entity_updates, recent_relationship_updates, search_world_db, visible_world_facts,
 };
-use crate::world_lore::compile_world_lore_from_projection;
+use crate::world_lore::{compile_world_lore_from_projection, load_world_lore_state};
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -88,23 +90,29 @@ pub fn build_agent_revival_packet(options: &AgentRevivalCompileOptions<'_>) -> R
     )?;
     let context_events = load_agent_context_event_records(files.dir.as_path())?;
     let context_projection = load_agent_context_projection(files.dir.as_path())?;
-    let active_relationship_graph = compile_relationship_graph_from_projection(
-        pending.world_id.as_str(),
-        pending.turn_id.as_str(),
-        &context_projection,
-        &relationship_updates,
-    );
+    let active_relationship_graph = load_relationship_graph_state(
+        files.dir.as_path(),
+        compile_relationship_graph_from_projection(
+            pending.world_id.as_str(),
+            pending.turn_id.as_str(),
+            &context_projection,
+            &relationship_updates,
+        ),
+    )?;
     let world_facts = visible_world_facts(
         files.dir.as_path(),
         pending.world_id.as_str(),
         policy.update_limit,
     )?;
-    let active_world_lore = compile_world_lore_from_projection(
-        pending.world_id.as_str(),
-        pending.turn_id.as_str(),
-        &context_projection,
-        &world_facts,
-    );
+    let active_world_lore = load_world_lore_state(
+        files.dir.as_path(),
+        compile_world_lore_from_projection(
+            pending.world_id.as_str(),
+            pending.turn_id.as_str(),
+            &context_projection,
+            &world_facts,
+        ),
+    )?;
     let recent_context_events = context_events
         .iter()
         .rev()

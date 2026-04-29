@@ -1,4 +1,5 @@
 use crate::body_resource::BODY_RESOURCE_STATE_FILENAME;
+use crate::character_text_design::CHARACTER_TEXT_DESIGN_FILENAME;
 use crate::location_graph::LOCATION_GRAPH_FILENAME;
 use crate::models::{
     ANCHOR_CHARACTER_ID, CanonEvent, CharacterRecord, EntityRecords, EntityUpdateRecord,
@@ -7,6 +8,7 @@ use crate::models::{
     redact_guide_choice_public_hints,
 };
 use crate::plot_thread::PLOT_THREADS_FILENAME;
+use crate::relationship_graph::RELATIONSHIP_GRAPH_FILENAME;
 use crate::scene_pressure::ACTIVE_SCENE_PRESSURES_FILENAME;
 use crate::sqlite::{
     Connection, OpenFlags, OptionalExtension, SQLITE_BUSY_TIMEOUT_MS, SqliteConnectionOptions,
@@ -17,6 +19,7 @@ use crate::store::{
     LATEST_SNAPSHOT_FILENAME, PLAYER_KNOWLEDGE_FILENAME, WORLD_FILENAME, read_json,
 };
 use crate::visual_asset_graph::VISUAL_ASSET_GRAPH_FILENAME;
+use crate::world_lore::WORLD_LORE_FILENAME;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -1721,6 +1724,9 @@ fn summarize_materialized_projection(kind: &str, value: &serde_json::Value) -> S
                 ("pending_jobs", "pending"),
             ],
         ),
+        "world_lore" => summarize_count_fields(value, &[("entries", "entries")]),
+        "relationship_graph" => summarize_count_fields(value, &[("active_edges", "edges")]),
+        "character_text_design" => summarize_count_fields(value, &[("active_designs", "designs")]),
         _ => "projection available".to_owned(),
     }
 }
@@ -2256,6 +2262,24 @@ const MATERIALIZED_PROJECTION_FILES: &[MaterializedProjectionFile] = &[
         kind: "visual_asset_graph",
         title: "시각 자료 그래프",
         filename: VISUAL_ASSET_GRAPH_FILENAME,
+    },
+    MaterializedProjectionFile {
+        id: "world_lore",
+        kind: "world_lore",
+        title: "월드 로어",
+        filename: WORLD_LORE_FILENAME,
+    },
+    MaterializedProjectionFile {
+        id: "relationship_graph",
+        kind: "relationship_graph",
+        title: "관계망",
+        filename: RELATIONSHIP_GRAPH_FILENAME,
+    },
+    MaterializedProjectionFile {
+        id: "character_text_design",
+        kind: "character_text_design",
+        title: "인물 텍스트 디자인",
+        filename: CHARACTER_TEXT_DESIGN_FILENAME,
     },
 ];
 
