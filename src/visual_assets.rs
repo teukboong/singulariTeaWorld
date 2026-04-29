@@ -1,3 +1,4 @@
+use crate::job_ledger::{WorldJobStatus, WriteVisualJobOptions, write_visual_job};
 use crate::models::{
     ANCHOR_CHARACTER_ID, CharacterRecord, EntityRecords, OPENING_LOCATION_ID,
     PROTAGONIST_CHARACTER_ID, PlaceRecord, RenderPacket, WorldRecord,
@@ -380,6 +381,19 @@ pub fn claim_visual_job(options: &ClaimVisualJobOptions) -> Result<VisualJobClai
             claim_path: claim_path.display().to_string(),
         };
         if write_visual_job_claim_atomically(&claim_path, &claim)? {
+            write_visual_job(&WriteVisualJobOptions {
+                store_root: options.store_root.as_deref(),
+                world_id: options.world_id.as_str(),
+                job: &claim.job,
+                status: WorldJobStatus::Claimed,
+                claim_id: Some(claim.claim_id.clone()),
+                claim_owner: Some(claim.claimed_by.clone()),
+                claimed_at: Some(claim.claimed_at.clone()),
+                claim_path: Some(claim.claim_path.clone()),
+                attempt_id: Some(claim.claim_id.clone()),
+                output_ref: Some(claim.job.destination_path.clone()),
+                last_error: None,
+            })?;
             return Ok(VisualJobClaimOutcome::Claimed {
                 claim: Box::new(claim),
             });
@@ -453,6 +467,19 @@ pub fn complete_visual_job(options: &CompleteVisualJobOptions) -> Result<VisualJ
     };
     ensure_parent_dir(&completion_path)?;
     write_json(&completion_path, &completion)?;
+    write_visual_job(&WriteVisualJobOptions {
+        store_root: options.store_root.as_deref(),
+        world_id: options.world_id.as_str(),
+        job: &job,
+        status: WorldJobStatus::Completed,
+        claim_id: completion.claim_id.clone(),
+        claim_owner: claim.as_ref().map(|claim| claim.claimed_by.clone()),
+        claimed_at: claim.as_ref().map(|claim| claim.claimed_at.clone()),
+        claim_path: claim.as_ref().map(|claim| claim.claim_path.clone()),
+        attempt_id: completion.claim_id.clone(),
+        output_ref: Some(completion.destination_path.clone()),
+        last_error: None,
+    })?;
     if claim_path.exists() {
         fs::remove_file(&claim_path)
             .with_context(|| format!("failed to remove {}", claim_path.display()))?;
@@ -495,6 +522,21 @@ pub fn release_visual_job_claim(
     if claim.is_some() {
         fs::remove_file(&claim_path)
             .with_context(|| format!("failed to remove {}", claim_path.display()))?;
+    }
+    if let Some(claim) = claim.as_ref() {
+        write_visual_job(&WriteVisualJobOptions {
+            store_root: options.store_root.as_deref(),
+            world_id: options.world_id.as_str(),
+            job: &claim.job,
+            status: WorldJobStatus::Pending,
+            claim_id: None,
+            claim_owner: None,
+            claimed_at: None,
+            claim_path: None,
+            attempt_id: Some(claim.claim_id.clone()),
+            output_ref: Some(claim.job.destination_path.clone()),
+            last_error: None,
+        })?;
     }
     Ok(VisualJobClaimRelease {
         schema_version: VISUAL_JOB_CLAIM_RELEASE_SCHEMA_VERSION.to_owned(),

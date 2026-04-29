@@ -114,7 +114,8 @@ of importing every family directly.
    Pilot started with `BodyResourceProjectionFamily`.
 3. Promote `JobLedgerV2` from read-only view to write path for text dispatches.
    Text dispatch now writes `world_jobs/text_turns/*.json`.
-4. Move visual claims/completions onto the same job ledger.
+4. Move visual claims/completions onto the same job ledger. Visual claims,
+   completions, and releases now write `world_jobs/visual/*.json`.
 5. Make `PromptContextPacket` the only WebGPT adapter input and keep revival
    packets as internal evidence.
 6. Split `world_db` indexing into family-owned index providers.
@@ -134,7 +135,10 @@ projection registry pilot lives in `src/projection_registry.rs`; it routes
 instead of composing compile/load calls inline in `agent_bridge`.
 Text dispatch also writes durable `WorldJob` records through `job_ledger`, so
 `read_world_jobs` now reads persisted text-turn lifecycle state before falling
-back to the live pending-turn file.
+back to the live pending-turn file. Visual job claim, completion, and release
+paths write the same `WorldJob` ledger under `world_jobs/visual/`, while older
+worlds without persisted visual records still get a synthetic read view from
+the asset manifest and claim files.
 
 ## Non-Goals
 

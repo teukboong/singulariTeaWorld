@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 pub const WORLD_JOB_LEDGER_SCHEMA_VERSION: &str = "singulari.world_job_ledger.v2";
 pub const WORLD_JOBS_DIR: &str = "world_jobs";
 pub const TEXT_TURN_JOBS_DIR: &str = "text_turns";
+pub const VISUAL_JOBS_LEDGER_DIR: &str = "visual";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -85,6 +86,20 @@ pub struct WriteTextTurnJobOptions<'a> {
     pub last_error: Option<String>,
 }
 
+pub struct WriteVisualJobOptions<'a> {
+    pub store_root: Option<&'a Path>,
+    pub world_id: &'a str,
+    pub job: &'a ImageGenerationJob,
+    pub status: WorldJobStatus,
+    pub claim_id: Option<String>,
+    pub claim_owner: Option<String>,
+    pub claimed_at: Option<String>,
+    pub claim_path: Option<String>,
+    pub attempt_id: Option<String>,
+    pub output_ref: Option<String>,
+    pub last_error: Option<String>,
+}
+
 /// Read the current job-like state without migrating existing files.
 ///
 /// # Errors
@@ -105,6 +120,13 @@ pub fn read_world_jobs(options: &ReadWorldJobsOptions) -> Result<Vec<WorldJob>> 
     {
         jobs.push(pending_text_turn_job(&pending));
     }
+    let visual_ledger_jobs =
+        read_visual_jobs(options.store_root.as_deref(), options.world_id.as_str())?;
+    let persisted_visual_slots = visual_ledger_jobs
+        .iter()
+        .map(|job| job.slot.clone())
+        .collect::<BTreeSet<_>>();
+    jobs.extend(visual_ledger_jobs);
 
     let manifest = build_world_visual_assets(&BuildWorldVisualAssetsOptions {
         store_root: options.store_root.clone(),
@@ -120,6 +142,9 @@ pub fn read_world_jobs(options: &ReadWorldJobsOptions) -> Result<Vec<WorldJob>> 
         }
     }
     for job in visual_jobs {
+        if persisted_visual_slots.contains(job.slot.as_str()) {
+            continue;
+        }
         let claim = load_visual_job_claim(
             options.store_root.as_deref(),
             options.world_id.as_str(),
@@ -139,28 +164,34 @@ pub fn read_world_jobs(options: &ReadWorldJobsOptions) -> Result<Vec<WorldJob>> 
     }
 
     if manifest.menu_background.exists {
-        jobs.push(completed_visual_job(
+        push_completed_visual_job_if_missing(
+            &mut jobs,
+            &persisted_visual_slots,
             options.world_id.as_str(),
             manifest.menu_background.slot.as_str(),
             manifest.menu_background.artifact_kind,
             Path::new(manifest.menu_background.recommended_path.as_str()),
-        ));
+        );
     }
     if manifest.stage_background.exists {
-        jobs.push(completed_visual_job(
+        push_completed_visual_job_if_missing(
+            &mut jobs,
+            &persisted_visual_slots,
             options.world_id.as_str(),
             manifest.stage_background.slot.as_str(),
             manifest.stage_background.artifact_kind,
             Path::new(manifest.stage_background.recommended_path.as_str()),
-        ));
+        );
     }
     for asset in manifest.visual_entities.iter().filter(|asset| asset.exists) {
-        jobs.push(completed_visual_job(
+        push_completed_visual_job_if_missing(
+            &mut jobs,
+            &persisted_visual_slots,
             options.world_id.as_str(),
             asset.slot.as_str(),
             asset.artifact_kind,
             Path::new(asset.recommended_path.as_str()),
-        ));
+        );
     }
     jobs.sort_by(|left, right| {
         job_status_rank(left.status)
@@ -195,6 +226,35 @@ pub fn write_text_turn_job(options: &WriteTextTurnJobOptions<'_>) -> Result<Worl
     job.claim_owner.clone_from(&options.claim_owner);
     job.claim_id.clone_from(&options.attempt_id);
     job.attempt_id.clone_from(&options.attempt_id);
+    job.last_error.clone_from(&options.last_error);
+    write_json(&path, &job)?;
+    Ok(job)
+}
+
+/// Persist one visual job state into the shared `WorldJob` ledger.
+///
+/// # Errors
+///
+/// Returns an error when the world store path cannot be resolved, the
+/// `world_jobs/visual` directory cannot be created, or the job JSON cannot be
+/// written.
+pub fn write_visual_job(options: &WriteVisualJobOptions<'_>) -> Result<WorldJob> {
+    let path = visual_job_ledger_path(
+        options.store_root,
+        options.world_id,
+        options.job.slot.as_str(),
+    )?;
+    let Some(parent) = path.parent() else {
+        anyhow::bail!("visual job ledger path has no parent: {}", path.display());
+    };
+    fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+    let mut job = world_job_from_image_job(options.world_id, options.job, options.status, None);
+    job.claim_id.clone_from(&options.claim_id);
+    job.claim_owner.clone_from(&options.claim_owner);
+    job.claimed_at.clone_from(&options.claimed_at);
+    job.claim_path.clone_from(&options.claim_path);
+    job.attempt_id.clone_from(&options.attempt_id);
+    job.output_ref = options.output_ref.clone().or_else(|| job.path.clone());
     job.last_error.clone_from(&options.last_error);
     write_json(&path, &job)?;
     Ok(job)
@@ -270,6 +330,28 @@ fn read_text_turn_jobs(store_root: Option<&Path>, world_id: &str) -> Result<Vec<
     Ok(jobs)
 }
 
+fn read_visual_jobs(store_root: Option<&Path>, world_id: &str) -> Result<Vec<WorldJob>> {
+    let dir = visual_jobs_ledger_dir(store_root, world_id)?;
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut jobs = Vec::new();
+    for entry in fs::read_dir(&dir).with_context(|| format!("failed to read {}", dir.display()))? {
+        let entry = entry.with_context(|| format!("failed to read entry in {}", dir.display()))?;
+        let path = entry.path();
+        if path.extension().and_then(std::ffi::OsStr::to_str) != Some("json") {
+            continue;
+        }
+        let job = read_json::<WorldJob>(&path)
+            .with_context(|| format!("failed to load visual job {}", path.display()))?;
+        if job.world_id == world_id && job.kind != WorldJobKind::TextTurn {
+            jobs.push(job);
+        }
+    }
+    jobs.sort_by(|left, right| left.slot.cmp(&right.slot));
+    Ok(jobs)
+}
+
 fn text_turn_job_path(store_root: Option<&Path>, world_id: &str, turn_id: &str) -> Result<PathBuf> {
     Ok(text_turn_jobs_dir(store_root, world_id)?
         .join(format!("{}.json", safe_job_file_component(turn_id))))
@@ -282,6 +364,24 @@ fn text_turn_jobs_dir(store_root: Option<&Path>, world_id: &str) -> Result<PathB
         .join(world_id)
         .join(WORLD_JOBS_DIR)
         .join(TEXT_TURN_JOBS_DIR))
+}
+
+fn visual_job_ledger_path(
+    store_root: Option<&Path>,
+    world_id: &str,
+    slot: &str,
+) -> Result<PathBuf> {
+    Ok(visual_jobs_ledger_dir(store_root, world_id)?
+        .join(format!("{}.json", safe_job_file_component(slot))))
+}
+
+fn visual_jobs_ledger_dir(store_root: Option<&Path>, world_id: &str) -> Result<PathBuf> {
+    let paths = resolve_store_paths(store_root)?;
+    Ok(paths
+        .worlds_dir
+        .join(world_id)
+        .join(WORLD_JOBS_DIR)
+        .join(VISUAL_JOBS_LEDGER_DIR))
 }
 
 fn safe_job_file_component(value: &str) -> String {
@@ -352,6 +452,19 @@ fn completed_visual_job(
         claim_path: None,
         attempt_id: None,
         last_error: None,
+    }
+}
+
+fn push_completed_visual_job_if_missing(
+    jobs: &mut Vec<WorldJob>,
+    persisted_slots: &BTreeSet<String>,
+    world_id: &str,
+    slot: &str,
+    artifact_kind: VisualArtifactKind,
+    path: &Path,
+) {
+    if !persisted_slots.contains(slot) {
+        jobs.push(completed_visual_job(world_id, slot, artifact_kind, path));
     }
 }
 
@@ -614,6 +727,98 @@ premise:
                 && job.status == WorldJobStatus::Completed
                 && job.output_ref.as_deref()
                     == Some("agent_bridge/committed_turns/turn_0001/commit_record.json")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn visual_jobs_are_written_and_read_from_ledger() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(
+            &seed_path,
+            r#"
+schema_version: singulari.world_seed.v1
+world_id: stw_visual_job_ledger
+title: "비주얼 잡 원장"
+premise:
+  genre: "중세 판타지"
+  protagonist: "변경 순찰자, 남자 주인공"
+"#,
+        )?;
+        let initialized = init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+        let stage_path = initialized
+            .world_dir
+            .join(VN_ASSETS_DIR)
+            .join("stage_background.png");
+        let job = visual_generation_job(
+            "stage_background".to_owned(),
+            VisualArtifactKind::UiBackground,
+            "stage prompt".to_owned(),
+            stage_path.display().to_string(),
+            Vec::new(),
+            Vec::new(),
+            "test",
+        );
+
+        write_visual_job(&WriteVisualJobOptions {
+            store_root: Some(store.as_path()),
+            world_id: "stw_visual_job_ledger",
+            job: &job,
+            status: WorldJobStatus::Claimed,
+            claim_id: Some("claim-1".to_owned()),
+            claim_owner: Some("image-worker".to_owned()),
+            claimed_at: Some("2026-04-29T00:00:00Z".to_owned()),
+            claim_path: Some("visual_jobs/claims/stage_background.json".to_owned()),
+            attempt_id: Some("claim-1".to_owned()),
+            output_ref: Some(stage_path.display().to_string()),
+            last_error: None,
+        })?;
+        let jobs = read_world_jobs(&ReadWorldJobsOptions {
+            store_root: Some(store.clone()),
+            world_id: "stw_visual_job_ledger".to_owned(),
+            extra_visual_jobs: vec![job.clone()],
+        })?;
+        assert!(jobs.iter().any(|job| {
+            job.slot == "stage_background"
+                && job.kind == WorldJobKind::UiAsset
+                && job.status == WorldJobStatus::Claimed
+                && job.claim_owner.as_deref() == Some("image-worker")
+                && job.claim_id.as_deref() == Some("claim-1")
+        }));
+
+        let stage_output = stage_path.display().to_string();
+        write_visual_job(&WriteVisualJobOptions {
+            store_root: Some(store.as_path()),
+            world_id: "stw_visual_job_ledger",
+            job: &job,
+            status: WorldJobStatus::Completed,
+            claim_id: Some("claim-1".to_owned()),
+            claim_owner: Some("image-worker".to_owned()),
+            claimed_at: Some("2026-04-29T00:00:00Z".to_owned()),
+            claim_path: Some("visual_jobs/claims/stage_background.json".to_owned()),
+            attempt_id: Some("claim-1".to_owned()),
+            output_ref: Some(stage_output.clone()),
+            last_error: None,
+        })?;
+        let jobs = read_world_jobs(&ReadWorldJobsOptions {
+            store_root: Some(store),
+            world_id: "stw_visual_job_ledger".to_owned(),
+            extra_visual_jobs: vec![job],
+        })?;
+        assert!(jobs.iter().any(|job| {
+            job.slot == "stage_background"
+                && job.kind == WorldJobKind::UiAsset
+                && job.status == WorldJobStatus::Completed
+                && job.output_ref.as_deref() == Some(stage_output.as_str())
+        }));
+        assert!(!jobs.iter().any(|job| {
+            job.slot == "stage_background" && job.status == WorldJobStatus::Pending
         }));
         Ok(())
     }
