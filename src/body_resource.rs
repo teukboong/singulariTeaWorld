@@ -1,3 +1,7 @@
+// Projection APIs return anyhow::Result with per-call path/context details; the
+// Rustdoc error lists would duplicate those local error messages.
+#![allow(clippy::missing_errors_doc)]
+
 use crate::models::TurnSnapshot;
 use crate::store::{append_jsonl, read_json, write_json};
 use anyhow::{Result, bail};
@@ -243,8 +247,8 @@ pub fn rebuild_body_resource_state(
     for record in records {
         apply_body_resource_record(&mut state, &record);
     }
-    state.compiler_policy.source =
-        "materialized_from_snapshot_and_body_resource_events_v1".to_owned();
+    "materialized_from_snapshot_and_body_resource_events_v1"
+        .clone_into(&mut state.compiler_policy.source);
     write_json(&world_dir.join(BODY_RESOURCE_STATE_FILENAME), &state)?;
     Ok(state)
 }

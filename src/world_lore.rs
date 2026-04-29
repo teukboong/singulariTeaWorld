@@ -169,9 +169,7 @@ fn world_fact_lore_entry(fact: &WorldFactRow) -> WorldLoreEntry {
 
 fn domain_for_category(category: &str) -> WorldLoreDomain {
     match category {
-        "premise" | "world" => WorldLoreDomain::KnownUnknowns,
         "law" | "runtime_contract" => WorldLoreDomain::SocialOrder,
-        "anchor" => WorldLoreDomain::KnownUnknowns,
         "language" => WorldLoreDomain::LanguageRegister,
         _ => WorldLoreDomain::KnownUnknowns,
     }

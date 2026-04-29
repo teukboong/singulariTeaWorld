@@ -69,13 +69,13 @@ identifiable silhouettes.
 WebGPT text and image lanes are separate browser sessions from process start:
 
 - text CDP port: `9238`
-- image CDP port: `9239`
+- turn CG image CDP port: `9239`
+- reference-asset image CDP port: `9240`
 - separate profile roots under `~/.hesperides/singulari-world/webgpt/`
 
-Startup fails if both lanes share a port or profile. The worker dispatches
-already-pending text and visual work in parallel. If text commit creates a new
-turn-CG job during the same tick, the worker claims one new visual job before
-exiting.
+Startup fails if any lanes share a port or profile. The worker dispatches
+already-pending text, one turn-CG visual job, and one reference-asset visual job
+in parallel. Reference asset generation should not block scene CG generation.
 
 ## Backend Selection
 

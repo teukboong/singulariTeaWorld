@@ -51,18 +51,21 @@ Default lanes:
 | Lane | Tool | CDP port | Profile dir | World binding |
 | --- | --- | --- | --- | --- |
 | Text | `webgpt_research` | `9238` | `~/.hesperides/singulari-world/webgpt/text-profile` | `agent_bridge/webgpt_conversation_binding.json` |
-| Image | `webgpt_generate_image` | `9239` | `~/.hesperides/singulari-world/webgpt/image-profile` | `agent_bridge/webgpt_image_conversation_binding.json` |
+| Turn CG image | `webgpt_generate_image` | `9239` | `~/.hesperides/singulari-world/webgpt/image-profile` | `agent_bridge/webgpt_image_conversation_binding.json` |
+| Reference image | `webgpt_generate_image` | `9240` | `~/.hesperides/singulari-world/webgpt/reference-image-profile` | `agent_bridge/webgpt_reference_asset_conversation_binding.json` |
 
 Override only when a local port/profile collides:
 
 ```bash
 SINGULARI_WORLD_WEBGPT_TEXT_CDP_PORT=9238
 SINGULARI_WORLD_WEBGPT_IMAGE_CDP_PORT=9239
+SINGULARI_WORLD_WEBGPT_REFERENCE_IMAGE_CDP_PORT=9240
 SINGULARI_WORLD_WEBGPT_TEXT_PROFILE_DIR="$HOME/.hesperides/singulari-world/webgpt/text-profile"
 SINGULARI_WORLD_WEBGPT_IMAGE_PROFILE_DIR="$HOME/.hesperides/singulari-world/webgpt/image-profile"
+SINGULARI_WORLD_WEBGPT_REFERENCE_IMAGE_PROFILE_DIR="$HOME/.hesperides/singulari-world/webgpt/reference-image-profile"
 ```
 
-Startup fails if the two lanes share a port or profile. That is intentional:
+Startup fails if any lanes share a port or profile. That is intentional:
 shared sessions contaminate text/image continuity and create one browser queue
 for two different jobs.
 

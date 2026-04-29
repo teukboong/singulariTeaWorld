@@ -740,6 +740,7 @@ fn leaks_internal_anchor_or_hidden_text<'a>(parts: impl IntoIterator<Item = &'a 
             "숨겨져",
             "hidden",
             "secret",
+            "char:anchor",
             "anchor_character",
             "앵커 인물",
             "시드가 정한",
@@ -1346,10 +1347,17 @@ fn vn_choices(world: &WorldRecord, choices: &[TurnChoice]) -> Vec<VnChoice> {
             let requires_inline_text = choice.slot == FREEFORM_CHOICE_SLOT;
             let tag = if is_guide_choice_tag(choice.tag.as_str()) {
                 GUIDE_CHOICE_TAG.to_owned()
+            } else if leaks_internal_anchor_or_hidden_text([choice.tag.as_str()]) {
+                format!("선택 {}", choice.slot)
             } else {
                 redact_guide_choice_public_hints(choice.tag.as_str())
             };
-            let intent = redact_guide_choice_public_hints(choice.player_visible_intent());
+            let visible_intent = choice.player_visible_intent();
+            let intent = if leaks_internal_anchor_or_hidden_text([visible_intent]) {
+                "아직 이름 붙일 증거가 부족하다".to_owned()
+            } else {
+                redact_guide_choice_public_hints(visible_intent)
+            };
             let input_template = if requires_inline_text {
                 format!("{} <action>", choice.slot)
             } else {

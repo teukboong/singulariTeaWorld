@@ -206,7 +206,8 @@ visual jobs the browser queued. WebGPT text and image use separate world-scoped
 ChatGPT conversation URLs: `agent_bridge/webgpt_conversation_binding.json` for
 text and `agent_bridge/webgpt_image_conversation_binding.json` for images.
 They also use separate WebGPT browser sessions from process start: text owns CDP
-port `9238` and its profile dir, image owns CDP port `9239` and its profile dir.
+port `9238`, turn CG image owns `9239`, and reference-asset image owns `9240`,
+each with its own profile dir.
 Configure the `SINGULARI_WORLD_WEBGPT_*_CDP_PORT` and
 `SINGULARI_WORLD_WEBGPT_*_PROFILE_DIR` variables only if those defaults collide
 with another local service.

@@ -1,3 +1,10 @@
+// Projection APIs return anyhow::Result with per-call path/context details; the
+// Rustdoc error lists would duplicate those local error messages.
+#![allow(clippy::missing_errors_doc)]
+// Event compiler functions keep the schema shape visible in one place so the
+// WebGPT response contract stays auditable.
+#![allow(clippy::too_many_lines, clippy::too_many_arguments)]
+
 use crate::store::{append_jsonl, read_json, write_json};
 use anyhow::{Result, bail};
 use chrono::Utc;
@@ -332,13 +339,14 @@ pub fn load_agent_context_projection(world_dir: &Path) -> Result<AgentContextPro
     ))
 }
 
+#[must_use]
 pub fn build_agent_context_projection(
     records: &[AgentContextEventRecord],
 ) -> AgentContextProjection {
-    let (world_id, turn_id) = records
-        .last()
-        .map(|record| (record.world_id.clone(), record.turn_id.clone()))
-        .unwrap_or_else(|| (String::new(), String::new()));
+    let (world_id, turn_id) = records.last().map_or_else(
+        || (String::new(), String::new()),
+        |record| (record.world_id.clone(), record.turn_id.clone()),
+    );
     let mut projection = AgentContextProjection {
         schema_version: AGENT_CONTEXT_PROJECTION_SCHEMA_VERSION.to_owned(),
         world_id,
@@ -530,7 +538,7 @@ mod tests {
 
     #[test]
     fn rejects_context_event_without_evidence() {
-        let error = prepare_agent_context_event_plan(
+        let Err(error) = prepare_agent_context_event_plan(
             "stw_context",
             "turn_0001",
             &AgentContextEventInput {
@@ -546,8 +554,9 @@ mod tests {
                 character_text_design_updates: &[],
                 hidden_state_delta: &[],
             },
-        )
-        .unwrap_err();
+        ) else {
+            panic!("missing evidence refs must reject context event");
+        };
 
         assert!(error.to_string().contains("entity_updates evidence_refs"));
     }

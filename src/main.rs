@@ -554,6 +554,10 @@ enum Commands {
         #[arg(long, env = "SINGULARI_WORLD_WEBGPT_IMAGE_PROFILE_DIR")]
         webgpt_image_profile_dir: Option<PathBuf>,
 
+        /// Dedicated `WebGPT` reference-image-lane browser profile.
+        #[arg(long, env = "SINGULARI_WORLD_WEBGPT_REFERENCE_IMAGE_PROFILE_DIR")]
+        webgpt_reference_image_profile_dir: Option<PathBuf>,
+
         /// Dedicated `WebGPT` text-lane CDP port.
         #[arg(
             long,
@@ -569,6 +573,14 @@ enum Commands {
             default_value_t = DEFAULT_WEBGPT_IMAGE_CDP_PORT
         )]
         webgpt_image_cdp_port: u16,
+
+        /// Dedicated `WebGPT` reference-image-lane CDP port.
+        #[arg(
+            long,
+            env = "SINGULARI_WORLD_WEBGPT_REFERENCE_IMAGE_CDP_PORT",
+            default_value_t = DEFAULT_WEBGPT_REFERENCE_IMAGE_CDP_PORT
+        )]
+        webgpt_reference_image_cdp_port: u16,
 
         /// Timeout in seconds for one `WebGPT` narrative turn.
         #[arg(
@@ -864,8 +876,10 @@ fn dispatch(cli: Cli) -> Result<()> {
             webgpt_reasoning_level,
             webgpt_text_profile_dir,
             webgpt_image_profile_dir,
+            webgpt_reference_image_profile_dir,
             webgpt_text_cdp_port,
             webgpt_image_cdp_port,
+            webgpt_reference_image_cdp_port,
             webgpt_timeout_secs,
         } => handle_host_worker(
             store_root.as_deref(),
@@ -881,8 +895,10 @@ fn dispatch(cli: Cli) -> Result<()> {
                 webgpt_reasoning_level,
                 webgpt_text_profile_dir,
                 webgpt_image_profile_dir,
+                webgpt_reference_image_profile_dir,
                 webgpt_text_cdp_port,
                 webgpt_image_cdp_port,
+                webgpt_reference_image_cdp_port,
                 webgpt_timeout_secs,
             },
         )?,
@@ -1635,6 +1651,7 @@ const HOST_WORKER_EVENT_SCHEMA_VERSION: &str = "singulari.host_worker_event.v1";
 const HOST_WORKER_CONSUMER: &str = "webgpt_host_worker";
 const DEFAULT_WEBGPT_TEXT_CDP_PORT: u16 = 9238;
 const DEFAULT_WEBGPT_IMAGE_CDP_PORT: u16 = 9239;
+const DEFAULT_WEBGPT_REFERENCE_IMAGE_CDP_PORT: u16 = 9240;
 
 #[derive(Debug, Clone)]
 struct HostWorkerOptions {
@@ -1648,8 +1665,10 @@ struct HostWorkerOptions {
     webgpt_reasoning_level: Option<String>,
     webgpt_text_profile_dir: Option<PathBuf>,
     webgpt_image_profile_dir: Option<PathBuf>,
+    webgpt_reference_image_profile_dir: Option<PathBuf>,
     webgpt_text_cdp_port: u16,
     webgpt_image_cdp_port: u16,
+    webgpt_reference_image_cdp_port: u16,
     webgpt_timeout_secs: u64,
 }
 
@@ -1850,17 +1869,17 @@ fn emit_host_text_and_visual_events_parallel(
     options: &HostWorkerOptions,
 ) -> Result<bool> {
     let pending = load_pending_agent_turn(store_root, world_id).ok();
-    let visual_claim = match visual_backend {
+    let visual_claims = match visual_backend {
         HostWorkerVisualBackend::Webgpt => {
-            claim_next_host_visual_job(store_root, world_id, "singulari_webgpt_image_worker")?
+            claim_next_host_visual_jobs(store_root, world_id, "singulari_webgpt_image_worker")?
         }
-        HostWorkerVisualBackend::None => None,
+        HostWorkerVisualBackend::None => Vec::new(),
     };
-    if pending.is_none() && visual_claim.is_none() {
+    if pending.is_none() && visual_claims.is_empty() {
         return Ok(false);
     }
 
-    let (text_result, image_result) = thread::scope(|scope| {
+    let (text_result, image_results) = thread::scope(|scope| {
         let text_handle = pending.as_ref().map(|pending| {
             scope.spawn(move || match text_backend {
                 HostWorkerTextBackend::Webgpt => {
@@ -1870,29 +1889,35 @@ fn emit_host_text_and_visual_events_parallel(
                 }
             })
         });
-        let image_handle = visual_claim.as_ref().map(|claim| {
-            scope.spawn(move || match visual_backend {
-                HostWorkerVisualBackend::Webgpt => {
-                    dispatch_visual_job_via_webgpt(store_root, claim, options)
-                        .map(HostVisualDispatchResult::Webgpt)
-                }
-                HostWorkerVisualBackend::None => {
-                    anyhow::bail!("visual backend none cannot dispatch visual claim")
-                }
+        let image_handles = visual_claims
+            .iter()
+            .map(|claim| {
+                scope.spawn(move || match visual_backend {
+                    HostWorkerVisualBackend::Webgpt => {
+                        dispatch_visual_job_via_webgpt(store_root, claim, options)
+                            .map(HostVisualDispatchResult::Webgpt)
+                    }
+                    HostWorkerVisualBackend::None => {
+                        anyhow::bail!("visual backend none cannot dispatch visual claim")
+                    }
+                })
             })
-        });
+            .collect::<Vec<_>>();
 
         let text_result = text_handle.map(|handle| {
             handle
                 .join()
                 .unwrap_or_else(|panic| Err(thread_panic_error("text dispatch", panic.as_ref())))
         });
-        let image_result = image_handle.map(|handle| {
-            handle
-                .join()
-                .unwrap_or_else(|panic| Err(thread_panic_error("image dispatch", panic.as_ref())))
-        });
-        (text_result, image_result)
+        let image_results = image_handles
+            .into_iter()
+            .map(|handle| {
+                handle.join().unwrap_or_else(|panic| {
+                    Err(thread_panic_error("image dispatch", panic.as_ref()))
+                })
+            })
+            .collect::<Vec<_>>();
+        (text_result, image_results)
     });
 
     let mut emitted_any = false;
@@ -1902,47 +1927,12 @@ fn emit_host_text_and_visual_events_parallel(
         emitted_any = true;
     }
 
-    let initial_image_dispatched = image_result.is_some();
-    if let Some(result) = image_result
-        && emit_visual_dispatch_result(result?)?
-    {
-        emitted_any = true;
-    }
-    if !initial_image_dispatched
-        && let Some(result) =
-            dispatch_host_visual_job_once(store_root, world_id, visual_backend, options)?
-        && emit_visual_dispatch_result(result)?
-    {
-        emitted_any = true;
+    for result in image_results {
+        if emit_visual_dispatch_result(result?)? {
+            emitted_any = true;
+        }
     }
     Ok(emitted_any)
-}
-
-fn dispatch_host_visual_job_once(
-    store_root: Option<&Path>,
-    world_id: &str,
-    visual_backend: HostWorkerVisualBackend,
-    options: &HostWorkerOptions,
-) -> Result<Option<HostVisualDispatchResult>> {
-    let visual_claim = match visual_backend {
-        HostWorkerVisualBackend::Webgpt => {
-            claim_next_host_visual_job(store_root, world_id, "singulari_webgpt_image_worker")?
-        }
-        HostWorkerVisualBackend::None => None,
-    };
-    let Some(claim) = visual_claim else {
-        return Ok(None);
-    };
-    let result = match visual_backend {
-        HostWorkerVisualBackend::Webgpt => {
-            dispatch_visual_job_via_webgpt(store_root, &claim, options)
-                .map(HostVisualDispatchResult::Webgpt)?
-        }
-        HostWorkerVisualBackend::None => {
-            anyhow::bail!("visual backend none cannot dispatch visual claim")
-        }
-    };
-    Ok(Some(result))
 }
 
 fn emit_text_dispatch_result(
@@ -2042,13 +2032,19 @@ fn webgpt_dispatch_skipped_event(
     })
 }
 
-fn claim_next_host_visual_job(
+fn claim_next_host_visual_jobs(
     store_root: Option<&Path>,
     world_id: &str,
     claimed_by: &str,
-) -> Result<Option<singulari_world::VisualJobClaim>> {
+) -> Result<Vec<singulari_world::VisualJobClaim>> {
     let jobs = current_host_visual_jobs(store_root, world_id)?;
+    let mut claimed = Vec::new();
+    let mut claimed_session_kinds = HashSet::new();
     for job in jobs {
+        let session_kind = WebGptImageSessionKind::from_slot(job.slot.as_str());
+        if !claimed_session_kinds.insert(session_kind) {
+            continue;
+        }
         if load_visual_job_claim(store_root, world_id, job.slot.as_str())?.is_some() {
             continue;
         }
@@ -2066,9 +2062,9 @@ fn claim_next_host_visual_job(
                 job.slot
             );
         };
-        return Ok(Some(*claim));
+        claimed.push(*claim);
     }
-    Ok(None)
+    Ok(claimed)
 }
 
 fn webgpt_image_completed_event(record: &WebGptImageDispatchRecord) -> serde_json::Value {
@@ -2156,6 +2152,20 @@ impl WebGptLaneRuntime {
         })
     }
 
+    fn new_image(
+        session_kind: WebGptImageSessionKind,
+        options: &HostWorkerOptions,
+    ) -> Result<Self> {
+        Ok(Self {
+            lane: WebGptConversationLane::Image,
+            profile_dir: webgpt_image_lane_profile_dir(session_kind, options)?,
+            cdp_port: match session_kind {
+                WebGptImageSessionKind::TurnCg => options.webgpt_image_cdp_port,
+                WebGptImageSessionKind::ReferenceAsset => options.webgpt_reference_image_cdp_port,
+            },
+        })
+    }
+
     fn cdp_url(&self) -> String {
         format!("http://127.0.0.1:{}", self.cdp_port)
     }
@@ -2177,18 +2187,25 @@ impl WebGptLaneRuntime {
 
 fn ensure_webgpt_lane_runtime_isolated(options: &HostWorkerOptions) -> Result<()> {
     let text = WebGptLaneRuntime::new(WebGptConversationLane::Text, options)?;
-    let image = WebGptLaneRuntime::new(WebGptConversationLane::Image, options)?;
-    if text.cdp_port == image.cdp_port {
-        anyhow::bail!(
-            "webgpt text/image lanes must use distinct CDP ports: port={}",
-            text.cdp_port
-        );
-    }
-    if text.profile_dir == image.profile_dir {
-        anyhow::bail!(
-            "webgpt text/image lanes must use distinct profile dirs: profile_dir={}",
-            text.profile_dir.display()
-        );
+    let turn_cg = WebGptLaneRuntime::new_image(WebGptImageSessionKind::TurnCg, options)?;
+    let reference = WebGptLaneRuntime::new_image(WebGptImageSessionKind::ReferenceAsset, options)?;
+    for (left_name, left, right_name, right) in [
+        ("text", &text, "turn_cg_image", &turn_cg),
+        ("text", &text, "reference_image", &reference),
+        ("turn_cg_image", &turn_cg, "reference_image", &reference),
+    ] {
+        if left.cdp_port == right.cdp_port {
+            anyhow::bail!(
+                "webgpt lanes must use distinct CDP ports: left={left_name}, right={right_name}, port={}",
+                left.cdp_port
+            );
+        }
+        if left.profile_dir == right.profile_dir {
+            anyhow::bail!(
+                "webgpt lanes must use distinct profile dirs: left={left_name}, right={right_name}, profile_dir={}",
+                left.profile_dir.display()
+            );
+        }
     }
     Ok(())
 }
@@ -2210,6 +2227,28 @@ fn webgpt_lane_profile_dir(
         webgpt_default_profile_root()?
     };
     Ok(root.join(lane.profile_dir_name()))
+}
+
+fn webgpt_image_lane_profile_dir(
+    session_kind: WebGptImageSessionKind,
+    options: &HostWorkerOptions,
+) -> Result<PathBuf> {
+    match session_kind {
+        WebGptImageSessionKind::TurnCg => {
+            webgpt_lane_profile_dir(WebGptConversationLane::Image, options)
+        }
+        WebGptImageSessionKind::ReferenceAsset => {
+            if let Some(path) = options.webgpt_reference_image_profile_dir.clone() {
+                return Ok(path);
+            }
+            let root = if let Some(path) = std::env::var_os("SINGULARI_WORLD_WEBGPT_PROFILE_ROOT") {
+                PathBuf::from(path)
+            } else {
+                webgpt_default_profile_root()?
+            };
+            Ok(root.join("reference-image-profile"))
+        }
+    }
 }
 
 fn webgpt_default_profile_root() -> Result<PathBuf> {
@@ -2848,7 +2887,7 @@ enum WebGptConversationLane {
     Image,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 enum WebGptImageSessionKind {
     TurnCg,
     ReferenceAsset,
@@ -3168,7 +3207,7 @@ fn dispatch_visual_job_via_webgpt(
     fs::write(&prompt_path, prompt.as_bytes())
         .with_context(|| format!("failed to write {}", prompt_path.display()))?;
     let wrapper = resolve_webgpt_mcp_wrapper(options)?;
-    let runtime = WebGptLaneRuntime::new(WebGptConversationLane::Image, options)?;
+    let runtime = WebGptLaneRuntime::new_image(image_session_kind, options)?;
 
     let dispatched_at = Utc::now().to_rfc3339();
     let claim_record = serde_json::json!({
@@ -3767,6 +3806,8 @@ fn build_webgpt_turn_prompt(
 - 출력량은 turn context packet의 source_revival.output_contract.narrative_level과 narrative_budget을 따른다. 레벨 간 차이는 확연해야 한다.
 - 레벨 1은 표준 VN 밀도, 레벨 2는 장면 확장 밀도, 레벨 3은 장편 연재 밀도다. 레벨 2/3에서는 같은 사건도 감각, 행동, 반응, 여운, 압박을 더 길게 쌓는다.
 - player_input이 "세계 개막"이면 그것은 선택지가 아니라 시드에서 첫 서사를 여는 bootstrap turn이다.
+- 시드가 짧거나 장르명뿐이면 turn_context_packet.source_revival.world_id, current_turn.created_at, title을 variation entropy로 삼아 첫 장면을 구체화한다. 단 이 entropy는 소재가 아니라 반복 수렴을 피하기 위한 분산 키다.
+- sparse seed 개막에서 이전 conversation 문구나 일반적인 bootstrap 기본값을 재사용하지 마라. 같은 seed라도 세계마다 첫 장소, 즉시 압력, 첫 관찰 대상, 첫 선택 압력이 달라져야 한다.
 - 시드나 visible facts에 명시되지 않은 장르 장치, 과거사, 외부 세계 대비, 게임 인터페이스식 능력 구조를 추론해서 주입하지 마라. 이런 장치는 explicit positive evidence가 있을 때만 쓴다.
 - protagonist가 현재 정보를 모른다는 사실만으로 장면 밖 배경, 과거사, 시대 대비 독백, 정체성 상실 클리셰를 만들지 마라.
 - 매 턴 survival/social/material/threat/mystery/desire/moral_cost/time_pressure 중 최소 하나의 장면 압력을 visible_scene과 next_choices에 반영한다. 편향을 지우더라도 무미건조한 로그로 쓰지 마라.
@@ -4126,18 +4167,27 @@ mod tests {
             webgpt_reasoning_level: None,
             webgpt_text_profile_dir: Some("/tmp/singulari-webgpt-text".into()),
             webgpt_image_profile_dir: Some("/tmp/singulari-webgpt-image".into()),
+            webgpt_reference_image_profile_dir: Some(
+                "/tmp/singulari-webgpt-reference-image".into(),
+            ),
             webgpt_text_cdp_port: DEFAULT_WEBGPT_TEXT_CDP_PORT,
             webgpt_image_cdp_port: DEFAULT_WEBGPT_IMAGE_CDP_PORT,
+            webgpt_reference_image_cdp_port: DEFAULT_WEBGPT_REFERENCE_IMAGE_CDP_PORT,
             webgpt_timeout_secs: 900,
         };
 
         let text = WebGptLaneRuntime::new(WebGptConversationLane::Text, &options)?;
-        let image = WebGptLaneRuntime::new(WebGptConversationLane::Image, &options)?;
+        let image = WebGptLaneRuntime::new_image(WebGptImageSessionKind::TurnCg, &options)?;
+        let reference =
+            WebGptLaneRuntime::new_image(WebGptImageSessionKind::ReferenceAsset, &options)?;
 
         assert_eq!(text.cdp_port, 9238);
         assert_eq!(image.cdp_port, 9239);
+        assert_eq!(reference.cdp_port, 9240);
         assert_ne!(text.cdp_url(), image.cdp_url());
+        assert_ne!(image.cdp_url(), reference.cdp_url());
         assert_ne!(text.profile_dir, image.profile_dir);
+        assert_ne!(image.profile_dir, reference.profile_dir);
         ensure_webgpt_lane_runtime_isolated(&options)?;
         Ok(())
     }
@@ -4155,8 +4205,12 @@ mod tests {
             webgpt_reasoning_level: None,
             webgpt_text_profile_dir: Some("/tmp/singulari-webgpt-text".into()),
             webgpt_image_profile_dir: Some("/tmp/singulari-webgpt-image".into()),
+            webgpt_reference_image_profile_dir: Some(
+                "/tmp/singulari-webgpt-reference-image".into(),
+            ),
             webgpt_text_cdp_port: 9238,
             webgpt_image_cdp_port: 9238,
+            webgpt_reference_image_cdp_port: 9240,
             webgpt_timeout_secs: 900,
         };
 
@@ -4368,6 +4422,8 @@ premise:
             "추상 감정 설명보다 몸, 시선, 호흡, 손, 거리, 소리, 냄새, 온도 같은 관찰 가능한 흔적으로 보여준다.",
             "선택지 의도나 내부 판정을 본문에서 해설하지 않는다.",
             "레벨 1은 표준 VN 밀도, 레벨 2는 장면 확장 밀도, 레벨 3은 장편 연재 밀도다.",
+            "시드가 짧거나 장르명뿐이면 turn_context_packet.source_revival.world_id, current_turn.created_at, title을 variation entropy로 삼아 첫 장면을 구체화한다.",
+            "같은 seed라도 세계마다 첫 장소, 즉시 압력, 첫 관찰 대상, 첫 선택 압력이 달라져야 한다.",
             "시드나 visible facts에 명시되지 않은 장르 장치, 과거사, 외부 세계 대비, 게임 인터페이스식 능력 구조를 추론해서 주입하지 마라.",
             "protagonist가 현재 정보를 모른다는 사실만으로 장면 밖 배경, 과거사, 시대 대비 독백, 정체성 상실 클리셰를 만들지 마라.",
             "이 WebGPT conversation의 이전 turn들은 말맛, 직전 감정선, 장면 리듬을 잇는 working context다.",

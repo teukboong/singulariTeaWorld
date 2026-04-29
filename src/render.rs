@@ -236,6 +236,7 @@ fn leaks_internal_anchor_or_hidden_text<'a>(parts: impl IntoIterator<Item = &'a 
             "숨겨져",
             "hidden",
             "secret",
+            "char:anchor",
             "anchor_character",
             "앵커 인물",
             "시드가 정한",
@@ -251,16 +252,32 @@ fn render_choices(choices: &[TurnChoice]) -> String {
     let mut lines = vec!["### 선택".to_owned()];
     let choices = normalize_turn_choices(choices);
     for choice in &choices {
+        let (tag, intent) = player_visible_choice_text(choice);
         lines.push(format!(
             "### {}. {} {}",
             choice.slot,
-            choice_icon(choice.tag.as_str()),
-            choice.tag
+            choice_icon(tag.as_str()),
+            tag
         ));
-        lines.push(format!(">> {}", choice.player_visible_intent()));
+        lines.push(format!(">> {intent}"));
         lines.push(String::new());
     }
     lines.join("\n")
+}
+
+fn player_visible_choice_text(choice: &TurnChoice) -> (String, String) {
+    let tag = if leaks_internal_anchor_or_hidden_text([choice.tag.as_str()]) {
+        format!("선택 {}", choice.slot)
+    } else {
+        choice.tag.clone()
+    };
+    let intent = choice.player_visible_intent();
+    let intent = if leaks_internal_anchor_or_hidden_text([intent]) {
+        "아직 이름 붙일 증거가 부족하다".to_owned()
+    } else {
+        intent.to_owned()
+    };
+    (tag, intent)
 }
 
 fn choice_icon(tag: &str) -> &'static str {

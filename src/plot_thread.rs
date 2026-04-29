@@ -1,3 +1,7 @@
+// Projection APIs return anyhow::Result with per-call path/context details; the
+// Rustdoc error lists would duplicate those local error messages.
+#![allow(clippy::missing_errors_doc)]
+
 use crate::models::TurnSnapshot;
 use crate::store::{append_jsonl, read_json, write_json};
 use anyhow::{Context, Result, bail};
@@ -280,8 +284,8 @@ pub fn rebuild_plot_threads(world_dir: &Path, base: &PlotThreadPacket) -> Result
     for record in load_plot_thread_event_records(world_dir)? {
         apply_plot_thread_record(&mut packet, &record);
     }
-    packet.compiler_policy.source =
-        "materialized_from_snapshot_and_plot_thread_events_v1".to_owned();
+    "materialized_from_snapshot_and_plot_thread_events_v1"
+        .clone_into(&mut packet.compiler_policy.source);
     packet.active_visible.retain(|thread| {
         matches!(
             thread.status,
@@ -502,7 +506,7 @@ mod tests {
             compiler_policy: PlotThreadPolicy::default(),
         };
 
-        let error = prepare_plot_thread_event_plan(
+        let Err(error) = prepare_plot_thread_event_plan(
             &packet,
             &[PlotThreadEvent {
                 thread_id: "thread:missing".to_owned(),
@@ -512,8 +516,9 @@ mod tests {
                 summary: "resolved without a source".to_owned(),
                 evidence_refs: vec!["visible_scene.text_blocks[0]".to_owned()],
             }],
-        )
-        .unwrap_err();
+        ) else {
+            panic!("missing thread id must reject plot thread event");
+        };
 
         assert!(error.to_string().contains("invalid plot_thread_events[0]"));
     }

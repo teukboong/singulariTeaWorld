@@ -1,3 +1,10 @@
+// Projection APIs return anyhow::Result with per-call path/context details; the
+// Rustdoc error lists would duplicate those local error messages.
+#![allow(clippy::missing_errors_doc)]
+// Test/projection helpers preserve domain fields explicitly so pressure
+// contracts remain readable beside their fixtures.
+#![allow(clippy::too_many_arguments)]
+
 use crate::agent_bridge::{AgentPrivateAdjudicationContext, PendingAgentChoice};
 use crate::extra_memory::ExtraMemoryPacket;
 use crate::models::{FREEFORM_CHOICE_SLOT, GUIDE_CHOICE_SLOT, TurnSnapshot};
@@ -182,7 +189,6 @@ pub enum ScenePressureUrgency {
     Crisis,
 }
 
-#[must_use]
 pub fn compile_scene_pressure_packet(
     snapshot: &TurnSnapshot,
     selected_choice: Option<&PendingAgentChoice>,
@@ -292,8 +298,8 @@ pub fn rebuild_active_scene_pressures(
     for record in load_scene_pressure_event_records(world_dir)? {
         apply_scene_pressure_record(&mut packet, &record);
     }
-    packet.compiler_policy.source =
-        "materialized_from_pending_turn_and_scene_pressure_events_v1".to_owned();
+    "materialized_from_pending_turn_and_scene_pressure_events_v1"
+        .clone_into(&mut packet.compiler_policy.source);
     packet
         .visible_active
         .retain(|pressure| pressure.intensity > 0);
@@ -789,9 +795,11 @@ mod tests {
 
     #[test]
     fn rejects_scene_pressure_events_for_hidden_pressure() {
-        let mut packet = ScenePressurePacket::default();
-        packet.world_id = "stw_pressure".to_owned();
-        packet.turn_id = "turn_0001".to_owned();
+        let mut packet = ScenePressurePacket {
+            world_id: "stw_pressure".to_owned(),
+            turn_id: "turn_0001".to_owned(),
+            ..ScenePressurePacket::default()
+        };
         packet.hidden_adjudication_only.push(ScenePressure {
             schema_version: SCENE_PRESSURE_SCHEMA_VERSION.to_owned(),
             pressure_id: "pressure:hidden:timer_hidden".to_owned(),
@@ -805,7 +813,7 @@ mod tests {
             prose_effect: prose("tight", vec!["clock"], "restrained"),
         });
 
-        let error = prepare_scene_pressure_event_plan(
+        let Err(error) = prepare_scene_pressure_event_plan(
             &packet,
             &[ScenePressureEvent {
                 pressure_id: "pressure:hidden:timer_hidden".to_owned(),
@@ -815,8 +823,9 @@ mod tests {
                 summary: "hidden timer resolved".to_owned(),
                 evidence_refs: vec!["visible_scene.text_blocks[0]".to_owned()],
             }],
-        )
-        .unwrap_err();
+        ) else {
+            panic!("hidden pressure id must reject scene pressure event");
+        };
 
         assert!(
             error

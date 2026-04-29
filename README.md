@@ -101,10 +101,12 @@ Reference assets are source material only; they must not share the turn-CG
 conversation or appear as scene CG. When a turn-CG job lists accepted reference
 asset paths, WebGPT uploads those PNG/JPEG/WebP/GIF files as attachments in the
 same image-generation message; local path notes are not treated as a substitute
-for attachment. These lanes also run in separate browser
-sessions, not by switching tabs in one worker: text defaults to CDP port `9238`
-and image defaults to CDP port `9239`, with separate profile roots under
-`~/.hesperides/singulari-world/webgpt/`. New worlds created from the VN
+for attachment. These lanes also run in separate browser sessions, not by
+switching tabs in one worker: text defaults to CDP port `9238`, turn CG image
+defaults to `9239`, and reference-asset image defaults to `9240`, with separate
+profile roots under `~/.hesperides/singulari-world/webgpt/`. The worker can
+claim one turn-CG job and one reference-asset job in the same tick, so design
+asset generation no longer blocks scene CG. New worlds created from the VN
 launcher write a locked `agent_bridge/backend_selection.json`; the valid
 backend pair is WebGPT/WebGPT. Old local `codex-app-server` selections are
 legacy data and must not start Codex App runtime plumbing.

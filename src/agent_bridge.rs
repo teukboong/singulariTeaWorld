@@ -428,6 +428,7 @@ pub fn load_pending_agent_turn(
 ///
 /// Returns an error when there is no matching pending turn, hidden truth leaks
 /// into visible text, or turn persistence fails.
+#[allow(clippy::too_many_lines)]
 pub fn commit_agent_turn(options: &AgentCommitTurnOptions) -> Result<CommittedAgentTurn> {
     let store_paths = resolve_store_paths(options.store_root.as_deref())?;
     let files = world_file_paths(&store_paths, options.world_id.as_str());
@@ -643,12 +644,45 @@ fn validate_agent_next_choices(response: &AgentTurnResponse) -> Result<()> {
     if freeform_choice.tag != "자유서술" || !freeform_choice.intent.contains("직접") {
         bail!("agent response slot 6 must remain inline freeform");
     }
+    for choice in &response.next_choices {
+        validate_player_visible_choice_text(choice)?;
+    }
     if choices_keep_default_template(&response.next_choices) {
         bail!(
             "agent response next_choices must be scene-specific; default template choices leaked"
         );
     }
     Ok(())
+}
+
+fn validate_player_visible_choice_text(choice: &TurnChoice) -> Result<()> {
+    for (field, value) in [
+        ("tag", choice.tag.as_str()),
+        ("intent", choice.intent.as_str()),
+    ] {
+        if leaks_internal_choice_token(value) {
+            bail!(
+                "agent response next_choices[slot={}] {field} contains internal token",
+                choice.slot
+            );
+        }
+    }
+    Ok(())
+}
+
+fn leaks_internal_choice_token(value: &str) -> bool {
+    [
+        "char:anchor",
+        "anchor_character",
+        "앵커 인물",
+        "hidden",
+        "secret",
+        "숨겨진 진실",
+        "시드가 정한",
+        "seed-defined",
+    ]
+    .iter()
+    .any(|needle| value.contains(needle))
 }
 
 fn choices_keep_default_template(choices: &[TurnChoice]) -> bool {
@@ -939,7 +973,7 @@ mod tests {
         AGENT_TURN_RESPONSE_SCHEMA_VERSION, AgentCommitTurnOptions, AgentExtraContact,
         AgentSubmitTurnOptions, AgentTurnResponse, canonical_agent_turn_response,
         enqueue_agent_turn, load_pending_agent_turn, narrative_budget_for_level,
-        normalize_narrative_level, selected_choice,
+        normalize_narrative_level, selected_choice, validate_agent_next_choices,
     };
     use crate::agent_bridge::commit_agent_turn;
     use crate::extra_memory::{
@@ -1450,6 +1484,40 @@ premise:
                 .contains("default template choices leaked")
         );
         Ok(())
+    }
+
+    #[test]
+    fn rejects_agent_choices_that_leak_internal_anchor_ids() {
+        let mut response = AgentTurnResponse {
+            schema_version: AGENT_TURN_RESPONSE_SCHEMA_VERSION.to_owned(),
+            world_id: "stw_anchor_leak".to_owned(),
+            turn_id: "turn_0001".to_owned(),
+            visible_scene: NarrativeScene {
+                schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
+                speaker: None,
+                text_blocks: vec!["장면이 이어진다.".to_owned()],
+                tone_notes: Vec::new(),
+            },
+            adjudication: None,
+            canon_event: None,
+            next_choices: scene_specific_choices(),
+            plot_thread_events: Vec::new(),
+            scene_pressure_events: Vec::new(),
+            entity_updates: Vec::new(),
+            relationship_updates: Vec::new(),
+            world_lore_updates: Vec::new(),
+            character_text_design_updates: Vec::new(),
+            body_resource_events: Vec::new(),
+            location_events: Vec::new(),
+            hidden_state_delta: Vec::new(),
+            extra_contacts: Vec::new(),
+        };
+        response.next_choices[2].intent = "char:anchor의 반 걸음 뒤에 멈춰 선다".to_owned();
+
+        let Err(error) = validate_agent_next_choices(&response) else {
+            panic!("internal anchor id must reject agent choices");
+        };
+        assert!(error.to_string().contains("internal token"));
     }
 
     #[test]

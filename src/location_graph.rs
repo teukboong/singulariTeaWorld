@@ -1,3 +1,7 @@
+// Projection APIs return anyhow::Result with per-call path/context details; the
+// Rustdoc error lists would duplicate those local error messages.
+#![allow(clippy::missing_errors_doc)]
+
 use crate::models::{EntityRecords, PlaceRecord, TurnSnapshot};
 use crate::store::{append_jsonl, read_json, write_json};
 use anyhow::{Result, bail};
@@ -203,7 +207,8 @@ pub fn rebuild_location_graph(
     for record in load_location_event_records(world_dir)? {
         apply_location_record(&mut graph, &record);
     }
-    graph.compiler_policy.source = "materialized_from_entities_and_location_events_v1".to_owned();
+    "materialized_from_entities_and_location_events_v1"
+        .clone_into(&mut graph.compiler_policy.source);
     write_json(&world_dir.join(LOCATION_GRAPH_FILENAME), &graph)?;
     Ok(graph)
 }

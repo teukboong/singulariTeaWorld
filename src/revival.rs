@@ -28,6 +28,7 @@ pub struct AgentRevivalCompileOptions<'a> {
 ///
 /// Returns an error when the world store, world.db, resume pack, Archive View,
 /// or recent update projections cannot be read.
+#[allow(clippy::too_many_lines)]
 pub fn build_agent_revival_packet(options: &AgentRevivalCompileOptions<'_>) -> Result<Value> {
     let pending = options.pending;
     let policy = MemoryRevivalPolicy::for_engine_session(options.engine_session_kind);

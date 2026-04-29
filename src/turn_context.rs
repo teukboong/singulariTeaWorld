@@ -72,6 +72,12 @@ mod tests {
     use crate::agent_bridge::{
         AgentOutputContract, AgentPrivateAdjudicationContext, AgentVisibleContext,
     };
+    use crate::body_resource::BodyResourcePacket;
+    use crate::character_text_design::CharacterTextDesignPacket;
+    use crate::extra_memory::ExtraMemoryPacket;
+    use crate::location_graph::LocationGraphPacket;
+    use crate::plot_thread::PlotThreadPacket;
+    use crate::scene_pressure::ScenePressurePacket;
 
     #[test]
     fn turn_context_marks_hidden_pressure_as_adjudication_only() {
@@ -87,12 +93,12 @@ mod tests {
                 recent_scene: Vec::new(),
                 known_facts: Vec::new(),
                 voice_anchors: Vec::new(),
-                extra_memory: Default::default(),
-                active_scene_pressure: Default::default(),
-                active_plot_threads: Default::default(),
-                active_body_resource_state: Default::default(),
-                active_location_graph: Default::default(),
-                active_character_text_design: Default::default(),
+                extra_memory: ExtraMemoryPacket::default(),
+                active_scene_pressure: ScenePressurePacket::default(),
+                active_plot_threads: PlotThreadPacket::default(),
+                active_body_resource_state: BodyResourcePacket::default(),
+                active_location_graph: LocationGraphPacket::default(),
+                active_character_text_design: CharacterTextDesignPacket::default(),
             },
             private_adjudication_context: AgentPrivateAdjudicationContext {
                 hidden_timers: Vec::new(),
