@@ -196,11 +196,13 @@ target/release/singulari-world --store-root .world-store host-worker \
   --interval-ms 750
 ```
 
-The worker calls `webgpt_research` through `webgpt-mcp.sh` by default; set
-`--webgpt-mcp-wrapper` if the wrapper is not discoverable from a sibling
-`webgpt-mcp-checkout/` checkout. It extracts one `AgentTurnResponse` JSON, then validates
-and commits it through the same world-store path, so the UI, DB, CG queue, and
-redaction rules stay shared. With `--visual-backend webgpt`, it also calls
+The worker calls `webgpt_research` through this repository's bundled
+`webgpt-mcp-checkout/scripts/webgpt-mcp.sh` by default. Explicit wrapper
+overrides must still point inside this repository; sibling or parent checkouts
+are rejected so the public-alpha package stays standalone. It extracts one
+`AgentTurnResponse` JSON, then validates and commits it through the same
+world-store path, so the UI, DB, CG queue, and redaction rules stay shared. With
+`--visual-backend webgpt`, it also calls
 `webgpt_generate_image`, receives an extracted PNG path, and completes the same
 visual jobs the browser queued. WebGPT text and image use separate world-scoped
 ChatGPT conversation URLs: `agent_bridge/webgpt_conversation_binding.json` for

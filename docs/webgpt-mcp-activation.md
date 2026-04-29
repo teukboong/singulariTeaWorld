@@ -21,9 +21,7 @@ PNG, and the worker commits through the Rust validators.
 
 ## Requirements
 
-- The bundled `webgpt-mcp-checkout/` runtime in this repository, or an explicit
-  `SINGULARI_WORLD_WEBGPT_MCP_WRAPPER` path when intentionally testing another
-  checkout.
+- The bundled `webgpt-mcp-checkout/` runtime in this repository.
 - Chrome or a compatible Chromium browser available to the WebGPT MCP worker.
 - A ChatGPT login available in the browser profiles used by WebGPT.
 - Human handling for ChatGPT or Cloudflare challenges when they appear.
@@ -51,10 +49,10 @@ scripts/setup-webgpt-runtime.sh
 This installs only the bundled `chatgpt-worker` dependencies, rebuilds its
 `dist/index.js`, and builds the vendored `webgpt-mcp` Rust binary.
 
-If you intentionally want to test another checkout, point the worker at that wrapper:
+If the wrapper path must be provided explicitly, keep it inside this repository:
 
 ```bash
-SINGULARI_WORLD_WEBGPT_MCP_WRAPPER=/absolute/path/to/other-webgpt-mcp/scripts/webgpt-mcp.sh
+SINGULARI_WORLD_WEBGPT_MCP_WRAPPER=/absolute/path/to/singulari-world/webgpt-mcp-checkout/scripts/webgpt-mcp.sh
 ```
 
 ## Session Model

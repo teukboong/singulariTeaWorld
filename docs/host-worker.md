@@ -26,7 +26,8 @@ only for diagnostics or custom embedding hosts; normal play must not depend on
 The text lane:
 
 - finds `webgpt-mcp-checkout/scripts/webgpt-mcp.sh`, or uses
-  `--webgpt-mcp-wrapper` / `SINGULARI_WORLD_WEBGPT_MCP_WRAPPER`;
+  `--webgpt-mcp-wrapper` / `SINGULARI_WORLD_WEBGPT_MCP_WRAPPER` only for a
+  wrapper path inside this repository;
 - reuses one world-scoped ChatGPT URL in
   `agent_bridge/webgpt_conversation_binding.json`;
 - builds a redacted pending-turn prompt with active memory revival from

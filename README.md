@@ -89,10 +89,11 @@ target/release/singulari-world --store-root .world-store host-worker \
 ```
 
 By default the worker uses the bundled
-`webgpt-mcp-checkout/scripts/webgpt-mcp.sh` wrapper, or uses
+`webgpt-mcp-checkout/scripts/webgpt-mcp.sh` wrapper. It may use
 `SINGULARI_WORLD_WEBGPT_MCP_WRAPPER` in the process env or repository-local
-`.env` / `--webgpt-mcp-wrapper` for an explicit checkout. It does not inspect
-parent Hesperides repos; the public-alpha package must stay standalone. It sends the
+`.env` / `--webgpt-mcp-wrapper` only when that path still points inside this
+repository. It does not inspect sibling or parent checkouts; the public-alpha
+package must stay standalone. It sends the
 pending-turn prompt to `webgpt_research`, extracts one `AgentTurnResponse` JSON
 from `answer_markdown`, and commits it through the same schema, redaction, and
 world-store path. WebGPT receives an active revival packet with a larger resume

@@ -1897,8 +1897,10 @@ fn emit_host_text_and_visual_events_parallel(
             .map(|claim| {
                 scope.spawn(move || match visual_backend {
                     HostWorkerVisualBackend::Webgpt => {
-                        dispatch_visual_job_via_webgpt_with_claim_release(store_root, claim, options)
-                            .map(HostVisualDispatchResult::Webgpt)
+                        dispatch_visual_job_via_webgpt_with_claim_release(
+                            store_root, claim, options,
+                        )
+                        .map(HostVisualDispatchResult::Webgpt)
                     }
                     HostWorkerVisualBackend::None => {
                         anyhow::bail!("visual backend none cannot dispatch visual claim")
@@ -2085,7 +2087,8 @@ fn claim_next_host_visual_jobs(
         if !claimed_session_kinds.insert(session_kind) {
             continue;
         }
-        if let Some(existing_claim) = load_visual_job_claim(store_root, world_id, job.slot.as_str())?
+        if let Some(existing_claim) =
+            load_visual_job_claim(store_root, world_id, job.slot.as_str())?
         {
             if existing_claim.claimed_by == claimed_by
                 && !visual_dispatch_record_exists_for_claim(store_root, &existing_claim)?
@@ -2119,7 +2122,11 @@ fn undispatched_owned_visual_claims(
     claimed_by: &str,
 ) -> Result<Vec<singulari_world::VisualJobClaim>> {
     let paths = resolve_store_paths(store_root)?;
-    let claims_dir = paths.worlds_dir.join(world_id).join("visual_jobs").join("claims");
+    let claims_dir = paths
+        .worlds_dir
+        .join(world_id)
+        .join("visual_jobs")
+        .join("claims");
     if !claims_dir.exists() {
         return Ok(Vec::new());
     }
@@ -2127,7 +2134,8 @@ fn undispatched_owned_visual_claims(
     for entry in fs::read_dir(&claims_dir)
         .with_context(|| format!("failed to read {}", claims_dir.display()))?
     {
-        let entry = entry.with_context(|| format!("failed to read entry in {}", claims_dir.display()))?;
+        let entry =
+            entry.with_context(|| format!("failed to read entry in {}", claims_dir.display()))?;
         let path = entry.path();
         if path.extension().and_then(OsStr::to_str) != Some("json") {
             continue;
@@ -2894,25 +2902,36 @@ fn build_webgpt_research_arguments(
 }
 
 fn resolve_webgpt_mcp_wrapper(options: &HostWorkerOptions) -> Result<PathBuf> {
+    let cwd = std::env::current_dir().context("failed to resolve current working directory")?;
+    let project_root = find_project_root_from(cwd.as_path())?.unwrap_or(cwd.clone());
     if let Some(wrapper) = &options.webgpt_mcp_wrapper {
-        return Ok(wrapper.clone());
+        return validate_standalone_webgpt_mcp_wrapper(
+            wrapper,
+            cwd.as_path(),
+            project_root.as_path(),
+        );
     }
     if let Some(wrapper) = std::env::var_os("SINGULARI_WORLD_WEBGPT_MCP_WRAPPER").map(PathBuf::from)
     {
-        return Ok(wrapper);
+        return validate_standalone_webgpt_mcp_wrapper(
+            wrapper.as_path(),
+            cwd.as_path(),
+            project_root.as_path(),
+        );
     }
     if let Some(wrapper) = local_env_value("SINGULARI_WORLD_WEBGPT_MCP_WRAPPER")?.map(PathBuf::from)
     {
-        return Ok(wrapper);
+        return validate_standalone_webgpt_mcp_wrapper(
+            wrapper.as_path(),
+            cwd.as_path(),
+            project_root.as_path(),
+        );
     }
-    if let Some(wrapper) = std::env::var_os("WEBGPT_MCP_WRAPPER").map(PathBuf::from) {
-        return Ok(wrapper);
-    }
-    if let Some(wrapper) = find_webgpt_mcp_wrapper_from_current_dir()? {
+    if let Some(wrapper) = find_bundled_webgpt_mcp_wrapper_from(cwd.as_path())? {
         return Ok(wrapper);
     }
     anyhow::bail!(
-        "webgpt backend requires the bundled webgpt-mcp-checkout/scripts/webgpt-mcp.sh, --webgpt-mcp-wrapper, or SINGULARI_WORLD_WEBGPT_MCP_WRAPPER in env/.env; run scripts/setup-webgpt-runtime.sh on a fresh clone"
+        "webgpt backend requires this repository's bundled webgpt-mcp-checkout/scripts/webgpt-mcp.sh, --webgpt-mcp-wrapper, or SINGULARI_WORLD_WEBGPT_MCP_WRAPPER in env/.env; run scripts/setup-webgpt-runtime.sh on a fresh clone"
     );
 }
 
@@ -2957,21 +2976,56 @@ fn unquote_local_env_value(value: &str) -> String {
     }
 }
 
-fn find_webgpt_mcp_wrapper_from_current_dir() -> Result<Option<PathBuf>> {
-    let mut dir = std::env::current_dir().context("failed to resolve current working directory")?;
+fn validate_standalone_webgpt_mcp_wrapper(
+    wrapper: &Path,
+    cwd: &Path,
+    project_root: &Path,
+) -> Result<PathBuf> {
+    let wrapper = if wrapper.is_absolute() {
+        wrapper.to_path_buf()
+    } else {
+        cwd.join(wrapper)
+    };
+    if !wrapper.is_file() {
+        anyhow::bail!("WebGPT MCP wrapper does not exist: {}", wrapper.display());
+    }
+    let wrapper = wrapper
+        .canonicalize()
+        .with_context(|| format!("failed to canonicalize {}", wrapper.display()))?;
+    let project_root = project_root
+        .canonicalize()
+        .with_context(|| format!("failed to canonicalize {}", project_root.display()))?;
+    if !wrapper.starts_with(project_root.as_path()) {
+        anyhow::bail!(
+            "WebGPT MCP wrapper must live inside this singulari-world repository: wrapper={}, repo={}",
+            wrapper.display(),
+            project_root.display()
+        );
+    }
+    Ok(wrapper)
+}
+
+fn find_project_root_from(start: &Path) -> Result<Option<PathBuf>> {
+    let mut dir = start.to_path_buf();
     loop {
-        let direct = dir.join("webgpt-mcp-checkout/scripts/webgpt-mcp.sh");
-        if direct.is_file() {
-            return Ok(Some(direct));
-        }
-        let sibling = dir.join("../webgpt-mcp-checkout/scripts/webgpt-mcp.sh");
-        if sibling.is_file() {
-            return Ok(Some(normalize_prompt_path(sibling.as_path())));
+        if dir.join("Cargo.toml").is_file() && dir.join("src/main.rs").is_file() {
+            return Ok(Some(dir));
         }
         if !dir.pop() {
             return Ok(None);
         }
     }
+}
+
+fn find_bundled_webgpt_mcp_wrapper_from(start: &Path) -> Result<Option<PathBuf>> {
+    let Some(project_root) = find_project_root_from(start)? else {
+        return Ok(None);
+    };
+    let direct = project_root.join("webgpt-mcp-checkout/scripts/webgpt-mcp.sh");
+    if direct.is_file() {
+        return Ok(Some(direct));
+    }
+    Ok(None)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3962,10 +4016,6 @@ prompt context packet JSON:
     ))
 }
 
-fn normalize_prompt_path(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
-}
-
 fn safe_file_component(value: &str) -> String {
     value
         .chars()
@@ -4154,6 +4204,64 @@ mod tests {
         assert!(text_binding.contains("https://chatgpt.com/c/text-conv"));
         assert!(image_binding.contains("\"lane\": \"image\""));
         assert!(image_binding.contains("https://chatgpt.com/c/image-conv"));
+        Ok(())
+    }
+
+    #[test]
+    fn bundled_webgpt_wrapper_search_does_not_cross_into_sibling_checkout() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let repo = temp.path().join("singulari-world");
+        let sibling = temp.path().join("webgpt-mcp-checkout/scripts");
+        fs::create_dir_all(repo.join("src"))?;
+        fs::write(repo.join("Cargo.toml"), "[package]\n")?;
+        fs::write(repo.join("src/main.rs"), "fn main() {}\n")?;
+        fs::create_dir_all(sibling.as_path())?;
+        fs::write(sibling.join("webgpt-mcp.sh"), "#!/usr/bin/env bash\n")?;
+
+        assert!(find_bundled_webgpt_mcp_wrapper_from(repo.join("src").as_path())?.is_none());
+
+        let bundled = repo.join("webgpt-mcp-checkout/scripts");
+        fs::create_dir_all(bundled.as_path())?;
+        fs::write(bundled.join("webgpt-mcp.sh"), "#!/usr/bin/env bash\n")?;
+
+        assert_eq!(
+            find_bundled_webgpt_mcp_wrapper_from(repo.join("src").as_path())?,
+            Some(bundled.join("webgpt-mcp.sh"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_webgpt_wrapper_must_stay_inside_project_root() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let repo = temp.path().join("singulari-world");
+        let repo_wrapper = repo.join("webgpt-mcp-checkout/scripts/webgpt-mcp.sh");
+        fs::create_dir_all(repo.join("src"))?;
+        fs::create_dir_all(repo_wrapper.parent().context("repo wrapper parent")?)?;
+        fs::write(repo.join("Cargo.toml"), "[package]\n")?;
+        fs::write(repo.join("src/main.rs"), "fn main() {}\n")?;
+        fs::write(repo_wrapper.as_path(), "#!/usr/bin/env bash\n")?;
+
+        let outside_wrapper = temp.path().join("other-webgpt-mcp/scripts/webgpt-mcp.sh");
+        fs::create_dir_all(outside_wrapper.parent().context("outside wrapper parent")?)?;
+        fs::write(outside_wrapper.as_path(), "#!/usr/bin/env bash\n")?;
+
+        assert!(
+            validate_standalone_webgpt_mcp_wrapper(
+                repo_wrapper.as_path(),
+                repo.as_path(),
+                repo.as_path(),
+            )?
+            .ends_with("webgpt-mcp-checkout/scripts/webgpt-mcp.sh")
+        );
+        assert!(
+            validate_standalone_webgpt_mcp_wrapper(
+                outside_wrapper.as_path(),
+                repo.as_path(),
+                repo.as_path(),
+            )
+            .is_err()
+        );
         Ok(())
     }
 

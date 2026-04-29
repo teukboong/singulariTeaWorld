@@ -108,8 +108,9 @@ target/release/singulari-world --store-root .world-store host-worker \
 The built-in backend calls `webgpt_research` through the bundled
 `webgpt-mcp-checkout/scripts/webgpt-mcp.sh` wrapper unless
 `--webgpt-mcp-wrapper` or `SINGULARI_WORLD_WEBGPT_MCP_WRAPPER` in process env
-or repository-local `.env` overrides it. It must not inspect parent Hesperides
-repos; this package stays standalone. It extracts one `AgentTurnResponse` JSON
+or repository-local `.env` overrides it, and overrides must still point inside
+this repository. It must not inspect parent Hesperides repos or sibling
+checkouts; this package stays standalone. It extracts one `AgentTurnResponse` JSON
 from `answer_markdown`; the Rust worker owns validation and commit. Do not add
 a separate ChatGPT conversation UI as a second play client.
 WebGPT uses an active memory revival packet: larger `resume_pack`,
