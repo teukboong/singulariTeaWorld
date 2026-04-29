@@ -1,5 +1,5 @@
 use crate::affordance_graph::{AffordanceGraphPacket, compile_affordance_graph_packet};
-use crate::agent_bridge::AgentOutputContract;
+use crate::agent_bridge::{AgentOutputContract, PendingAgentTurn};
 use crate::belief_graph::{BeliefGraphPacket, compile_belief_graph_packet};
 use crate::body_resource::BodyResourcePacket;
 use crate::location_graph::LocationGraphPacket;
@@ -7,12 +7,14 @@ use crate::prompt_context_budget::{
     PromptContextBudgetReport, PromptContextBudgetReportSource,
     compile_prompt_context_budget_report,
 };
+use crate::revival::{AgentRevivalCompileOptions, build_agent_revival_packet};
 use crate::scene_pressure::ScenePressurePacket;
-use crate::turn_context::TurnContextPacket;
+use crate::turn_context::{TurnContextPacket, assemble_turn_context_packet};
 use crate::world_process_clock::{WorldProcessClockPacket, compile_world_process_clock_packet};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::path::Path;
 
 pub const PROMPT_CONTEXT_PACKET_SCHEMA_VERSION: &str = "singulari.prompt_context_packet.v1";
 
@@ -100,6 +102,34 @@ impl Default for PromptContextPolicy {
             ],
         }
     }
+}
+
+pub struct CompilePromptContextPacketOptions<'a> {
+    pub store_root: Option<&'a Path>,
+    pub pending: &'a PendingAgentTurn,
+    pub engine_session_kind: &'a str,
+}
+
+/// Compile the backend-facing context packet for one pending turn.
+///
+/// This is the boundary that may read broad source-revival material. Text
+/// backend adapters should receive the returned `PromptContextPacket`, not the
+/// source revival packet.
+///
+/// # Errors
+///
+/// Returns an error when source revival cannot be built or required prompt
+/// context sections are missing.
+pub fn compile_prompt_context_packet(
+    options: &CompilePromptContextPacketOptions<'_>,
+) -> Result<PromptContextPacket> {
+    let source_revival_packet = build_agent_revival_packet(&AgentRevivalCompileOptions {
+        store_root: options.store_root,
+        pending: options.pending,
+        engine_session_kind: options.engine_session_kind,
+    })?;
+    let turn_context_packet = assemble_turn_context_packet(options.pending, source_revival_packet);
+    assemble_prompt_context_packet(&turn_context_packet)
 }
 
 /// Compile the physically narrow context packet sent to the text backend.

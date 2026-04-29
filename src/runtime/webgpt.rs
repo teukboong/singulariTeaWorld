@@ -2,7 +2,8 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::Serialize;
 use singulari_world::{
-    AgentCommitTurnOptions, AgentTurnResponse, commit_agent_turn, resolve_store_paths,
+    AgentCommitTurnOptions, AgentTurnResponse, CompilePromptContextPacketOptions,
+    commit_agent_turn, compile_prompt_context_packet, resolve_store_paths,
 };
 use singulari_world::{WorldJobStatus, WriteTextTurnJobOptions, write_text_turn_job};
 use std::fs::{self, OpenOptions};
@@ -190,6 +191,7 @@ pub(super) struct WebGptDispatchRecord {
     pub(super) pid: u32,
     pub(super) record_path: String,
     pub(super) prompt_path: String,
+    pub(super) prompt_context_path: String,
     pub(super) response_path: String,
     pub(super) result_path: Option<String>,
     pub(super) stdout_path: String,
@@ -219,12 +221,24 @@ pub(super) fn dispatch_pending_agent_turn_via_webgpt(
     }
 
     let prompt_path = dispatch_dir.join(format!("{}-webgpt-prompt.md", pending.turn_id));
+    let prompt_context_path =
+        dispatch_dir.join(format!("{}-webgpt-prompt-context.json", pending.turn_id));
     let response_path =
         dispatch_dir.join(format!("{}-webgpt-agent-response.json", pending.turn_id));
     let result_path = dispatch_dir.join(format!("{}-webgpt-result.json", pending.turn_id));
     let stdout_path = dispatch_dir.join(format!("{}-webgpt-stdout.log", pending.turn_id));
     let stderr_path = dispatch_dir.join(format!("{}-webgpt-stderr.log", pending.turn_id));
-    let prompt = build_webgpt_turn_prompt(store_root, pending)?;
+    let prompt_context = compile_prompt_context_packet(&CompilePromptContextPacketOptions {
+        store_root,
+        pending,
+        engine_session_kind: "webgpt_project_session",
+    })?;
+    fs::write(
+        &prompt_context_path,
+        serde_json::to_vec_pretty(&prompt_context)?,
+    )
+    .with_context(|| format!("failed to write {}", prompt_context_path.display()))?;
+    let prompt = build_webgpt_turn_prompt(&prompt_context)?;
     fs::write(&prompt_path, prompt.as_bytes())
         .with_context(|| format!("failed to write {}", prompt_path.display()))?;
     let dispatcher = resolve_webgpt_dispatcher(store_root, pending, options)?;
@@ -233,6 +247,7 @@ pub(super) fn dispatch_pending_agent_turn_via_webgpt(
         world_id: pending.world_id.as_str(),
         turn_id: pending.turn_id.as_str(),
         prompt_path: prompt_path.as_path(),
+        prompt_context_path: prompt_context_path.as_path(),
         response_path: response_path.as_path(),
         result_path: result_path.as_path(),
         stdout_path: stdout_path.as_path(),
@@ -336,6 +351,7 @@ fn webgpt_dispatch_record(
         pid: dispatch_result.pid,
         record_path: record_path.display().to_string(),
         prompt_path: paths.prompt_path.display().to_string(),
+        prompt_context_path: paths.prompt_context_path.display().to_string(),
         response_path: paths.response_path.display().to_string(),
         result_path: Some(paths.result_path.display().to_string()),
         stdout_path: paths.stdout_path.display().to_string(),
@@ -394,6 +410,7 @@ fn webgpt_dispatch_claim(
         "mcp_cdp_url": dispatcher.mcp_cdp_url(),
         "conversation_id": dispatcher.conversation_id(),
         "prompt_path": paths.prompt_path.display().to_string(),
+        "prompt_context_path": paths.prompt_context_path.display().to_string(),
         "response_path": paths.response_path.display().to_string(),
         "result_path": paths.result_path.display().to_string(),
         "stdout_path": paths.stdout_path.display().to_string(),
@@ -440,6 +457,7 @@ struct WebGptTurnPaths<'a> {
     world_id: &'a str,
     turn_id: &'a str,
     prompt_path: &'a Path,
+    prompt_context_path: &'a Path,
     response_path: &'a Path,
     result_path: &'a Path,
     stdout_path: &'a Path,
@@ -577,6 +595,10 @@ fn run_external_webgpt_turn_command(
         .arg(paths.turn_id)
         .env("SINGULARI_WORLD_ENGINE", "webgpt")
         .env("SINGULARI_WORLD_PROMPT_PATH", paths.prompt_path)
+        .env(
+            "SINGULARI_WORLD_PROMPT_CONTEXT_PATH",
+            paths.prompt_context_path,
+        )
         .env("SINGULARI_WORLD_RESPONSE_PATH", paths.response_path)
         .env("SINGULARI_WORLD_WORLD_ID", paths.world_id)
         .env("SINGULARI_WORLD_TURN_ID", paths.turn_id)
@@ -1103,8 +1125,9 @@ mod tests {
     };
     use super::*;
     use singulari_world::{
-        AgentSubmitTurnOptions, ImageGenerationJob, InitWorldOptions, VisualArtifactKind,
-        enqueue_agent_turn, init_world,
+        AgentSubmitTurnOptions, CompilePromptContextPacketOptions, ImageGenerationJob,
+        InitWorldOptions, VisualArtifactKind, compile_prompt_context_packet, enqueue_agent_turn,
+        init_world,
     };
 
     #[test]
@@ -1600,7 +1623,12 @@ premise:
             input: "2".to_owned(),
             narrative_level: None,
         })?;
-        let prompt = build_webgpt_turn_prompt(Some(store.as_path()), &pending)?;
+        let prompt_context = compile_prompt_context_packet(&CompilePromptContextPacketOptions {
+            store_root: Some(store.as_path()),
+            pending: &pending,
+            engine_session_kind: "webgpt_project_session",
+        })?;
+        let prompt = build_webgpt_turn_prompt(&prompt_context)?;
 
         for required in [
             "너는 Singulari World의 trusted narrative agent다.",

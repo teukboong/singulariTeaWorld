@@ -222,8 +222,9 @@ pub use projection_registry::{
     ProjectionFamilyDescriptor, SnapshotProjectionFamily, load_body_resource_prompt_packet,
 };
 pub use prompt_context::{
-    PROMPT_CONTEXT_PACKET_SCHEMA_VERSION, PromptAdjudicationContext, PromptContextPacket,
-    PromptContextPolicy, PromptVisibleContext, assemble_prompt_context_packet,
+    CompilePromptContextPacketOptions, PROMPT_CONTEXT_PACKET_SCHEMA_VERSION,
+    PromptAdjudicationContext, PromptContextPacket, PromptContextPolicy, PromptVisibleContext,
+    assemble_prompt_context_packet, compile_prompt_context_packet,
     extract_prompt_context_from_prompt,
 };
 pub use prompt_context_budget::{
