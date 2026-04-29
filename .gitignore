@@ -29,6 +29,7 @@ design-system/
 
 # Local architecture working notes.
 docs/backend-world-architecture.local.md
+docs/blueprint-implementation-priority.local.md
 
 # Local-only privacy scrub terms. Never commit personal identifiers here.
 .privacy-denylist

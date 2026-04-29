@@ -1,7 +1,7 @@
 use crate::agent_bridge::{AgentPrivateAdjudicationContext, PendingAgentChoice};
 use crate::extra_memory::ExtraMemoryPacket;
 use crate::models::{FREEFORM_CHOICE_SLOT, GUIDE_CHOICE_SLOT, TurnSnapshot};
-use crate::store::append_jsonl;
+use crate::store::{append_jsonl, read_json, write_json};
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -14,6 +14,7 @@ pub const SCENE_PRESSURE_AUDIT_SCHEMA_VERSION: &str = "singulari.scene_pressure_
 pub const SCENE_PRESSURE_AUDIT_FILENAME: &str = "scene_pressure_audit.jsonl";
 pub const SCENE_PRESSURE_EVENT_SCHEMA_VERSION: &str = "singulari.scene_pressure_event.v1";
 pub const SCENE_PRESSURE_EVENTS_FILENAME: &str = "scene_pressure_events.jsonl";
+pub const ACTIVE_SCENE_PRESSURES_FILENAME: &str = "active_scene_pressures.json";
 
 const VISIBLE_PRESSURE_BUDGET: usize = 3;
 const HIDDEN_PRESSURE_BUDGET: usize = 2;
@@ -281,6 +282,69 @@ pub fn append_scene_pressure_event_plan(
         append_jsonl(&world_dir.join(SCENE_PRESSURE_EVENTS_FILENAME), record)?;
     }
     Ok(())
+}
+
+pub fn rebuild_active_scene_pressures(
+    world_dir: &Path,
+    base: &ScenePressurePacket,
+) -> Result<ScenePressurePacket> {
+    let mut packet = base.clone();
+    for record in load_scene_pressure_event_records(world_dir)? {
+        apply_scene_pressure_record(&mut packet, &record);
+    }
+    packet.compiler_policy.source =
+        "materialized_from_pending_turn_and_scene_pressure_events_v1".to_owned();
+    packet
+        .visible_active
+        .retain(|pressure| pressure.intensity > 0);
+    write_json(&world_dir.join(ACTIVE_SCENE_PRESSURES_FILENAME), &packet)?;
+    Ok(packet)
+}
+
+pub fn load_active_scene_pressures(
+    world_dir: &Path,
+    fallback: ScenePressurePacket,
+) -> Result<ScenePressurePacket> {
+    let path = world_dir.join(ACTIVE_SCENE_PRESSURES_FILENAME);
+    if path.exists() {
+        return read_json(&path);
+    }
+    Ok(fallback)
+}
+
+fn load_scene_pressure_event_records(world_dir: &Path) -> Result<Vec<ScenePressureEventRecord>> {
+    let path = world_dir.join(SCENE_PRESSURE_EVENTS_FILENAME);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let raw = std::fs::read_to_string(&path)?;
+    raw.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(serde_json::from_str::<ScenePressureEventRecord>)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn apply_scene_pressure_record(
+    packet: &mut ScenePressurePacket,
+    record: &ScenePressureEventRecord,
+) {
+    if let Some(pressure) = packet
+        .visible_active
+        .iter_mut()
+        .find(|pressure| pressure.pressure_id == record.pressure_id)
+    {
+        pressure.intensity = if matches!(record.change, ScenePressureChange::Resolved) {
+            0
+        } else {
+            record.intensity_after
+        };
+        pressure.urgency = record.urgency_after;
+        pressure.observable_signals = vec![record.summary.clone()];
+        pressure
+            .source_refs
+            .push(format!("scene_pressure_event:{}", record.event_id));
+    }
 }
 
 fn validate_scene_pressure_event(

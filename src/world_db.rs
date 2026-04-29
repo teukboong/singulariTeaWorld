@@ -1,9 +1,13 @@
+use crate::body_resource::BODY_RESOURCE_STATE_FILENAME;
+use crate::location_graph::LOCATION_GRAPH_FILENAME;
 use crate::models::{
     ANCHOR_CHARACTER_ID, CanonEvent, CharacterRecord, EntityRecords, EntityUpdateRecord,
     HiddenState, NamedEntity, PlaceRecord, PlayerKnowledge, RelationshipUpdateRecord, RenderPacket,
     StructuredEntityUpdates, TurnLogEntry, TurnSnapshot, WorldRecord,
     redact_guide_choice_public_hints,
 };
+use crate::plot_thread::PLOT_THREADS_FILENAME;
+use crate::scene_pressure::ACTIVE_SCENE_PRESSURES_FILENAME;
 use crate::sqlite::{
     Connection, OpenFlags, OptionalExtension, SQLITE_BUSY_TIMEOUT_MS, SqliteConnectionOptions,
     configure_sqlite_connection, params,
@@ -12,6 +16,7 @@ use crate::store::{
     CANON_EVENTS_FILENAME, ENTITIES_FILENAME, ENTITY_UPDATES_FILENAME, HIDDEN_STATE_FILENAME,
     LATEST_SNAPSHOT_FILENAME, PLAYER_KNOWLEDGE_FILENAME, WORLD_FILENAME, read_json,
 };
+use crate::visual_asset_graph::VISUAL_ASSET_GRAPH_FILENAME;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -40,6 +45,7 @@ pub struct WorldDbStats {
     pub entity_records: u64,
     pub entity_updates: u64,
     pub relationship_updates: u64,
+    pub materialized_projections: u64,
     pub snapshots: u64,
     pub chapter_summaries: u64,
     pub search_documents: u64,
@@ -167,6 +173,24 @@ pub fn initialize_world_db(
     Ok(())
 }
 
+/// Sync closed JSON projection files into `world.db` and refresh search.
+///
+/// # Errors
+///
+/// Returns an error when the database cannot be opened or an existing
+/// projection file is malformed.
+pub fn sync_world_db_materialized_projections(
+    world_dir: &Path,
+    world_id: &str,
+    updated_at: &str,
+) -> Result<()> {
+    let conn = open_world_db(world_dir)?;
+    migrate_world_db(&conn)?;
+    upsert_materialized_projection_files(&conn, world_dir, world_id, updated_at)?;
+    rebuild_world_search_index_for_conn(&conn, world_id)?;
+    Ok(())
+}
+
 /// Record one advanced turn into the per-world `SQLite` database.
 ///
 /// # Errors
@@ -209,6 +233,12 @@ pub fn record_turn_in_world_db(input: &RecordTurnDbInput<'_>) -> Result<()> {
         input.render_packet,
         input.turn_log_entry.created_at.as_str(),
     )?;
+    upsert_materialized_projection_files(
+        &conn,
+        input.world_dir,
+        input.world.world_id.as_str(),
+        input.turn_log_entry.created_at.as_str(),
+    )?;
     refresh_due_chapter_summary_for_conn(
         &conn,
         input.world.world_id.as_str(),
@@ -239,6 +269,7 @@ pub fn world_db_stats(world_dir: &Path, world_id: &str) -> Result<WorldDbStats> 
         entity_records: count_world_rows(&conn, "entity_records", world_id)?,
         entity_updates: count_world_rows(&conn, "entity_updates", world_id)?,
         relationship_updates: count_world_rows(&conn, "relationship_updates", world_id)?,
+        materialized_projections: count_world_rows(&conn, "materialized_projections", world_id)?,
         snapshots: count_world_rows(&conn, "snapshots", world_id)?,
         chapter_summaries: count_world_rows(&conn, "chapter_summaries", world_id)?,
         search_documents: count_world_rows(&conn, "world_search_fts", world_id)?,
@@ -704,6 +735,7 @@ pub fn repair_world_db(world_dir: &Path, world_id: &str) -> Result<WorldDbRepair
     for packet in &render_packets {
         upsert_render_packet(&conn, packet, world.updated_at.as_str())?;
     }
+    upsert_materialized_projection_files(&conn, world_dir, world_id, world.updated_at.as_str())?;
     create_chapter_summary_for_open_events(&conn, world_id, 1, true, world.updated_at.as_str())?;
     rebuild_world_search_index_for_conn(&conn, world_id)?;
     let search_documents = count_world_rows(&conn, "world_search_fts", world_id)?;
@@ -864,6 +896,17 @@ const WORLD_DB_SCHEMA_SQL: &str = r"
             created_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS materialized_projections (
+            world_id TEXT NOT NULL,
+            projection_id TEXT NOT NULL,
+            projection_kind TEXT NOT NULL,
+            title TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            raw_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (world_id, projection_id)
+        );
+
         CREATE TABLE IF NOT EXISTS player_knowledge (
             world_id TEXT PRIMARY KEY,
             raw_json TEXT NOT NULL,
@@ -924,6 +967,8 @@ const WORLD_DB_SCHEMA_SQL: &str = r"
             ON entity_updates(world_id, turn_id);
         CREATE INDEX IF NOT EXISTS idx_relationship_updates_world_turn
             ON relationship_updates(world_id, turn_id);
+        CREATE INDEX IF NOT EXISTS idx_materialized_projections_world_kind
+            ON materialized_projections(world_id, projection_kind);
         CREATE INDEX IF NOT EXISTS idx_state_changes_world_turn
             ON state_changes(world_id, turn_id);
         CREATE INDEX IF NOT EXISTS idx_world_facts_world_category
@@ -1610,6 +1655,93 @@ fn upsert_render_packet(conn: &Connection, packet: &RenderPacket, created_at: &s
     Ok(())
 }
 
+fn upsert_materialized_projection_files(
+    conn: &Connection,
+    world_dir: &Path,
+    world_id: &str,
+    updated_at: &str,
+) -> Result<()> {
+    for projection in MATERIALIZED_PROJECTION_FILES {
+        let path = world_dir.join(projection.filename);
+        if !path.is_file() {
+            continue;
+        }
+        let value: serde_json::Value = read_json(&path).with_context(|| {
+            format!(
+                "world.db materialized projection read failed: {}",
+                path.display()
+            )
+        })?;
+        let summary = summarize_materialized_projection(projection.kind, &value);
+        conn.execute(
+            r"
+            INSERT OR REPLACE INTO materialized_projections(
+                world_id, projection_id, projection_kind, title, summary, raw_json, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ",
+            params![
+                world_id,
+                projection.id,
+                projection.kind,
+                projection.title,
+                summary,
+                to_json(&value)?,
+                updated_at,
+            ],
+        )
+        .with_context(|| {
+            format!(
+                "world.db materialized projection upsert failed: projection_id={}",
+                projection.id
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn summarize_materialized_projection(kind: &str, value: &serde_json::Value) -> String {
+    match kind {
+        "body_resource" => {
+            summarize_count_fields(value, &[("body", "body"), ("resources", "resources")])
+        }
+        "location_graph" => summarize_count_fields(
+            value,
+            &[
+                ("current_location", "current"),
+                ("nearby_locations", "nearby"),
+            ],
+        ),
+        "plot_threads" => summarize_count_fields(value, &[("threads", "threads")]),
+        "scene_pressure" => summarize_count_fields(value, &[("pressures", "pressures")]),
+        "visual_asset_graph" => summarize_count_fields(
+            value,
+            &[
+                ("display_assets", "display"),
+                ("reference_assets", "reference"),
+                ("pending_jobs", "pending"),
+            ],
+        ),
+        _ => "projection available".to_owned(),
+    }
+}
+
+fn summarize_count_fields(value: &serde_json::Value, fields: &[(&str, &str)]) -> String {
+    fields
+        .iter()
+        .map(|(field, label)| {
+            let count = value
+                .get(*field)
+                .and_then(serde_json::Value::as_array)
+                .map_or_else(
+                    || usize::from(value.get(*field).is_some()),
+                    std::vec::Vec::len,
+                );
+            format!("{label}={count}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn rebuild_world_search_index_for_conn(conn: &Connection, world_id: &str) -> Result<()> {
     conn.execute(
         "DELETE FROM world_search_fts WHERE world_id = ?1",
@@ -1622,6 +1754,7 @@ fn rebuild_world_search_index_for_conn(conn: &Connection, world_id: &str) -> Res
     index_entity_records(conn, world_id)?;
     index_entity_updates(conn, world_id)?;
     index_relationship_updates(conn, world_id)?;
+    index_materialized_projections(conn, world_id)?;
     Ok(())
 }
 
@@ -1830,6 +1963,40 @@ fn index_relationship_updates(conn: &Connection, world_id: &str) -> Result<()> {
     Ok(())
 }
 
+fn index_materialized_projections(conn: &Connection, world_id: &str) -> Result<()> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT projection_id, projection_kind, title, summary
+             FROM materialized_projections
+             WHERE world_id = ?1",
+        )
+        .context("world.db search index materialized projections prepare failed")?;
+    let rows = stmt
+        .query_map(params![world_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .context("world.db search index materialized projections query failed")?;
+    for row in rows {
+        let (projection_id, projection_kind, title, summary) =
+            row.context("world.db search index materialized projection row failed")?;
+        insert_search_document(
+            conn,
+            world_id,
+            "materialized_projections",
+            projection_id.as_str(),
+            format!("{projection_kind} {title}").as_str(),
+            summary.as_str(),
+            PLAYER_VISIBLE,
+        )?;
+    }
+    Ok(())
+}
+
 fn insert_search_document(
     conn: &Connection,
     world_id: &str,
@@ -2027,6 +2194,7 @@ const WORLD_SCOPED_TABLES: &[&str] = &[
     "entity_records",
     "entity_updates",
     "relationship_updates",
+    "materialized_projections",
     "snapshots",
     "chapter_summaries",
     "world_search_fts",
@@ -2038,6 +2206,7 @@ const WORLD_REPAIR_CLEAR_TABLES: &[&str] = &[
     "render_packets",
     "snapshots",
     "relationship_updates",
+    "materialized_projections",
     "entity_updates",
     "character_memories",
     "state_changes",
@@ -2048,6 +2217,46 @@ const WORLD_REPAIR_CLEAR_TABLES: &[&str] = &[
     "player_knowledge",
     "world_facts",
     "worlds",
+];
+
+struct MaterializedProjectionFile {
+    id: &'static str,
+    kind: &'static str,
+    title: &'static str,
+    filename: &'static str,
+}
+
+const MATERIALIZED_PROJECTION_FILES: &[MaterializedProjectionFile] = &[
+    MaterializedProjectionFile {
+        id: "body_resource_state",
+        kind: "body_resource",
+        title: "몸과 소지품",
+        filename: BODY_RESOURCE_STATE_FILENAME,
+    },
+    MaterializedProjectionFile {
+        id: "location_graph",
+        kind: "location_graph",
+        title: "장소 그래프",
+        filename: LOCATION_GRAPH_FILENAME,
+    },
+    MaterializedProjectionFile {
+        id: "plot_threads",
+        kind: "plot_threads",
+        title: "열린 서사 스레드",
+        filename: PLOT_THREADS_FILENAME,
+    },
+    MaterializedProjectionFile {
+        id: "active_scene_pressures",
+        kind: "scene_pressure",
+        title: "장면 압력",
+        filename: ACTIVE_SCENE_PRESSURES_FILENAME,
+    },
+    MaterializedProjectionFile {
+        id: "visual_asset_graph",
+        kind: "visual_asset_graph",
+        title: "시각 자료 그래프",
+        filename: VISUAL_ASSET_GRAPH_FILENAME,
+    },
 ];
 
 #[cfg(test)]

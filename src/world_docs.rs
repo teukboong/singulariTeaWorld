@@ -1,11 +1,16 @@
+use crate::body_resource::BODY_RESOURCE_STATE_FILENAME;
+use crate::location_graph::LOCATION_GRAPH_FILENAME;
 use crate::models::{
     CanonEvent, EntityRecords, HiddenState, PlayerKnowledge, TurnSnapshot, WorldRecord,
     redact_guide_choice_public_hints,
 };
+use crate::plot_thread::PLOT_THREADS_FILENAME;
+use crate::scene_pressure::ACTIVE_SCENE_PRESSURES_FILENAME;
 use crate::store::{
     CANON_EVENTS_FILENAME, ENTITIES_FILENAME, HIDDEN_STATE_FILENAME, LATEST_SNAPSHOT_FILENAME,
     PLAYER_KNOWLEDGE_FILENAME, WORLD_FILENAME, read_json,
 };
+use crate::visual_asset_graph::VISUAL_ASSET_GRAPH_FILENAME;
 use crate::world_db::{ChapterSummaryRecord, latest_chapter_summaries};
 use anyhow::{Context, Result};
 use std::fmt::Write as _;
@@ -53,6 +58,14 @@ pub fn refresh_world_docs(world_dir: &Path) -> Result<()> {
         &render_open_threads(&snapshot, &player_knowledge, &hidden_state),
     )?;
     write_doc(&docs_dir.join("entities.md"), &render_entities(&entities))?;
+    write_doc(
+        &docs_dir.join("relationships.md"),
+        &render_relationships(&entities),
+    )?;
+    write_doc(
+        &docs_dir.join("projection_state.md"),
+        &render_projection_state(world_dir)?,
+    )?;
     Ok(())
 }
 
@@ -243,6 +256,58 @@ fn render_entities(entities: &EntityRecords) -> String {
     markdown
 }
 
+fn render_relationships(entities: &EntityRecords) -> String {
+    let mut markdown = String::from("# Relationships\n\n");
+    for character in &entities.characters {
+        writeln!(markdown, "## `{}` {}", character.id, character.name.visible).ok();
+        if character.relationships.is_empty() {
+            writeln!(markdown, "- no relationship notes yet").ok();
+        } else {
+            for relationship in &character.relationships {
+                writeln!(
+                    markdown,
+                    "- {}",
+                    redact_guide_choice_public_hints(relationship)
+                )
+                .ok();
+            }
+        }
+        writeln!(markdown).ok();
+    }
+    markdown
+}
+
+fn render_projection_state(world_dir: &Path) -> Result<String> {
+    let mut markdown = String::from("# Projection State\n\n");
+    for projection in DOC_PROJECTION_FILES {
+        writeln!(markdown, "## {}", projection.title).ok();
+        let path = world_dir.join(projection.filename);
+        if !path.is_file() {
+            writeln!(markdown, "- not materialized").ok();
+            writeln!(markdown).ok();
+            continue;
+        }
+        let value: serde_json::Value = read_json(&path)?;
+        writeln!(markdown, "- file: `{}`", projection.filename).ok();
+        for (field, label) in projection.summary_fields {
+            let count = projection_field_count(&value, field);
+            writeln!(markdown, "- {label}: {count}").ok();
+        }
+        writeln!(markdown).ok();
+    }
+    Ok(markdown)
+}
+
+fn projection_field_count(value: &serde_json::Value, field: &str) -> usize {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_array)
+        .map_or_else(
+            || usize::from(value.get(field).is_some()),
+            std::vec::Vec::len,
+        )
+}
+
 fn write_list(markdown: &mut String, label: &str, values: &[String]) {
     if values.is_empty() {
         writeln!(markdown, "- {label}: none").ok();
@@ -285,6 +350,47 @@ fn write_doc(path: &Path, body: &str) -> Result<()> {
     fs::write(path, body).with_context(|| format!("failed to write {}", path.display()))
 }
 
+struct DocProjectionFile {
+    title: &'static str,
+    filename: &'static str,
+    summary_fields: &'static [(&'static str, &'static str)],
+}
+
+const DOC_PROJECTION_FILES: &[DocProjectionFile] = &[
+    DocProjectionFile {
+        title: "Body And Resources",
+        filename: BODY_RESOURCE_STATE_FILENAME,
+        summary_fields: &[("body", "body entries"), ("resources", "resources")],
+    },
+    DocProjectionFile {
+        title: "Location Graph",
+        filename: LOCATION_GRAPH_FILENAME,
+        summary_fields: &[
+            ("current_location", "current location"),
+            ("nearby_locations", "nearby locations"),
+        ],
+    },
+    DocProjectionFile {
+        title: "Plot Threads",
+        filename: PLOT_THREADS_FILENAME,
+        summary_fields: &[("threads", "threads")],
+    },
+    DocProjectionFile {
+        title: "Scene Pressure",
+        filename: ACTIVE_SCENE_PRESSURES_FILENAME,
+        summary_fields: &[("pressures", "pressures")],
+    },
+    DocProjectionFile {
+        title: "Visual Asset Graph",
+        filename: VISUAL_ASSET_GRAPH_FILENAME,
+        summary_fields: &[
+            ("display_assets", "display assets"),
+            ("reference_assets", "reference assets"),
+            ("pending_jobs", "pending jobs"),
+        ],
+    },
+];
+
 #[cfg(test)]
 mod tests {
     use super::world_docs_dir;
@@ -316,6 +422,8 @@ premise:
         assert!(docs_dir.join("chapters.md").is_file());
         assert!(docs_dir.join("timeline.md").is_file());
         assert!(docs_dir.join("protagonist_timeline.md").is_file());
+        assert!(docs_dir.join("relationships.md").is_file());
+        assert!(docs_dir.join("projection_state.md").is_file());
         Ok(())
     }
 }

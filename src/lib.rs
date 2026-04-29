@@ -10,6 +10,7 @@ pub mod extra_memory;
 pub mod host_supervisor;
 pub mod job_ledger;
 pub mod location_graph;
+pub mod memory_revival_policy;
 pub mod models;
 pub mod plot_thread;
 pub mod projection_health;
@@ -51,9 +52,13 @@ pub use backend_selection::{
     load_world_backend_selection, save_world_backend_selection,
 };
 pub use body_resource::{
-    BODY_CONSTRAINT_SCHEMA_VERSION, BODY_RESOURCE_PACKET_SCHEMA_VERSION, BodyConstraint,
-    BodyResourcePacket, BodyResourcePolicy, BodyResourceVisibility, RESOURCE_ITEM_SCHEMA_VERSION,
-    ResourceItem, ResourceKind, compile_body_resource_packet,
+    BODY_CONSTRAINT_SCHEMA_VERSION, BODY_RESOURCE_EVENT_SCHEMA_VERSION,
+    BODY_RESOURCE_EVENTS_FILENAME, BODY_RESOURCE_PACKET_SCHEMA_VERSION,
+    BODY_RESOURCE_STATE_FILENAME, BodyConstraint, BodyResourceEvent, BodyResourceEventKind,
+    BodyResourceEventPlan, BodyResourceEventRecord, BodyResourcePacket, BodyResourcePolicy,
+    BodyResourceVisibility, RESOURCE_ITEM_SCHEMA_VERSION, ResourceItem, ResourceKind,
+    append_body_resource_event_plan, compile_body_resource_packet, load_body_resource_state,
+    prepare_body_resource_event_plan, rebuild_body_resource_state,
 };
 pub use character_text_design::{
     CHARACTER_TEXT_DESIGN_PACKET_SCHEMA_VERSION, CHARACTER_TEXT_DESIGN_SCHEMA_VERSION,
@@ -89,9 +94,14 @@ pub use job_ledger::{
     read_world_jobs,
 };
 pub use location_graph::{
-    LOCATION_GRAPH_PACKET_SCHEMA_VERSION, LOCATION_NODE_SCHEMA_VERSION, LocationGraphPacket,
-    LocationGraphPolicy, LocationKnowledgeState, LocationNode, compile_location_graph_packet,
+    LOCATION_EVENT_SCHEMA_VERSION, LOCATION_EVENTS_FILENAME, LOCATION_GRAPH_FILENAME,
+    LOCATION_GRAPH_PACKET_SCHEMA_VERSION, LOCATION_NODE_SCHEMA_VERSION, LocationEvent,
+    LocationEventKind, LocationEventPlan, LocationEventRecord, LocationGraphPacket,
+    LocationGraphPolicy, LocationKnowledgeState, LocationNode, append_location_event_plan,
+    compile_location_graph_packet, load_location_graph_state, prepare_location_event_plan,
+    rebuild_location_graph,
 };
+pub use memory_revival_policy::{MEMORY_REVIVAL_POLICY_SCHEMA_VERSION, MemoryRevivalPolicy};
 pub use models::{
     ADJUDICATION_SCHEMA_VERSION, ANCHOR_CHARACTER_ID, ANCHOR_CHARACTER_INVARIANT, AdjudicationGate,
     AdjudicationReport, AnchorCharacter, CANON_EVENT_SCHEMA_VERSION, CODEX_VIEW_SCHEMA_VERSION,
@@ -110,10 +120,11 @@ pub use models::{
 pub use plot_thread::{
     PLOT_THREAD_AUDIT_FILENAME, PLOT_THREAD_AUDIT_SCHEMA_VERSION, PLOT_THREAD_EVENT_SCHEMA_VERSION,
     PLOT_THREAD_EVENTS_FILENAME, PLOT_THREAD_PACKET_SCHEMA_VERSION, PLOT_THREAD_SCHEMA_VERSION,
-    PlotThread, PlotThreadAuditRecord, PlotThreadChange, PlotThreadEvent, PlotThreadEventPlan,
-    PlotThreadEventRecord, PlotThreadKind, PlotThreadPacket, PlotThreadPolicy, PlotThreadStatus,
-    PlotThreadUrgency, append_plot_thread_audit, append_plot_thread_event_plan,
-    compile_plot_thread_packet, prepare_plot_thread_event_plan,
+    PLOT_THREADS_FILENAME, PlotThread, PlotThreadAuditRecord, PlotThreadChange, PlotThreadEvent,
+    PlotThreadEventPlan, PlotThreadEventRecord, PlotThreadKind, PlotThreadPacket, PlotThreadPolicy,
+    PlotThreadStatus, PlotThreadUrgency, append_plot_thread_audit, append_plot_thread_event_plan,
+    compile_plot_thread_packet, load_plot_threads, prepare_plot_thread_event_plan,
+    rebuild_plot_threads,
 };
 pub use projection_health::{
     PROJECTION_HEALTH_SCHEMA_VERSION, ProjectionComponentHealth, ProjectionHealthReport,
@@ -144,14 +155,15 @@ pub use revival::{
     AGENT_REVIVAL_PACKET_SCHEMA_VERSION, AgentRevivalCompileOptions, build_agent_revival_packet,
 };
 pub use scene_pressure::{
-    SCENE_PRESSURE_AUDIT_FILENAME, SCENE_PRESSURE_AUDIT_SCHEMA_VERSION,
-    SCENE_PRESSURE_EVENT_SCHEMA_VERSION, SCENE_PRESSURE_EVENTS_FILENAME,
-    SCENE_PRESSURE_PACKET_SCHEMA_VERSION, SCENE_PRESSURE_SCHEMA_VERSION, ScenePressure,
-    ScenePressureAuditRecord, ScenePressureChange, ScenePressureEvent, ScenePressureEventPlan,
-    ScenePressureEventRecord, ScenePressureKind, ScenePressurePacket, ScenePressurePolicy,
-    ScenePressureProseEffect, ScenePressureUrgency, ScenePressureVisibility,
-    append_scene_pressure_audit, append_scene_pressure_event_plan, compile_scene_pressure_packet,
-    prepare_scene_pressure_event_plan,
+    ACTIVE_SCENE_PRESSURES_FILENAME, SCENE_PRESSURE_AUDIT_FILENAME,
+    SCENE_PRESSURE_AUDIT_SCHEMA_VERSION, SCENE_PRESSURE_EVENT_SCHEMA_VERSION,
+    SCENE_PRESSURE_EVENTS_FILENAME, SCENE_PRESSURE_PACKET_SCHEMA_VERSION,
+    SCENE_PRESSURE_SCHEMA_VERSION, ScenePressure, ScenePressureAuditRecord, ScenePressureChange,
+    ScenePressureEvent, ScenePressureEventPlan, ScenePressureEventRecord, ScenePressureKind,
+    ScenePressurePacket, ScenePressurePolicy, ScenePressureProseEffect, ScenePressureUrgency,
+    ScenePressureVisibility, append_scene_pressure_audit, append_scene_pressure_event_plan,
+    compile_scene_pressure_packet, load_active_scene_pressures, prepare_scene_pressure_event_plan,
+    rebuild_active_scene_pressures,
 };
 pub use start::{
     StartWorldOptions, StartedWorld, render_started_world_report, start_world,
@@ -179,9 +191,10 @@ pub use turn_context::{
 };
 pub use validate::{ValidationReport, ValidationStatus, validate_world};
 pub use visual_asset_graph::{
-    VISUAL_ASSET_GRAPH_PACKET_SCHEMA_VERSION, VISUAL_ASSET_NODE_SCHEMA_VERSION,
-    VisualAssetBoundary, VisualAssetGraphPacket, VisualAssetGraphPolicy, VisualAssetJobNode,
-    VisualAssetNode, compile_visual_asset_graph_packet,
+    VISUAL_ASSET_GRAPH_FILENAME, VISUAL_ASSET_GRAPH_PACKET_SCHEMA_VERSION,
+    VISUAL_ASSET_NODE_SCHEMA_VERSION, VisualAssetBoundary, VisualAssetGraphPacket,
+    VisualAssetGraphPolicy, VisualAssetJobNode, VisualAssetNode, compile_visual_asset_graph_packet,
+    load_visual_asset_graph_state, rebuild_visual_asset_graph,
 };
 pub use visual_assets::{
     BuildWorldVisualAssetsOptions, CHARACTER_SHEETS_DIR, ClaimVisualJobOptions,
@@ -209,8 +222,8 @@ pub use world_db::{
     WORLD_DB_SCHEMA_VERSION, WorldDbRepairReport, WorldDbStats, WorldDbValidation, WorldFactRow,
     WorldSearchHit, force_chapter_summary, latest_chapter_summaries, recent_canon_events,
     recent_character_memories, recent_entity_updates, recent_relationship_updates, repair_world_db,
-    search_world_db, validate_world_db, visible_entity_records, visible_world_facts, world_db_path,
-    world_db_stats,
+    search_world_db, sync_world_db_materialized_projections, validate_world_db,
+    visible_entity_records, visible_world_facts, world_db_path, world_db_stats,
 };
 pub use world_docs::{WORLD_DOCS_DIR, refresh_world_docs, world_docs_dir};
 pub use world_lore::{

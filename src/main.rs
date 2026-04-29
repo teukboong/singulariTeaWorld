@@ -3665,6 +3665,25 @@ const AGENT_TURN_RESPONSE_SCHEMA_GUIDE: &str = r#"AgentTurnResponse 스키마:
       "evidence_refs": ["visible_scene.text_blocks[0]"]
     }
   ],
+  "body_resource_events": [
+    {
+      "event_kind": "resource_gained",
+      "target_id": "resource:scene:item",
+      "visibility": "player_visible",
+      "summary": "이번 턴에서 얻거나 잃은 visible body/resource 변화",
+      "evidence_refs": ["visible_scene.text_blocks[0]"]
+    }
+  ],
+  "location_events": [
+    {
+      "event_kind": "discovered",
+      "location_id": "place:id",
+      "name": "플레이어-visible 장소 이름",
+      "knowledge_state": "known",
+      "summary": "이번 턴에서 열린 장소/동선 변화",
+      "evidence_refs": ["visible_scene.text_blocks[0]"]
+    }
+  ],
   "extra_contacts": [],
   "hidden_state_delta": [
     {
@@ -3692,6 +3711,7 @@ const AGENT_TURN_RESPONSE_SCHEMA_GUIDE: &str = r#"AgentTurnResponse 스키마:
 - plot_thread_events.thread_id는 source_revival.memory_revival.active_plot_threads.active_visible에 있는 thread_id만 쓴다. 새 thread를 임의로 만들거나 hidden/dormant 상태로 바꾸지 않는다.
 - scene_pressure_events는 이번 턴에서 실제로 강해지거나 약해진 visible_active pressure만 적는다. hidden_adjudication_only pressure_id는 절대 쓰지 않는다.
 - entity_updates/relationship_updates/world_lore_updates/character_text_design_updates는 전부 typed schema다. 변화가 없으면 빈 배열이며, 임의 key/value JSON을 넣지 않는다.
+- body_resource_events/location_events도 typed schema다. 장면에 실제 증거가 없으면 빈 배열로 둔다.
 - slot 번호가 기능 계약이다. tag는 UI 문구이므로 장면에 맞게 짧게 바꿔도 된다. 단 slot 7 tag는 "판단 위임"으로 유지한다.
 - extra_contacts는 주변 인물이 플레이어와 직접 상호작용했거나, 의미 있는 목격/거래/도움/위협/감정 흔적을 남겼을 때만 쓴다.
 - extra_contacts 항목을 쓸 때는 surface_label, contact_summary를 반드시 실제 장면 내용으로 채운다. 스키마 설명 문구나 예시 문구를 값으로 복사하지 않는다.
@@ -4360,7 +4380,8 @@ premise:
             "\"source_revival\"",
             "\"schema_version\": \"singulari.agent_revival_packet.v1\"",
             "\"retrieval_profile\"",
-            "\"name\": \"webgpt_active_memory\"",
+            "\"profile_name\": \"webgpt_active_memory\"",
+            "\"anti_repetition_rules\"",
             "\"memory_revival\"",
             "\"resume_pack\"",
             "\"active_memory_revival\"",
@@ -4376,6 +4397,8 @@ premise:
             "\"scene_pressure_events\"",
             "\"world_lore_updates\"",
             "\"character_text_design_updates\"",
+            "\"body_resource_events\"",
+            "\"location_events\"",
             "\"hidden_state_delta\"",
             "\"active_body_resource_state\"",
             "\"active_location_graph\"",

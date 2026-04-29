@@ -1,8 +1,15 @@
 use crate::models::{EntityRecords, PlaceRecord, TurnSnapshot};
+use crate::store::{append_jsonl, read_json, write_json};
+use anyhow::{Result, bail};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 pub const LOCATION_GRAPH_PACKET_SCHEMA_VERSION: &str = "singulari.location_graph_packet.v1";
 pub const LOCATION_NODE_SCHEMA_VERSION: &str = "singulari.location_node.v1";
+pub const LOCATION_EVENT_SCHEMA_VERSION: &str = "singulari.location_event.v1";
+pub const LOCATION_EVENTS_FILENAME: &str = "location_events.jsonl";
+pub const LOCATION_GRAPH_FILENAME: &str = "location_graph.json";
 
 const NEARBY_LOCATION_BUDGET: usize = 3;
 
@@ -73,6 +80,50 @@ pub enum LocationKnowledgeState {
     Unknown,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LocationEvent {
+    pub event_kind: LocationEventKind,
+    pub location_id: String,
+    pub name: String,
+    pub knowledge_state: LocationKnowledgeState,
+    pub summary: String,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LocationEventKind {
+    Discovered,
+    Visited,
+    Updated,
+    RouteOpened,
+    RouteBlocked,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LocationEventRecord {
+    pub schema_version: String,
+    pub world_id: String,
+    pub turn_id: String,
+    pub event_id: String,
+    pub event_kind: LocationEventKind,
+    pub location_id: String,
+    pub name: String,
+    pub knowledge_state: LocationKnowledgeState,
+    pub summary: String,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+    pub recorded_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocationEventPlan {
+    pub world_id: String,
+    pub turn_id: String,
+    pub records: Vec<LocationEventRecord>,
+}
+
 #[must_use]
 pub fn compile_location_graph_packet(
     snapshot: &TurnSnapshot,
@@ -100,6 +151,130 @@ pub fn compile_location_graph_packet(
         known_nearby_locations,
         compiler_policy: LocationGraphPolicy::default(),
     }
+}
+
+pub fn prepare_location_event_plan(
+    world_id: &str,
+    turn_id: &str,
+    events: &[LocationEvent],
+) -> Result<LocationEventPlan> {
+    let recorded_at = Utc::now().to_rfc3339();
+    let mut records = Vec::with_capacity(events.len());
+    for (index, event) in events.iter().enumerate() {
+        validate_location_event(event)
+            .map_err(|error| anyhow::anyhow!("invalid location_events[{index}]: {error}"))?;
+        records.push(LocationEventRecord {
+            schema_version: LOCATION_EVENT_SCHEMA_VERSION.to_owned(),
+            world_id: world_id.to_owned(),
+            turn_id: turn_id.to_owned(),
+            event_id: format!("location_event:{turn_id}:{index:02}"),
+            event_kind: event.event_kind,
+            location_id: event.location_id.trim().to_owned(),
+            name: event.name.trim().to_owned(),
+            knowledge_state: event.knowledge_state,
+            summary: event.summary.trim().to_owned(),
+            evidence_refs: event
+                .evidence_refs
+                .iter()
+                .map(|reference| reference.trim().to_owned())
+                .collect(),
+            recorded_at: recorded_at.clone(),
+        });
+    }
+    Ok(LocationEventPlan {
+        world_id: world_id.to_owned(),
+        turn_id: turn_id.to_owned(),
+        records,
+    })
+}
+
+pub fn append_location_event_plan(world_dir: &Path, plan: &LocationEventPlan) -> Result<()> {
+    for record in &plan.records {
+        append_jsonl(&world_dir.join(LOCATION_EVENTS_FILENAME), record)?;
+    }
+    Ok(())
+}
+
+pub fn rebuild_location_graph(
+    world_dir: &Path,
+    base: &LocationGraphPacket,
+) -> Result<LocationGraphPacket> {
+    let mut graph = base.clone();
+    for record in load_location_event_records(world_dir)? {
+        apply_location_record(&mut graph, &record);
+    }
+    graph.compiler_policy.source = "materialized_from_entities_and_location_events_v1".to_owned();
+    write_json(&world_dir.join(LOCATION_GRAPH_FILENAME), &graph)?;
+    Ok(graph)
+}
+
+pub fn load_location_graph_state(
+    world_dir: &Path,
+    fallback: LocationGraphPacket,
+) -> Result<LocationGraphPacket> {
+    let path = world_dir.join(LOCATION_GRAPH_FILENAME);
+    if path.exists() {
+        return read_json(&path);
+    }
+    Ok(fallback)
+}
+
+fn validate_location_event(event: &LocationEvent) -> Result<()> {
+    if event.location_id.trim().is_empty()
+        || event.name.trim().is_empty()
+        || event.summary.trim().is_empty()
+    {
+        bail!("location event location_id, name, and summary must not be empty");
+    }
+    if event.evidence_refs.is_empty()
+        || event
+            .evidence_refs
+            .iter()
+            .any(|reference| reference.trim().is_empty())
+    {
+        bail!("location event evidence_refs must contain non-empty visible refs");
+    }
+    Ok(())
+}
+
+fn load_location_event_records(world_dir: &Path) -> Result<Vec<LocationEventRecord>> {
+    let path = world_dir.join(LOCATION_EVENTS_FILENAME);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let raw = std::fs::read_to_string(&path)?;
+    raw.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(serde_json::from_str::<LocationEventRecord>)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn apply_location_record(graph: &mut LocationGraphPacket, record: &LocationEventRecord) {
+    let node = LocationNode {
+        schema_version: LOCATION_NODE_SCHEMA_VERSION.to_owned(),
+        location_id: record.location_id.clone(),
+        name: record.name.clone(),
+        knowledge_state: record.knowledge_state,
+        notes: vec![record.summary.clone()],
+        source_refs: vec![format!("location_event:{}", record.event_id)],
+    };
+    if matches!(record.event_kind, LocationEventKind::Visited) {
+        graph.current_location = Some(node);
+        return;
+    }
+    if let Some(existing) = graph
+        .known_nearby_locations
+        .iter_mut()
+        .find(|existing| existing.location_id == node.location_id)
+    {
+        *existing = node;
+    } else {
+        graph.known_nearby_locations.push(node);
+    }
+    graph
+        .known_nearby_locations
+        .truncate(NEARBY_LOCATION_BUDGET);
 }
 
 fn location_node(place: &PlaceRecord, knowledge_state: LocationKnowledgeState) -> LocationNode {

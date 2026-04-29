@@ -1,8 +1,12 @@
+use crate::store::{read_json, write_json};
 use crate::visual_assets::{VisualArtifactKind, WorldVisualAsset, WorldVisualAssets};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 pub const VISUAL_ASSET_GRAPH_PACKET_SCHEMA_VERSION: &str = "singulari.visual_asset_graph_packet.v1";
 pub const VISUAL_ASSET_NODE_SCHEMA_VERSION: &str = "singulari.visual_asset_node.v1";
+pub const VISUAL_ASSET_GRAPH_FILENAME: &str = "visual_asset_graph.json";
 
 const ACCEPTED_REFERENCE_BUDGET: usize = 7;
 
@@ -144,6 +148,38 @@ pub fn compile_visual_asset_graph_packet(manifest: &WorldVisualAssets) -> Visual
             .collect(),
         compiler_policy: VisualAssetGraphPolicy::default(),
     }
+}
+
+/// Materialize the latest visual asset graph so browser/MCP surfaces can read
+/// the same closed projection instead of re-inferring asset state independently.
+///
+/// # Errors
+///
+/// Returns an error when the graph file cannot be written.
+pub fn rebuild_visual_asset_graph(
+    world_dir: &Path,
+    packet: &VisualAssetGraphPacket,
+) -> Result<VisualAssetGraphPacket> {
+    let path = world_dir.join(VISUAL_ASSET_GRAPH_FILENAME);
+    write_json(&path, packet)?;
+    Ok(packet.clone())
+}
+
+/// Load the materialized visual asset graph, or return the freshly compiled
+/// packet when the world has not emitted the projection yet.
+///
+/// # Errors
+///
+/// Returns an error when an existing graph file is malformed.
+pub fn load_visual_asset_graph_state(
+    world_dir: &Path,
+    fallback: VisualAssetGraphPacket,
+) -> Result<VisualAssetGraphPacket> {
+    let path = world_dir.join(VISUAL_ASSET_GRAPH_FILENAME);
+    if !path.exists() {
+        return Ok(fallback);
+    }
+    read_json(&path)
 }
 
 fn push_world_asset(

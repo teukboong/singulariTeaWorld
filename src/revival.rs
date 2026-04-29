@@ -1,5 +1,6 @@
 use crate::agent_bridge::PendingAgentTurn;
 use crate::codex_view::{BuildCodexViewOptions, build_codex_view};
+use crate::memory_revival_policy::MemoryRevivalPolicy;
 use crate::relationship_graph::compile_relationship_graph_from_projection;
 use crate::response_context::{load_agent_context_event_records, load_agent_context_projection};
 use crate::resume::{BuildResumePackOptions, build_resume_pack};
@@ -13,13 +14,6 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 pub const AGENT_REVIVAL_PACKET_SCHEMA_VERSION: &str = "singulari.agent_revival_packet.v1";
-
-const WEBGPT_REVIVAL_RECENT_EVENTS: usize = 24;
-const WEBGPT_REVIVAL_RECENT_MEMORIES: usize = 24;
-const WEBGPT_REVIVAL_CHAPTER_LIMIT: usize = 6;
-const WEBGPT_REVIVAL_ARCHIVE_LIMIT: usize = 24;
-const WEBGPT_REVIVAL_UPDATE_LIMIT: usize = 16;
-const WEBGPT_REVIVAL_SEARCH_LIMIT: usize = 8;
 
 #[derive(Debug, Clone)]
 pub struct AgentRevivalCompileOptions<'a> {
@@ -36,13 +30,14 @@ pub struct AgentRevivalCompileOptions<'a> {
 /// or recent update projections cannot be read.
 pub fn build_agent_revival_packet(options: &AgentRevivalCompileOptions<'_>) -> Result<Value> {
     let pending = options.pending;
+    let policy = MemoryRevivalPolicy::for_engine_session(options.engine_session_kind);
     let store_paths = resolve_store_paths(options.store_root)?;
     let files = world_file_paths(&store_paths, pending.world_id.as_str());
     let mut resume_options = BuildResumePackOptions::new(pending.world_id.clone());
     resume_options.store_root = options.store_root.map(Path::to_path_buf);
-    resume_options.recent_events = WEBGPT_REVIVAL_RECENT_EVENTS;
-    resume_options.recent_memories = WEBGPT_REVIVAL_RECENT_MEMORIES;
-    resume_options.chapter_limit = WEBGPT_REVIVAL_CHAPTER_LIMIT;
+    resume_options.recent_events = policy.recent_events;
+    resume_options.recent_memories = policy.recent_character_memories;
+    resume_options.chapter_limit = policy.chapter_summaries;
     let resume_pack = build_resume_pack(&resume_options).with_context(|| {
         format!(
             "failed to build revival resume pack: world_id={}",
@@ -53,7 +48,7 @@ pub fn build_agent_revival_packet(options: &AgentRevivalCompileOptions<'_>) -> R
     let mut codex_view_options = BuildCodexViewOptions::new(pending.world_id.clone());
     codex_view_options.store_root = options.store_root.map(PathBuf::from);
     codex_view_options.query = Some(pending.player_input.clone());
-    codex_view_options.limit = WEBGPT_REVIVAL_ARCHIVE_LIMIT;
+    codex_view_options.limit = policy.archive_limit;
     let archive_view = build_codex_view(&codex_view_options).with_context(|| {
         format!(
             "failed to build webgpt archive revival view: world_id={}",
@@ -65,7 +60,7 @@ pub fn build_agent_revival_packet(options: &AgentRevivalCompileOptions<'_>) -> R
         files.dir.as_path(),
         pending.world_id.as_str(),
         pending.player_input.as_str(),
-        WEBGPT_REVIVAL_SEARCH_LIMIT,
+        policy.query_recall_limit,
     )
     .with_context(|| {
         format!(
@@ -76,12 +71,12 @@ pub fn build_agent_revival_packet(options: &AgentRevivalCompileOptions<'_>) -> R
     let entity_updates = recent_entity_updates(
         files.dir.as_path(),
         pending.world_id.as_str(),
-        WEBGPT_REVIVAL_UPDATE_LIMIT,
+        policy.update_limit,
     )?;
     let relationship_updates = recent_relationship_updates(
         files.dir.as_path(),
         pending.world_id.as_str(),
-        WEBGPT_REVIVAL_UPDATE_LIMIT,
+        policy.update_limit,
     )?;
     let context_events = load_agent_context_event_records(files.dir.as_path())?;
     let context_projection = load_agent_context_projection(files.dir.as_path())?;
@@ -94,7 +89,7 @@ pub fn build_agent_revival_packet(options: &AgentRevivalCompileOptions<'_>) -> R
     let world_facts = visible_world_facts(
         files.dir.as_path(),
         pending.world_id.as_str(),
-        WEBGPT_REVIVAL_UPDATE_LIMIT,
+        policy.update_limit,
     )?;
     let active_world_lore = compile_world_lore_from_projection(
         pending.world_id.as_str(),
@@ -105,7 +100,7 @@ pub fn build_agent_revival_packet(options: &AgentRevivalCompileOptions<'_>) -> R
     let recent_context_events = context_events
         .iter()
         .rev()
-        .take(WEBGPT_REVIVAL_UPDATE_LIMIT)
+        .take(policy.update_limit)
         .cloned()
         .collect::<Vec<_>>();
 
@@ -114,16 +109,7 @@ pub fn build_agent_revival_packet(options: &AgentRevivalCompileOptions<'_>) -> R
         "world_id": pending.world_id,
         "turn_id": pending.turn_id,
         "engine_session_kind": options.engine_session_kind,
-        "retrieval_profile": {
-            "name": "webgpt_active_memory",
-            "purpose": "WebGPT context-window and compaction behavior are not the world source of truth, so host-worker proactively surfaces more player-visible continuity from world.db before each turn.",
-            "recent_events": WEBGPT_REVIVAL_RECENT_EVENTS,
-            "recent_character_memories": WEBGPT_REVIVAL_RECENT_MEMORIES,
-            "chapter_summaries": WEBGPT_REVIVAL_CHAPTER_LIMIT,
-            "archive_limit": WEBGPT_REVIVAL_ARCHIVE_LIMIT,
-            "update_limit": WEBGPT_REVIVAL_UPDATE_LIMIT,
-            "query_recall_limit": WEBGPT_REVIVAL_SEARCH_LIMIT
-        },
+        "retrieval_profile": policy,
         "current_turn": {
             "schema_version": pending.schema_version,
             "world_id": pending.world_id,
@@ -222,7 +208,15 @@ premise:
             packet["source_of_truth_policy"]["conflict_rule"],
             "revival_packet_wins"
         );
-        assert_eq!(packet["retrieval_profile"]["name"], "webgpt_active_memory");
+        assert_eq!(
+            packet["retrieval_profile"]["profile_name"],
+            "webgpt_active_memory"
+        );
+        assert!(
+            packet["retrieval_profile"]["anti_repetition_rules"]
+                .as_array()
+                .is_some_and(|rules| !rules.is_empty())
+        );
         assert!(packet["memory_revival"]["resume_pack"].is_object());
         assert!(
             packet["memory_revival"]["active_memory_revival"]["player_visible_archive_view"]

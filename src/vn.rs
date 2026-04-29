@@ -11,12 +11,16 @@ use crate::response_context::{
     load_agent_context_projection,
 };
 use crate::store::{TURN_LOG_FILENAME, load_world_record, resolve_store_paths, world_file_paths};
-use crate::visual_asset_graph::{VisualAssetGraphPacket, compile_visual_asset_graph_packet};
+use crate::visual_asset_graph::{
+    VisualAssetGraphPacket, compile_visual_asset_graph_packet, load_visual_asset_graph_state,
+    rebuild_visual_asset_graph,
+};
 use crate::visual_assets::{
     BuildWorldVisualAssetsOptions, ImageGenerationJob, VN_ASSETS_DIR, VisualArtifactKind,
     VisualBudgetPolicy, WorldVisualAssets, build_world_visual_assets, compile_turn_visual_prompt,
     visual_generation_job,
 };
+use crate::world_db::sync_world_db_materialized_projections;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -236,7 +240,15 @@ pub fn build_vn_packet(options: &BuildVnPacketOptions) -> Result<VnPacket> {
         retry_requested,
         &visual_assets.budget_policy,
     );
-    let visual_asset_graph = compile_visual_asset_graph_packet(&visual_assets);
+    let compiled_visual_asset_graph = compile_visual_asset_graph_packet(&visual_assets);
+    let _existing_visual_asset_graph =
+        load_visual_asset_graph_state(&files.dir, compiled_visual_asset_graph.clone())?;
+    let visual_asset_graph = rebuild_visual_asset_graph(&files.dir, &compiled_visual_asset_graph)?;
+    sync_world_db_materialized_projections(
+        &files.dir,
+        world.world_id.as_str(),
+        chrono::Utc::now().to_rfc3339().as_str(),
+    )?;
     let turn_visual_prompt = compile_turn_visual_prompt(&world, &render_packet, &visual_assets);
     let turn_cg_job = if turn_cg_decision.requested && (!turn_cg_exists || retry_requested) {
         Some(turn_cg_image_generation_job(
@@ -1414,7 +1426,7 @@ premise:
             input: "6 세아에게 낮게 묻는다".to_owned(),
         })?;
         let mut options = BuildVnPacketOptions::new("stw_vn_packet".to_owned());
-        options.store_root = Some(store);
+        options.store_root = Some(store.clone());
         let packet = build_vn_packet(&options)?;
         assert_eq!(packet.schema_version, super::VN_PACKET_SCHEMA_VERSION);
         assert!(
@@ -1434,6 +1446,16 @@ premise:
         assert_eq!(packet.image.auto_decision.action, "generate_scene");
         assert!(packet.image.image_generation_job.is_some());
         assert_eq!(packet.visual_assets.image_generation_jobs.len(), 3);
+        assert!(
+            store
+                .join("worlds")
+                .join("stw_vn_packet")
+                .join(crate::visual_asset_graph::VISUAL_ASSET_GRAPH_FILENAME)
+                .is_file()
+        );
+        let world_dir = store.join("worlds").join("stw_vn_packet");
+        let stats = crate::world_db::world_db_stats(&world_dir, "stw_vn_packet")?;
+        assert!(stats.materialized_projections >= 1);
         assert!(packet.image.image_prompt.contains("Scene narrative"));
         assert!(
             packet

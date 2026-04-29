@@ -15,8 +15,9 @@ use crate::world_db::{
     visible_world_facts,
 };
 use anyhow::Result;
+use serde_json::Value;
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 const DEFAULT_CODEX_LIMIT: usize = 12;
@@ -148,7 +149,12 @@ pub fn build_codex_view(options: &BuildCodexViewOptions) -> Result<CodexView> {
         .into_iter()
         .map(codex_local_face_entry)
         .collect(),
-        realtime_analysis: realtime_analysis(&snapshot, &player_knowledge, search_hits.len()),
+        realtime_analysis: realtime_analysis(
+            &files.dir,
+            &snapshot,
+            &player_knowledge,
+            search_hits.len(),
+        )?,
         related_recommendations: recommendations(&player_knowledge, &search_hits),
         hidden_filter: CodexHiddenFilter {
             hidden_secrets: hidden_state.secrets.len(),
@@ -398,11 +404,12 @@ fn write_anchor_values(markdown: &mut String, label: &str, values: &[String]) {
 }
 
 fn realtime_analysis(
+    world_dir: &Path,
     snapshot: &TurnSnapshot,
     player_knowledge: &PlayerKnowledge,
     search_hit_count: usize,
-) -> Vec<CodexAnalysisEntry> {
-    vec![
+) -> Result<Vec<CodexAnalysisEntry>> {
+    let mut entries = vec![
         CodexAnalysisEntry {
             label: "phase".to_owned(),
             value: snapshot.phase.clone(),
@@ -424,7 +431,70 @@ fn realtime_analysis(
             label: "related_search_hits".to_owned(),
             value: search_hit_count.to_string(),
         },
-    ]
+    ];
+    entries.extend(projection_analysis_entries(world_dir)?);
+    Ok(entries)
+}
+
+fn projection_analysis_entries(world_dir: &Path) -> Result<Vec<CodexAnalysisEntry>> {
+    let mut entries = Vec::new();
+    if let Some(value) = read_optional_json_value(&world_dir.join("active_scene_pressures.json"))? {
+        entries.push(CodexAnalysisEntry {
+            label: "current_pressures".to_owned(),
+            value: projection_count_summary(&value, "visible_active"),
+        });
+    }
+    if let Some(value) = read_optional_json_value(&world_dir.join("plot_threads.json"))? {
+        entries.push(CodexAnalysisEntry {
+            label: "open_threads".to_owned(),
+            value: projection_count_summary(&value, "active_visible"),
+        });
+    }
+    if let Some(value) = read_optional_json_value(&world_dir.join("body_resource_state.json"))? {
+        let body = value
+            .get("body_constraints")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        let resources = value
+            .get("resources")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        entries.push(CodexAnalysisEntry {
+            label: "condition_and_possessions".to_owned(),
+            value: format!("body={body}, resources={resources}"),
+        });
+    }
+    if let Some(value) = read_optional_json_value(&world_dir.join("location_graph.json"))? {
+        let current = value
+            .get("current_location")
+            .and_then(|location| location.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let nearby = value
+            .get("known_nearby_locations")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        entries.push(CodexAnalysisEntry {
+            label: "known_places".to_owned(),
+            value: format!("current={current}, nearby={nearby}"),
+        });
+    }
+    Ok(entries)
+}
+
+fn read_optional_json_value(path: &Path) -> Result<Option<Value>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    Ok(Some(read_json(path)?))
+}
+
+fn projection_count_summary(value: &Value, field: &str) -> String {
+    let count = value
+        .get(field)
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    format!("{field}={count}")
 }
 
 fn recommendations(

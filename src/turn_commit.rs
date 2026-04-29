@@ -343,6 +343,8 @@ premise:
                 scene_pressure_events: Vec::new(),
                 world_lore_updates: Vec::new(),
                 character_text_design_updates: Vec::new(),
+                body_resource_events: Vec::new(),
+                location_events: Vec::new(),
                 extra_contacts: Vec::new(),
                 hidden_state_delta: Vec::new(),
                 next_choices: scene_specific_choices(),

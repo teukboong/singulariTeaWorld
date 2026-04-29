@@ -1,5 +1,5 @@
 use crate::models::TurnSnapshot;
-use crate::store::append_jsonl;
+use crate::store::{append_jsonl, read_json, write_json};
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -12,6 +12,7 @@ pub const PLOT_THREAD_AUDIT_SCHEMA_VERSION: &str = "singulari.plot_thread_audit.
 pub const PLOT_THREAD_AUDIT_FILENAME: &str = "plot_thread_audit.jsonl";
 pub const PLOT_THREAD_EVENT_SCHEMA_VERSION: &str = "singulari.plot_thread_event.v1";
 pub const PLOT_THREAD_EVENTS_FILENAME: &str = "plot_thread_events.jsonl";
+pub const PLOT_THREADS_FILENAME: &str = "plot_threads.json";
 
 const ACTIVE_THREAD_BUDGET: usize = 3;
 
@@ -272,6 +273,60 @@ pub fn append_plot_thread_event_plan(world_dir: &Path, plan: &PlotThreadEventPla
         append_jsonl(&world_dir.join(PLOT_THREAD_EVENTS_FILENAME), record)?;
     }
     Ok(())
+}
+
+pub fn rebuild_plot_threads(world_dir: &Path, base: &PlotThreadPacket) -> Result<PlotThreadPacket> {
+    let mut packet = base.clone();
+    for record in load_plot_thread_event_records(world_dir)? {
+        apply_plot_thread_record(&mut packet, &record);
+    }
+    packet.compiler_policy.source =
+        "materialized_from_snapshot_and_plot_thread_events_v1".to_owned();
+    packet.active_visible.retain(|thread| {
+        matches!(
+            thread.status,
+            PlotThreadStatus::Active | PlotThreadStatus::Blocked
+        )
+    });
+    packet.active_visible.truncate(ACTIVE_THREAD_BUDGET);
+    write_json(&world_dir.join(PLOT_THREADS_FILENAME), &packet)?;
+    Ok(packet)
+}
+
+pub fn load_plot_threads(world_dir: &Path, fallback: PlotThreadPacket) -> Result<PlotThreadPacket> {
+    let path = world_dir.join(PLOT_THREADS_FILENAME);
+    if path.exists() {
+        return read_json(&path);
+    }
+    Ok(fallback)
+}
+
+fn load_plot_thread_event_records(world_dir: &Path) -> Result<Vec<PlotThreadEventRecord>> {
+    let path = world_dir.join(PLOT_THREAD_EVENTS_FILENAME);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let raw = std::fs::read_to_string(&path)?;
+    raw.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(serde_json::from_str::<PlotThreadEventRecord>)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn apply_plot_thread_record(packet: &mut PlotThreadPacket, record: &PlotThreadEventRecord) {
+    if let Some(thread) = packet
+        .active_visible
+        .iter_mut()
+        .find(|thread| thread.thread_id == record.thread_id)
+    {
+        thread.status = record.status_after;
+        thread.urgency = record.urgency_after;
+        thread.summary.clone_from(&record.summary);
+        thread
+            .source_refs
+            .push(format!("plot_thread_event:{}", record.event_id));
+    }
 }
 
 fn validate_plot_thread_event(
