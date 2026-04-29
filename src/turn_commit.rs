@@ -329,6 +329,7 @@ premise:
                 schema_version: AGENT_TURN_RESPONSE_SCHEMA_VERSION.to_owned(),
                 world_id: pending.world_id.clone(),
                 turn_id: pending.turn_id.clone(),
+                resolution_proposal: None,
                 visible_scene: NarrativeScene {
                     schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                     speaker: None,
@@ -349,6 +350,8 @@ premise:
                 hidden_state_delta: Vec::new(),
                 needs_context: Vec::new(),
                 next_choices: scene_specific_choices(),
+                actor_goal_events: Vec::new(),
+                actor_move_events: Vec::new(),
             },
         })?;
 

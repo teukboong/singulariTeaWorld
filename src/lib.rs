@@ -1,5 +1,6 @@
 #![recursion_limit = "256"]
 
+pub mod actor_agency;
 pub mod adjudication;
 pub mod affordance_graph;
 pub mod agent_bridge;
@@ -30,6 +31,7 @@ pub mod prompt_context;
 pub mod prompt_context_budget;
 pub mod relationship_graph;
 pub mod render;
+pub mod resolution;
 pub mod response_context;
 pub mod resume;
 pub mod revival;
@@ -54,6 +56,15 @@ pub mod world_docs;
 pub mod world_lore;
 pub mod world_process_clock;
 
+pub use actor_agency::{
+    ACTOR_AGENCY_FILENAME, ACTOR_AGENCY_PACKET_SCHEMA_VERSION, ACTOR_GOAL_EVENT_SCHEMA_VERSION,
+    ACTOR_GOAL_EVENTS_FILENAME, ACTOR_GOAL_SCHEMA_VERSION, ACTOR_MOVE_EVENT_SCHEMA_VERSION,
+    ACTOR_MOVE_EVENTS_FILENAME, ACTOR_MOVE_SCHEMA_VERSION, ActorAgencyEventPlan, ActorAgencyPacket,
+    ActorAgencyPolicy, ActorGoal, ActorGoalEventRecord, ActorMove, ActorMoveEventRecord,
+    AgentActorGoalUpdate, AgentActorMoveUpdate, append_actor_agency_event_plan,
+    build_actor_agency_from_events, load_actor_agency_state, prepare_actor_agency_event_plan,
+    rebuild_actor_agency_packet,
+};
 pub use adjudication::{AdjudicationInput, adjudicate_turn};
 pub use affordance_graph::{
     AFFORDANCE_GRAPH_PACKET_SCHEMA_VERSION, AFFORDANCE_NODE_SCHEMA_VERSION, AffordanceGraphPacket,
@@ -244,6 +255,14 @@ pub use relationship_graph::{
     prepare_relationship_graph_event_plan, rebuild_relationship_graph,
 };
 pub use render::{RenderPacketLoadOptions, load_render_packet, render_packet_markdown};
+pub use resolution::{
+    ActionAmbiguity, ActionInputKind, ActionIntent, ChoicePlan, ChoicePlanKind,
+    FREEFORM_GATE_TRACE_SCHEMA_VERSION, FreeformGateTrace, GateKind, GateResult, GateStatus,
+    NarrativeBrief, ProcessTickCause, ProcessTickProposal, ProposedEffect, ProposedEffectKind,
+    RESOLUTION_PROPOSAL_SCHEMA_VERSION, ResolutionCritique, ResolutionFailureKind,
+    ResolutionOutcome, ResolutionOutcomeKind, ResolutionProposal, ResolutionVisibility,
+    audit_resolution_choices, audit_resolution_proposal, freeform_gate_trace_from_proposal,
+};
 pub use response_context::{
     AGENT_CONTEXT_EVENT_SCHEMA_VERSION, AGENT_CONTEXT_EVENTS_FILENAME,
     AGENT_CONTEXT_PROJECTION_FILENAME, AGENT_CONTEXT_PROJECTION_SCHEMA_VERSION,

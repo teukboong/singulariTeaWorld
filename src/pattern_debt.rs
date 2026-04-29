@@ -358,6 +358,7 @@ mod tests {
             schema_version: crate::agent_bridge::AGENT_TURN_RESPONSE_SCHEMA_VERSION.to_owned(),
             world_id: "stw_pattern".to_owned(),
             turn_id: "turn_0001".to_owned(),
+            resolution_proposal: None,
             visible_scene: NarrativeScene {
                 schema_version: crate::models::NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                 speaker: None,
@@ -382,6 +383,8 @@ mod tests {
                 tag: "관찰".to_owned(),
                 intent: "본다".to_owned(),
             }],
+            actor_goal_events: Vec::new(),
+            actor_move_events: Vec::new(),
         }
     }
 }

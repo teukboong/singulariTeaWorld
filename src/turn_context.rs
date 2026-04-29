@@ -81,6 +81,7 @@ pub fn assemble_turn_context_packet(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::actor_agency::ActorAgencyPacket;
     use crate::agent_bridge::{
         AgentOutputContract, AgentPrivateAdjudicationContext, AgentVisibleContext,
     };
@@ -124,6 +125,7 @@ mod tests {
                 active_character_text_design: CharacterTextDesignPacket::default(),
                 active_world_lore: WorldLorePacket::default(),
                 active_relationship_graph: RelationshipGraphPacket::default(),
+                active_actor_agency: ActorAgencyPacket::default(),
                 active_change_ledger: ChangeLedgerPacket::default(),
                 active_pattern_debt: PatternDebtPacket::default(),
                 active_belief_graph: BeliefGraphPacket::default(),

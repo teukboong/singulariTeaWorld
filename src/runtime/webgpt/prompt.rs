@@ -7,6 +7,99 @@ const AGENT_TURN_RESPONSE_SCHEMA_GUIDE: &str = r#"AgentTurnResponse 스키마:
   "schema_version": "singulari.agent_turn_response.v1",
   "world_id": "<world_id>",
   "turn_id": "<turn_id>",
+  "resolution_proposal": {
+    "schema_version": "singulari.resolution_proposal.v1",
+    "world_id": "<world_id>",
+    "turn_id": "<turn_id>",
+    "interpreted_intent": {
+      "input_kind": "presented_choice|freeform|delegated_judgment|codex_query",
+      "summary": "플레이어 입력을 장면 상태 안에서 어떻게 해석했는지",
+      "target_refs": ["prompt_context 안의 장소/압력/믿음/자원/affordance/process ref"],
+      "pressure_refs": ["prompt_context.visible_context.active_scene_pressure의 pressure_id"],
+      "evidence_refs": ["current_turn 또는 prompt_context 안의 visible ref"],
+      "ambiguity": "clear|minor|high"
+    },
+    "outcome": {
+      "kind": "success|partial_success|blocked|costly_success|delayed|escalated",
+      "summary": "플레이어-visible 결과 요약",
+      "evidence_refs": ["visible ref"]
+    },
+    "gate_results": [
+      {
+        "gate_kind": "body|resource|location|social_permission|knowledge|time_pressure|hidden_constraint|world_law|affordance",
+        "gate_ref": "prompt_context 안의 ref",
+        "visibility": "player_visible|adjudication_only",
+        "status": "passed|softened|blocked|cost_imposed|unknown_needs_probe",
+        "reason": "visible이면 플레이어-visible 이유, hidden이면 본문 복사 금지",
+        "evidence_refs": ["visible ref 또는 adjudication ref"]
+      }
+    ],
+    "proposed_effects": [],
+    "process_ticks": [],
+    "narrative_brief": {
+      "visible_summary": "visible_scene을 쓰기 전 결과/박자 요약",
+      "required_beats": ["visible prose에 반드시 반영할 박자"],
+      "forbidden_visible_details": ["visible text에 쓰면 안 되는 hidden/detail"]
+    },
+    "next_choice_plan": [
+      {
+        "slot": 1,
+        "plan_kind": "ordinary_affordance",
+        "grounding_ref": "affordance:slot:1:move",
+        "label_seed": "선택지 tag seed",
+        "intent_seed": "선택지 intent seed",
+        "evidence_refs": ["affordance:slot:1:move"]
+      },
+      {
+        "slot": 2,
+        "plan_kind": "ordinary_affordance",
+        "grounding_ref": "affordance:slot:2:observe",
+        "label_seed": "선택지 tag seed",
+        "intent_seed": "선택지 intent seed",
+        "evidence_refs": ["affordance:slot:2:observe"]
+      },
+      {
+        "slot": 3,
+        "plan_kind": "ordinary_affordance",
+        "grounding_ref": "affordance:slot:3:contact",
+        "label_seed": "선택지 tag seed",
+        "intent_seed": "선택지 intent seed",
+        "evidence_refs": ["affordance:slot:3:contact"]
+      },
+      {
+        "slot": 4,
+        "plan_kind": "ordinary_affordance",
+        "grounding_ref": "affordance:slot:4:body_resource",
+        "label_seed": "선택지 tag seed",
+        "intent_seed": "선택지 intent seed",
+        "evidence_refs": ["affordance:slot:4:body_resource"]
+      },
+      {
+        "slot": 5,
+        "plan_kind": "ordinary_affordance",
+        "grounding_ref": "affordance:slot:5:pressure_response",
+        "label_seed": "선택지 tag seed",
+        "intent_seed": "선택지 intent seed",
+        "evidence_refs": ["affordance:slot:5:pressure_response"]
+      },
+      {
+        "slot": 6,
+        "plan_kind": "freeform",
+        "grounding_ref": "current_turn",
+        "label_seed": "자유서술",
+        "intent_seed": "직접 행동을 입력한다",
+        "evidence_refs": ["current_turn"]
+      },
+      {
+        "slot": 7,
+        "plan_kind": "delegated_judgment",
+        "grounding_ref": "current_turn",
+        "label_seed": "판단 위임",
+        "intent_seed": "맡긴다. 세부 내용은 선택 후 드러난다.",
+        "evidence_refs": ["current_turn"]
+      }
+    ]
+  },
   "visible_scene": {
     "schema_version": "singulari.narrative_scene.v1",
     "text_blocks": ["위 서사 출력 지시와 pending.output_contract.narrative_budget에 맞춘 한국어 VN 본문"],
@@ -119,6 +212,30 @@ const AGENT_TURN_RESPONSE_SCHEMA_GUIDE: &str = r#"AgentTurnResponse 스키마:
     }
   ],
   "needs_context": [],
+  "actor_goal_events": [
+    {
+      "actor_ref": "char:id",
+      "goal_id": "goal:char:id:local_goal",
+      "visibility": "player_visible|hidden_adjudication_only",
+      "desire": "이 인물이 현재 장면에서 밀고 있는 국소 목표",
+      "fear_or_constraint": "목표를 제한하는 visible 또는 hidden 제약",
+      "current_leverage": ["관찰 가능한 수단/우위"],
+      "pressure_refs": ["pressure:id"],
+      "evidence_refs": ["visible_scene.text_blocks[0]"],
+      "retired": false
+    }
+  ],
+  "actor_move_events": [
+    {
+      "actor_ref": "char:id",
+      "move_id": "move:char:id:observable_move",
+      "visibility": "player_visible|hidden_adjudication_only",
+      "action_summary": "이번 턴에 관찰된 인물 행동",
+      "produced_pressure_refs": ["pressure:id"],
+      "relationship_refs": ["rel:char:id->player:stance"],
+      "evidence_refs": ["visible_scene.text_blocks[0]"]
+    }
+  ],
   "next_choices": [
     {"slot":1,"tag":"현재 장면에 맞춘 짧은 선택명","intent":"현재 장면 단서와 player_input에서 이어지는 구체 행동"},
     {"slot":2,"tag":"현재 장면에 맞춘 짧은 선택명","intent":"몸, 장소, 물건, 흔적 중 이번 장면에 실제로 나온 단서를 살핀다"},
@@ -131,6 +248,10 @@ const AGENT_TURN_RESPONSE_SCHEMA_GUIDE: &str = r#"AgentTurnResponse 스키마:
 }
 ```
 - next_choices는 서사 생성과 같은 응답에서 반드시 함께 작성한다. 별도 선택지 재생성 턴을 만들지 않는다.
+- resolution_proposal은 LLM 지능이 해석한 판정 제안이고, Rust가 commit 전에 audit한다. 가능한 한 작성하되, prompt_context에 없는 ref나 evidence_refs 없는 durable effect를 넣지 않는다.
+- resolution_proposal의 visible field에는 hidden/adjudication-only 세부 내용을 절대 쓰지 않는다.
+- resolution_proposal.next_choice_plan은 slot 1..7을 모두 포함한다. ordinary_affordance slot 1..5는 prompt_context.visible_context.affordance_graph의 같은 slot affordance_id를 grounding_ref/evidence_refs에 넣는다. slot 6은 freeform, slot 7은 delegated_judgment다.
+- actor_goal_events/actor_move_events는 중요한 NPC가 실제 장면에서 보인 목표와 움직임만 기록한다. actor_ref는 기존 relationship/entity ref 또는 이번 응답의 entity_updates로 생성한 char:id여야 한다. hidden 목표는 visible_scene/next_choices에 동기로 해설하지 말고 관찰 가능한 행동으로만 암시한다.
 - slot 1,2,3,4,5의 tag/intent는 템플릿 문구가 아니라 이번 visible_scene에서 바로 이어지는 구체 선택지여야 한다.
 - next_choices 안에는 label/preview/choices 필드를 쓰지 않는다. 오직 slot/tag/intent만 쓴다.
 - plot_thread_events는 이번 턴에서 실제로 진행/복잡화/차단/해결/실패/퇴장한 active_visible thread만 적는다. 변화가 없으면 빈 배열이다.

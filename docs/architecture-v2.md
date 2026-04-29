@@ -55,6 +55,15 @@ flowchart TD
 - `PromptContextPacket` is the only backend-facing context packet.
 - `SourceRevivalPacket` is evidence input, not a backend prompt contract.
 
+## Resolution Authority
+
+The next simulation step should be
+[LLM-led, Rust-audited resolution](llm-led-rust-audited-resolution.md), not a
+scripted Rust GM. The LLM should interpret intent, propose socially and
+narratively intelligent outcomes, and draft Korean VN prose. Rust should audit
+that proposal against hard laws, evidence refs, visibility, gates, causality,
+and rebuildable event projections before committing it as world truth.
+
 ## Runtime Capability Profiles
 
 Runtime surfaces should describe their authority through

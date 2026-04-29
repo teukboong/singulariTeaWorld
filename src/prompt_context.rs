@@ -50,6 +50,7 @@ pub struct PromptVisibleContext {
     pub active_pattern_debt: Value,
     pub active_belief_graph: Value,
     pub active_world_process_clock: Value,
+    pub active_actor_agency: Value,
     pub active_player_intent_trace: Value,
     pub active_turn_retrieval_controller: Value,
     pub selected_context_capsules: Value,
@@ -230,6 +231,7 @@ struct PromptMemoryValues {
     active_pattern_debt: Value,
     active_belief_graph: Value,
     active_world_process_clock: Value,
+    active_actor_agency: Value,
     active_player_intent_trace: Value,
     active_narrative_style_state: Value,
     active_turn_retrieval_controller: Value,
@@ -245,6 +247,10 @@ fn load_prompt_memory_values(memory: &Value, active_memory: &Value) -> Result<Pr
         active_pattern_debt: required_path(memory, "/active_pattern_debt")?.clone(),
         active_belief_graph: required_path(memory, "/active_belief_graph")?.clone(),
         active_world_process_clock: required_path(memory, "/active_world_process_clock")?.clone(),
+        active_actor_agency: memory
+            .pointer("/active_actor_agency")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({"active_goals": [], "recent_moves": []})),
         active_player_intent_trace: required_path(memory, "/active_player_intent_trace")?.clone(),
         active_narrative_style_state: required_path(memory, "/active_narrative_style_state")?
             .clone(),
@@ -367,6 +373,7 @@ fn compile_visible_context(source: VisibleContextSource<'_>) -> Result<PromptVis
         active_pattern_debt: source.prompt_memory.active_pattern_debt,
         active_belief_graph: source.prompt_memory.active_belief_graph,
         active_world_process_clock: source.prompt_memory.active_world_process_clock,
+        active_actor_agency: source.prompt_memory.active_actor_agency,
         active_player_intent_trace: source.prompt_memory.active_player_intent_trace,
         active_turn_retrieval_controller: source.prompt_memory.active_turn_retrieval_controller,
         selected_context_capsules: source.prompt_memory.selected_context_capsules,
@@ -567,6 +574,7 @@ mod tests {
                     "active_pattern_debt": {"active_patterns": []},
                     "active_belief_graph": {"protagonist_visible_beliefs": []},
                     "active_world_process_clock": {"visible_processes": [], "adjudication_only_processes": []},
+                    "active_actor_agency": {"active_goals": [], "recent_moves": []},
                     "active_player_intent_trace": {"active_intents": []},
                     "active_narrative_style_state": {"active_style_events": []},
                     "active_turn_retrieval_controller": {"active_goals": [], "active_role_stance": [], "retrieval_cues": []},

@@ -361,6 +361,7 @@ mod tests {
             schema_version: AGENT_TURN_RESPONSE_SCHEMA_VERSION.to_owned(),
             world_id: "stw_style_events".to_owned(),
             turn_id: "turn_0002".to_owned(),
+            resolution_proposal: None,
             visible_scene: NarrativeScene {
                 schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                 speaker: None,
@@ -383,6 +384,8 @@ mod tests {
             hidden_state_delta: Vec::new(),
             needs_context: Vec::new(),
             next_choices: Vec::new(),
+            actor_goal_events: Vec::new(),
+            actor_move_events: Vec::new(),
         };
         let plan = prepare_narrative_style_event_plan("stw_style_events", "turn_0002", &response);
         append_narrative_style_event_plan(temp.path(), &plan)?;

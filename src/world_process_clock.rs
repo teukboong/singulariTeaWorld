@@ -1,6 +1,7 @@
 #![allow(clippy::missing_errors_doc)]
 
 use crate::agent_bridge::AgentPrivateAdjudicationContext;
+use crate::resolution::{ResolutionProposal, ResolutionVisibility};
 use crate::scene_pressure::{
     ScenePressure, ScenePressureEventPlan, ScenePressureKind, ScenePressurePacket,
     ScenePressureUrgency,
@@ -121,9 +122,10 @@ impl Default for WorldProcessClockPolicy {
 pub fn prepare_world_process_event_plan(
     clock: &WorldProcessClockPacket,
     scene_pressure_event_plan: &ScenePressureEventPlan,
+    resolution_proposal: Option<&ResolutionProposal>,
 ) -> WorldProcessEventPlan {
     let recorded_at = Utc::now().to_rfc3339();
-    let records = scene_pressure_event_plan
+    let mut records: Vec<WorldProcessEventRecord> = scene_pressure_event_plan
         .records
         .iter()
         .enumerate()
@@ -142,11 +144,50 @@ pub fn prepare_world_process_event_plan(
             recorded_at: recorded_at.clone(),
         })
         .collect();
+    let offset = records.len();
+    if let Some(proposal) = resolution_proposal {
+        records.extend(proposal.process_ticks.iter().enumerate().map(|(index, tick)| {
+            WorldProcessEventRecord {
+                schema_version: WORLD_PROCESS_EVENT_SCHEMA_VERSION.to_owned(),
+                world_id: clock.world_id.clone(),
+                turn_id: scene_pressure_event_plan.turn_id.clone(),
+                event_id: format!(
+                    "world_process_event:{}:{:02}",
+                    scene_pressure_event_plan.turn_id,
+                    offset + index
+                ),
+                process_id: tick.process_ref.clone(),
+                visibility: process_visibility_from_resolution(tick.visibility),
+                tempo: process_tempo_for_ref(clock, tick.process_ref.as_str()),
+                summary: tick.summary.clone(),
+                next_tick_contract:
+                    "Process tick was proposed by audited resolution and should continue only from new evidence.".to_owned(),
+                source_refs: tick.evidence_refs.clone(),
+                recorded_at: recorded_at.clone(),
+            }
+        }));
+    }
     WorldProcessEventPlan {
         world_id: clock.world_id.clone(),
         turn_id: scene_pressure_event_plan.turn_id.clone(),
         records,
     }
+}
+
+fn process_visibility_from_resolution(visibility: ResolutionVisibility) -> WorldProcessVisibility {
+    match visibility {
+        ResolutionVisibility::PlayerVisible => WorldProcessVisibility::PlayerVisible,
+        ResolutionVisibility::AdjudicationOnly => WorldProcessVisibility::AdjudicationOnly,
+    }
+}
+
+fn process_tempo_for_ref(clock: &WorldProcessClockPacket, process_ref: &str) -> WorldProcessTempo {
+    clock
+        .visible_processes
+        .iter()
+        .chain(clock.adjudication_only_processes.iter())
+        .find(|process| process.process_id == process_ref)
+        .map_or(WorldProcessTempo::Ambient, |process| process.tempo)
 }
 
 pub fn append_world_process_event_plan(
@@ -312,6 +353,11 @@ fn tempo_from_remaining_turns(remaining_turns: u32) -> WorldProcessTempo {
 mod tests {
     use super::*;
     use crate::agent_bridge::AgentHiddenTimer;
+    use crate::resolution::{
+        ActionAmbiguity, ActionInputKind, ActionIntent, NarrativeBrief, ProcessTickCause,
+        ProcessTickProposal, RESOLUTION_PROPOSAL_SCHEMA_VERSION, ResolutionOutcome,
+        ResolutionOutcomeKind, ResolutionProposal, ResolutionVisibility,
+    };
     use crate::scene_pressure::{
         SCENE_PRESSURE_PACKET_SCHEMA_VERSION, SCENE_PRESSURE_SCHEMA_VERSION, ScenePressurePolicy,
         ScenePressureProseEffect, ScenePressureVisibility,
@@ -367,5 +413,71 @@ mod tests {
             packet.adjudication_only_processes[0].visibility,
             WorldProcessVisibility::AdjudicationOnly
         );
+    }
+
+    #[test]
+    fn audited_resolution_process_ticks_enter_event_plan() {
+        let clock = WorldProcessClockPacket {
+            schema_version: WORLD_PROCESS_CLOCK_PACKET_SCHEMA_VERSION.to_owned(),
+            world_id: "stw_clock".to_owned(),
+            turn_id: "turn_0005".to_owned(),
+            visible_processes: vec![WorldProcess {
+                schema_version: WORLD_PROCESS_SCHEMA_VERSION.to_owned(),
+                process_id: "process:visible_pressure:00".to_owned(),
+                visibility: WorldProcessVisibility::PlayerVisible,
+                tempo: WorldProcessTempo::Immediate,
+                summary: "문이 닫히고 있다.".to_owned(),
+                next_tick_contract: "시간이 지나면 닫힌다.".to_owned(),
+                source_refs: vec!["pressure:time:door".to_owned()],
+            }],
+            adjudication_only_processes: Vec::new(),
+            compiler_policy: WorldProcessClockPolicy::default(),
+        };
+        let proposal = ResolutionProposal {
+            schema_version: RESOLUTION_PROPOSAL_SCHEMA_VERSION.to_owned(),
+            world_id: "stw_clock".to_owned(),
+            turn_id: "turn_0005".to_owned(),
+            interpreted_intent: ActionIntent {
+                input_kind: ActionInputKind::PresentedChoice,
+                summary: "문 쪽으로 움직인다.".to_owned(),
+                target_refs: vec!["process:visible_pressure:00".to_owned()],
+                pressure_refs: Vec::new(),
+                evidence_refs: vec!["current_turn".to_owned()],
+                ambiguity: ActionAmbiguity::Clear,
+            },
+            outcome: ResolutionOutcome {
+                kind: ResolutionOutcomeKind::Delayed,
+                summary: "문이 더 닫힌다.".to_owned(),
+                evidence_refs: vec!["process:visible_pressure:00".to_owned()],
+            },
+            gate_results: Vec::new(),
+            proposed_effects: Vec::new(),
+            process_ticks: vec![ProcessTickProposal {
+                process_ref: "process:visible_pressure:00".to_owned(),
+                cause: ProcessTickCause::PlayerActionTouchedProcess,
+                visibility: ResolutionVisibility::PlayerVisible,
+                summary: "문이 조금 더 닫힌다.".to_owned(),
+                evidence_refs: vec!["process:visible_pressure:00".to_owned()],
+            }],
+            narrative_brief: NarrativeBrief {
+                visible_summary: "문틈이 좁아진다.".to_owned(),
+                required_beats: Vec::new(),
+                forbidden_visible_details: Vec::new(),
+            },
+            next_choice_plan: Vec::new(),
+        };
+        let plan = prepare_world_process_event_plan(
+            &clock,
+            &ScenePressureEventPlan {
+                world_id: "stw_clock".to_owned(),
+                turn_id: "turn_0005".to_owned(),
+                records: Vec::new(),
+            },
+            Some(&proposal),
+        );
+
+        assert_eq!(plan.records.len(), 1);
+        assert_eq!(plan.records[0].process_id, "process:visible_pressure:00");
+        assert_eq!(plan.records[0].tempo, WorldProcessTempo::Immediate);
     }
 }

@@ -1,6 +1,9 @@
 #![allow(clippy::missing_errors_doc)]
 
 use crate::agent_bridge::{AgentTurnResponse, PendingAgentChoice};
+use crate::resolution::{
+    FreeformGateTrace, ResolutionOutcomeKind, freeform_gate_trace_from_proposal,
+};
 use crate::store::{append_jsonl, read_json, write_json};
 use anyhow::Result;
 use chrono::Utc;
@@ -53,6 +56,12 @@ pub struct PlayerIntentEventRecord {
     pub scope: String,
     pub intent_shape: String,
     pub evidence: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution_intent_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution_outcome: Option<ResolutionOutcomeKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freeform_gate_trace: Option<FreeformGateTrace>,
     pub expires_after_turns: u8,
     pub recorded_at: String,
 }
@@ -101,6 +110,18 @@ pub fn prepare_player_intent_event_plan(
     } else {
         player_input.trim().to_owned()
     };
+    let resolution_intent_summary = response
+        .resolution_proposal
+        .as_ref()
+        .map(|proposal| proposal.interpreted_intent.summary.clone());
+    let resolution_outcome = response
+        .resolution_proposal
+        .as_ref()
+        .map(|proposal| proposal.outcome.kind);
+    let freeform_gate_trace = response
+        .resolution_proposal
+        .as_ref()
+        .and_then(|proposal| freeform_gate_trace_from_proposal(player_input, proposal));
     PlayerIntentEventPlan {
         world_id: world_id.to_owned(),
         turn_id: turn_id.to_owned(),
@@ -112,6 +133,9 @@ pub fn prepare_player_intent_event_plan(
             scope: "scene".to_owned(),
             intent_shape,
             evidence,
+            resolution_intent_summary,
+            resolution_outcome,
+            freeform_gate_trace,
             expires_after_turns: 3,
             recorded_at: Utc::now().to_rfc3339(),
         }],
@@ -176,6 +200,11 @@ mod tests {
     use super::*;
     use crate::agent_bridge::AGENT_TURN_RESPONSE_SCHEMA_VERSION;
     use crate::models::{NARRATIVE_SCENE_SCHEMA_VERSION, NarrativeScene};
+    use crate::resolution::{
+        ActionAmbiguity, ActionInputKind, ActionIntent, GateKind, GateResult, GateStatus,
+        NarrativeBrief, RESOLUTION_PROPOSAL_SCHEMA_VERSION, ResolutionOutcome,
+        ResolutionOutcomeKind, ResolutionProposal, ResolutionVisibility,
+    };
 
     #[test]
     fn materializes_scene_scoped_intent_trace() -> anyhow::Result<()> {
@@ -184,6 +213,7 @@ mod tests {
             schema_version: AGENT_TURN_RESPONSE_SCHEMA_VERSION.to_owned(),
             world_id: "stw_intent".to_owned(),
             turn_id: "turn_0001".to_owned(),
+            resolution_proposal: None,
             visible_scene: NarrativeScene {
                 schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                 speaker: None,
@@ -204,6 +234,8 @@ mod tests {
             hidden_state_delta: Vec::new(),
             needs_context: Vec::new(),
             next_choices: Vec::new(),
+            actor_goal_events: Vec::new(),
+            actor_move_events: Vec::new(),
         };
         let plan = prepare_player_intent_event_plan(
             "stw_intent",
@@ -224,5 +256,93 @@ mod tests {
         assert_eq!(packet.active_intents.len(), 1);
         assert_eq!(packet.active_intents[0].scope, "scene");
         Ok(())
+    }
+
+    #[test]
+    fn freeform_resolution_proposal_materializes_gate_trace() {
+        let response = AgentTurnResponse {
+            schema_version: AGENT_TURN_RESPONSE_SCHEMA_VERSION.to_owned(),
+            world_id: "stw_intent_resolution".to_owned(),
+            turn_id: "turn_0002".to_owned(),
+            resolution_proposal: Some(ResolutionProposal {
+                schema_version: RESOLUTION_PROPOSAL_SCHEMA_VERSION.to_owned(),
+                world_id: "stw_intent_resolution".to_owned(),
+                turn_id: "turn_0002".to_owned(),
+                interpreted_intent: ActionIntent {
+                    input_kind: ActionInputKind::Freeform,
+                    summary: "문지기를 말로 설득한다.".to_owned(),
+                    target_refs: vec!["pressure:social:gate".to_owned()],
+                    pressure_refs: vec!["pressure:social:gate".to_owned()],
+                    evidence_refs: vec!["current_turn".to_owned()],
+                    ambiguity: ActionAmbiguity::Minor,
+                },
+                outcome: ResolutionOutcome {
+                    kind: ResolutionOutcomeKind::PartialSuccess,
+                    summary: "대화의 틈이 생긴다.".to_owned(),
+                    evidence_refs: vec!["current_turn".to_owned()],
+                },
+                gate_results: vec![GateResult {
+                    gate_kind: GateKind::SocialPermission,
+                    gate_ref: "pressure:social:gate".to_owned(),
+                    visibility: ResolutionVisibility::PlayerVisible,
+                    status: GateStatus::Softened,
+                    reason: "의심이 완전히 풀리지는 않았다.".to_owned(),
+                    evidence_refs: vec!["current_turn".to_owned()],
+                }],
+                proposed_effects: Vec::new(),
+                process_ticks: Vec::new(),
+                narrative_brief: NarrativeBrief {
+                    visible_summary: "말끝에 틈이 생긴다.".to_owned(),
+                    required_beats: Vec::new(),
+                    forbidden_visible_details: Vec::new(),
+                },
+                next_choice_plan: Vec::new(),
+            }),
+            visible_scene: NarrativeScene {
+                schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
+                speaker: None,
+                text_blocks: vec!["문지기가 말을 끊지 않았다.".to_owned()],
+                tone_notes: Vec::new(),
+            },
+            adjudication: None,
+            canon_event: None,
+            entity_updates: Vec::new(),
+            relationship_updates: Vec::new(),
+            plot_thread_events: Vec::new(),
+            scene_pressure_events: Vec::new(),
+            world_lore_updates: Vec::new(),
+            character_text_design_updates: Vec::new(),
+            body_resource_events: Vec::new(),
+            location_events: Vec::new(),
+            extra_contacts: Vec::new(),
+            hidden_state_delta: Vec::new(),
+            needs_context: Vec::new(),
+            next_choices: Vec::new(),
+            actor_goal_events: Vec::new(),
+            actor_move_events: Vec::new(),
+        };
+
+        let plan = prepare_player_intent_event_plan(
+            "stw_intent_resolution",
+            "turn_0002",
+            "6 문지기에게 둘러댄다",
+            None,
+            &response,
+        );
+        let record = &plan.records[0];
+
+        assert_eq!(
+            record.resolution_outcome,
+            Some(ResolutionOutcomeKind::PartialSuccess)
+        );
+        assert_eq!(
+            record.resolution_intent_summary.as_deref(),
+            Some("문지기를 말로 설득한다.")
+        );
+        let Some(trace) = &record.freeform_gate_trace else {
+            panic!("freeform resolution should create a gate trace");
+        };
+        assert_eq!(trace.gate_results.len(), 1);
+        assert_eq!(trace.final_outcome, ResolutionOutcomeKind::PartialSuccess);
     }
 }
