@@ -8,7 +8,10 @@ use crate::prompt_context_budget::{
     compile_prompt_context_budget_report,
 };
 use crate::revival::{AgentRevivalCompileOptions, build_agent_revival_packet};
-use crate::scene_director::{SceneDirectorPacket, compile_scene_director_packet};
+use crate::scene_director::{
+    SceneDirectorCompileInput, SceneDirectorPacket, compile_scene_director_packet_from_input,
+    merge_scene_director_history,
+};
 use crate::scene_pressure::ScenePressurePacket;
 use crate::turn_context::{TurnContextPacket, assemble_turn_context_packet};
 use crate::world_process_clock::{WorldProcessClockPacket, compile_world_process_clock_packet};
@@ -178,7 +181,13 @@ pub fn assemble_prompt_context_packet(
         known_facts: &prompt_memory.known_facts,
         selected_memory_items: &prompt_memory.selected_memory_items,
         scene_pressure: &scene_pressure,
+        active_plot_threads: &prompt_memory.active_plot_threads,
+        active_scene_director: prompt_memory.active_scene_director.as_ref(),
         active_pattern_debt: &prompt_memory.active_pattern_debt,
+        active_actor_agency: &prompt_memory.active_actor_agency,
+        active_world_process_clock: &prompt_memory.active_world_process_clock,
+        active_player_intent_trace: &prompt_memory.active_player_intent_trace,
+        recent_scene_window: required_path(memory, "/recent_scene_window")?,
         body_resource: &body_resource,
         location_graph: &location_graph,
         private_context: &private_context,
@@ -231,6 +240,8 @@ pub fn assemble_prompt_context_packet(
 
 struct PromptMemoryValues {
     known_facts: Value,
+    active_plot_threads: Value,
+    active_scene_director: Option<SceneDirectorPacket>,
     active_change_ledger: Value,
     active_pattern_debt: Value,
     active_belief_graph: Value,
@@ -247,6 +258,11 @@ struct PromptMemoryValues {
 fn load_prompt_memory_values(memory: &Value, active_memory: &Value) -> Result<PromptMemoryValues> {
     Ok(PromptMemoryValues {
         known_facts: required_path(memory, "/known_facts")?.clone(),
+        active_plot_threads: required_path(memory, "/active_plot_threads")?.clone(),
+        active_scene_director: memory
+            .pointer("/active_scene_director")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok()),
         active_change_ledger: required_path(memory, "/active_change_ledger")?.clone(),
         active_pattern_debt: required_path(memory, "/active_pattern_debt")?.clone(),
         active_belief_graph: required_path(memory, "/active_belief_graph")?.clone(),
@@ -284,7 +300,13 @@ struct CompileDerivedContextSource<'a> {
     known_facts: &'a Value,
     selected_memory_items: &'a Value,
     scene_pressure: &'a ScenePressurePacket,
+    active_plot_threads: &'a Value,
+    active_scene_director: Option<&'a SceneDirectorPacket>,
     active_pattern_debt: &'a Value,
+    active_actor_agency: &'a Value,
+    active_world_process_clock: &'a Value,
+    active_player_intent_trace: &'a Value,
+    recent_scene_window: &'a Value,
     body_resource: &'a BodyResourcePacket,
     location_graph: &'a LocationGraphPacket,
     private_context: &'a crate::agent_bridge::AgentPrivateAdjudicationContext,
@@ -312,11 +334,21 @@ fn compile_derived_context_packets(
         source.scene_pressure,
         source.private_context,
     );
-    let scene_director = compile_scene_director_packet(
-        source.turn_context.world_id.as_str(),
-        source.turn_context.turn_id.as_str(),
-        source.scene_pressure,
-        source.active_pattern_debt,
+    let world_process_clock_value = serde_json::to_value(&world_process_clock)
+        .unwrap_or_else(|_| source.active_world_process_clock.clone());
+    let scene_director = merge_scene_director_history(
+        compile_scene_director_packet_from_input(SceneDirectorCompileInput {
+            world_id: source.turn_context.world_id.as_str(),
+            turn_id: source.turn_context.turn_id.as_str(),
+            scene_pressure: source.scene_pressure,
+            active_pattern_debt: source.active_pattern_debt,
+            active_plot_threads: Some(source.active_plot_threads),
+            active_actor_agency: Some(source.active_actor_agency),
+            active_world_process_clock: Some(&world_process_clock_value),
+            active_player_intent_trace: Some(source.active_player_intent_trace),
+            recent_scene_window: Some(source.recent_scene_window),
+        }),
+        source.active_scene_director,
     );
     DerivedContextPackets {
         affordance_graph,
@@ -373,8 +405,11 @@ fn compile_visible_context(source: VisibleContextSource<'_>) -> Result<PromptVis
         recent_scene_window: required_path(source.memory, "/recent_scene_window")?.clone(),
         known_facts: source.prompt_memory.known_facts,
         active_scene_pressure: serde_json::to_value(&source.scene_pressure.visible_active)?,
-        active_plot_threads: required_path(source.memory, "/active_plot_threads/active_visible")?
-            .clone(),
+        active_plot_threads: required_path(
+            &source.prompt_memory.active_plot_threads,
+            "/active_visible",
+        )?
+        .clone(),
         active_body_resource_state: serde_json::to_value(source.body_resource)?,
         active_location_graph: serde_json::to_value(source.location_graph)?,
         affordance_graph: serde_json::to_value(source.affordance_graph)?,

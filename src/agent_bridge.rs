@@ -72,6 +72,12 @@ use crate::response_context::{
     append_agent_context_event_plan, load_agent_context_projection,
     prepare_agent_context_event_plan, rebuild_agent_context_projection,
 };
+use crate::scene_director::{
+    SceneDirectorCompileInput, SceneDirectorCritique, SceneDirectorPacket, SceneDirectorProposal,
+    append_scene_director_event_plan, audit_scene_director_proposal,
+    compile_scene_director_packet_from_input, load_scene_director_state,
+    merge_scene_director_history, prepare_scene_director_event_plan, rebuild_scene_director,
+};
 use crate::scene_pressure::{
     ScenePressureEvent, ScenePressurePacket, append_scene_pressure_audit,
     append_scene_pressure_event_plan, compile_scene_pressure_packet, load_active_scene_pressures,
@@ -193,6 +199,8 @@ pub struct AgentVisibleContext {
     #[serde(default)]
     pub active_narrative_style_state: NarrativeStyleState,
     #[serde(default)]
+    pub active_scene_director: SceneDirectorPacket,
+    #[serde(default)]
     pub active_turn_retrieval_controller: TurnRetrievalControllerPacket,
     #[serde(default)]
     pub selected_context_capsules: ContextCapsuleSelection,
@@ -270,6 +278,8 @@ pub struct AgentTurnResponse {
     pub turn_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolution_proposal: Option<ResolutionProposal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scene_director_proposal: Option<SceneDirectorProposal>,
     pub visible_scene: NarrativeScene,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adjudication: Option<AgentResponseAdjudication>,
@@ -555,6 +565,7 @@ pub fn commit_agent_turn(options: &AgentCommitTurnOptions) -> Result<CommittedAg
     let response = canonical_agent_turn_response(options.response.clone());
     validate_agent_response(&pending, &response)?;
     audit_agent_resolution_proposal(options.store_root.as_deref(), &pending, &response)?;
+    audit_agent_scene_director_proposal(options.store_root.as_deref(), &pending, &response)?;
     let context_event_plan = prepare_agent_context_event_plan(
         options.world_id.as_str(),
         pending.turn_id.as_str(),
@@ -594,6 +605,18 @@ pub fn commit_agent_turn(options: &AgentCommitTurnOptions) -> Result<CommittedAg
     let scene_pressure_event_plan = prepare_scene_pressure_event_plan(
         &pending.visible_context.active_scene_pressure,
         &response.scene_pressure_events,
+    )?;
+    let prompt_context = compile_prompt_context_packet(&CompilePromptContextPacketOptions {
+        store_root: options.store_root.as_deref(),
+        pending: &pending,
+        engine_session_kind: "webgpt_project_session",
+    })?;
+    let active_scene_director: SceneDirectorPacket =
+        serde_json::from_value(prompt_context.visible_context.active_scene_director.clone())
+            .context("prompt context active_scene_director is invalid")?;
+    let scene_director_event_plan = prepare_scene_director_event_plan(
+        &active_scene_director,
+        response.scene_director_proposal.as_ref(),
     )?;
     let body_resource_event_plan = prepare_body_resource_event_plan(
         options.world_id.as_str(),
@@ -943,6 +966,17 @@ pub fn commit_agent_turn(options: &AgentCommitTurnOptions) -> Result<CommittedAg
         &files,
         options.world_id.as_str(),
         pending.turn_id.as_str(),
+        "scene_director",
+        || {
+            append_scene_director_event_plan(files.dir.as_path(), &scene_director_event_plan)?;
+            rebuild_scene_director(files.dir.as_path(), &active_scene_director)?;
+            Ok(())
+        },
+    )?;
+    commit_post_advance_materialization(
+        &files,
+        options.world_id.as_str(),
+        pending.turn_id.as_str(),
         "body_resource",
         || {
             append_body_resource_event_plan(files.dir.as_path(), &body_resource_event_plan)?;
@@ -1101,6 +1135,38 @@ fn audit_agent_resolution_proposal(
             audit_resolution_choices(&prompt_context, proposal, &response.next_choices)
                 .map_err(|critique| resolution_critique_error(&critique))
         })
+}
+
+fn audit_agent_scene_director_proposal(
+    store_root: Option<&Path>,
+    pending: &PendingAgentTurn,
+    response: &AgentTurnResponse,
+) -> Result<()> {
+    let Some(proposal) = &response.scene_director_proposal else {
+        return Ok(());
+    };
+    let prompt_context = compile_prompt_context_packet(&CompilePromptContextPacketOptions {
+        store_root,
+        pending,
+        engine_session_kind: "webgpt_project_session",
+    })?;
+    audit_scene_director_proposal(
+        &prompt_context,
+        proposal,
+        response.resolution_proposal.as_ref(),
+        &response.next_choices,
+    )
+    .map_err(|critique| scene_director_critique_error(&critique))
+}
+
+fn scene_director_critique_error(critique: &SceneDirectorCritique) -> anyhow::Error {
+    anyhow::anyhow!(
+        "scene director proposal audit failed: failure_kind={:?}, message={}, rejected_refs={:?}, required_changes={:?}",
+        critique.failure_kind,
+        critique.message,
+        critique.rejected_refs,
+        critique.required_changes
+    )
 }
 
 fn resolution_critique_error(critique: &ResolutionCritique) -> anyhow::Error {
@@ -1346,6 +1412,7 @@ struct VisibleTurnRetrievalSource<'a> {
     projections: &'a ActiveProjectionContext,
 }
 
+#[allow(clippy::too_many_lines)]
 fn visible_context(input: &VisibleContextInput<'_>) -> Result<AgentVisibleContext> {
     let files = input.files;
     let snapshot = input.snapshot;
@@ -1412,6 +1479,31 @@ fn visible_context(input: &VisibleContextInput<'_>) -> Result<AgentVisibleContex
         &active_projections.world_process_clock,
         &context_capsules.index,
     )?;
+    let pattern_debt_value = serde_json::to_value(&active_projections.pattern_debt)?;
+    let plot_threads_value = serde_json::to_value(&active_plot_threads)?;
+    let actor_agency_value = serde_json::to_value(&active_projections.actor_agency)?;
+    let world_process_clock_value = serde_json::to_value(&active_projections.world_process_clock)?;
+    let player_intent_trace_value = serde_json::to_value(&active_projections.player_intent_trace)?;
+    let recent_scene_window_value = serde_json::to_value(&input.current_packet.scene.text_blocks)?;
+    let compiled_scene_director =
+        compile_scene_director_packet_from_input(SceneDirectorCompileInput {
+            world_id: input.current_packet.world_id.as_str(),
+            turn_id: next_turn_id.as_str(),
+            scene_pressure: &active_scene_pressure,
+            active_pattern_debt: &pattern_debt_value,
+            active_plot_threads: Some(&plot_threads_value),
+            active_actor_agency: Some(&actor_agency_value),
+            active_world_process_clock: Some(&world_process_clock_value),
+            active_player_intent_trace: Some(&player_intent_trace_value),
+            recent_scene_window: Some(&recent_scene_window_value),
+        });
+    let active_scene_director = merge_scene_director_history(
+        compiled_scene_director,
+        Some(&load_scene_director_state(
+            files.dir.as_path(),
+            SceneDirectorPacket::default(),
+        )?),
+    );
     Ok(AgentVisibleContext {
         location: snapshot.protagonist_state.location.clone(),
         recent_scene: input.current_packet.scene.text_blocks.clone(),
@@ -1442,6 +1534,7 @@ fn visible_context(input: &VisibleContextInput<'_>) -> Result<AgentVisibleContex
         active_world_process_clock: active_projections.world_process_clock,
         active_player_intent_trace: active_projections.player_intent_trace,
         active_narrative_style_state: active_projections.narrative_style_state,
+        active_scene_director,
         active_turn_retrieval_controller,
         selected_context_capsules: context_capsules.selection,
         active_autobiographical_index,
@@ -1748,6 +1841,7 @@ mod tests {
         ProposedEffectKind, RESOLUTION_PROPOSAL_SCHEMA_VERSION, ResolutionOutcome,
         ResolutionOutcomeKind, ResolutionProposal, ResolutionVisibility,
     };
+    use crate::scene_director::SceneDirectorPacket;
     use crate::scene_pressure::ScenePressurePacket;
     use crate::store::{
         InitWorldOptions, init_world, read_json, resolve_store_paths, world_file_paths,
@@ -1881,6 +1975,7 @@ premise:
             world_id: "stw_legacy_contract".to_owned(),
             turn_id: "turn_0001".to_owned(),
             resolution_proposal: None,
+            scene_director_proposal: None,
             visible_scene: NarrativeScene {
                 schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                 speaker: None,
@@ -1947,6 +2042,7 @@ premise:
                 active_world_process_clock: WorldProcessClockPacket::default(),
                 active_player_intent_trace: PlayerIntentTracePacket::default(),
                 active_narrative_style_state: NarrativeStyleState::default(),
+                active_scene_director: SceneDirectorPacket::default(),
                 active_turn_retrieval_controller: TurnRetrievalControllerPacket::default(),
                 selected_context_capsules: ContextCapsuleSelection::default(),
                 active_autobiographical_index: AutobiographicalIndexPacket::default(),
@@ -1971,6 +2067,7 @@ premise:
             world_id: "stw_needs_context".to_owned(),
             turn_id: "turn_0001".to_owned(),
             resolution_proposal: None,
+            scene_director_proposal: None,
             visible_scene: NarrativeScene {
                 schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                 speaker: None,
@@ -2069,6 +2166,7 @@ premise:
                 world_id: pending.world_id.clone(),
                 turn_id: pending.turn_id.clone(),
                 resolution_proposal: None,
+                scene_director_proposal: None,
                 visible_scene: NarrativeScene {
                     schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                     speaker: None,
@@ -2150,6 +2248,7 @@ premise:
                 world_id: pending.world_id.clone(),
                 turn_id: pending.turn_id.clone(),
                 resolution_proposal: None,
+                scene_director_proposal: None,
                 visible_scene: NarrativeScene {
                     schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                     speaker: None,
@@ -2242,6 +2341,7 @@ premise:
                 world_id: pending.world_id.clone(),
                 turn_id: pending.turn_id.clone(),
                 resolution_proposal: None,
+                scene_director_proposal: None,
                 visible_scene: NarrativeScene {
                     schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                     speaker: None,
@@ -2316,6 +2416,7 @@ premise:
                 world_id: pending.world_id,
                 turn_id: pending.turn_id,
                 resolution_proposal: None,
+                scene_director_proposal: None,
                 visible_scene: NarrativeScene {
                     schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                     speaker: None,
@@ -2376,6 +2477,7 @@ premise:
                 world_id: pending.world_id,
                 turn_id: pending.turn_id,
                 resolution_proposal: None,
+                scene_director_proposal: None,
                 visible_scene: NarrativeScene {
                     schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                     speaker: None,
@@ -2439,6 +2541,7 @@ premise:
                     pending.world_id.as_str(),
                     pending.turn_id.as_str(),
                 )),
+                scene_director_proposal: None,
                 visible_scene: NarrativeScene {
                     schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                     speaker: None,
@@ -2484,6 +2587,7 @@ premise:
             world_id: "stw_anchor_leak".to_owned(),
             turn_id: "turn_0001".to_owned(),
             resolution_proposal: None,
+            scene_director_proposal: None,
             visible_scene: NarrativeScene {
                 schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                 speaker: None,
@@ -2545,6 +2649,7 @@ premise:
                 world_id: pending.world_id.clone(),
                 turn_id: pending.turn_id.clone(),
                 resolution_proposal: None,
+                scene_director_proposal: None,
                 visible_scene: NarrativeScene {
                     schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                     speaker: None,

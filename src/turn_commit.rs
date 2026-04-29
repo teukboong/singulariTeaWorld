@@ -330,6 +330,7 @@ premise:
                 world_id: pending.world_id.clone(),
                 turn_id: pending.turn_id.clone(),
                 resolution_proposal: None,
+                scene_director_proposal: None,
                 visible_scene: NarrativeScene {
                     schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                     speaker: None,

@@ -214,6 +214,7 @@ mod tests {
             world_id: "stw_intent".to_owned(),
             turn_id: "turn_0001".to_owned(),
             resolution_proposal: None,
+            scene_director_proposal: None,
             visible_scene: NarrativeScene {
                 schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                 speaker: None,
@@ -298,6 +299,7 @@ mod tests {
                 },
                 next_choice_plan: Vec::new(),
             }),
+            scene_director_proposal: None,
             visible_scene: NarrativeScene {
                 schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                 speaker: None,

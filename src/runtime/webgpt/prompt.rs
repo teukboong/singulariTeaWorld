@@ -100,6 +100,28 @@ const AGENT_TURN_RESPONSE_SCHEMA_GUIDE: &str = r#"AgentTurnResponse 스키마:
       }
     ]
   },
+  "scene_director_proposal": {
+    "schema_version": "singulari.scene_director_proposal.v1",
+    "world_id": "<world_id>",
+    "turn_id": "<turn_id>",
+    "scene_id": "prompt_context.visible_context.active_scene_director.current_scene.scene_id",
+    "beat_kind": "establish|probe|escalate|complicate|reveal|cost|choice_pressure|decompress|transition|cliffhanger",
+    "turn_function": "이번 턴이 장면 안에서 수행한 구조적 역할",
+    "tension_before": "low|medium|high",
+    "tension_after": "low|medium|high",
+    "scene_effect": "established|scene_question_narrowed|pressure_increased|pressure_softened|cost_imposed|visible_fact_revealed|choice_surface_changed|scene_question_transformed|necessary_stall",
+    "paragraph_strategy": {
+      "opening_shape": "observable_detail|action_consequence|dialogue_pressure|new_visible_change",
+      "middle_shape": "blocked_relation|material_constraint|signal_interpretation|cost_tradeoff",
+      "closure_shape": "forced_next_decision|concrete_unresolved_pressure|transition_handoff"
+    },
+    "choice_strategy": {
+      "must_change_choice_shape": true,
+      "avoid_recent_choice_tags": ["최근 반복된 선택지 태그"]
+    },
+    "transition": null,
+    "evidence_refs": ["prompt_context 안의 visible ref"]
+  },
   "visible_scene": {
     "schema_version": "singulari.narrative_scene.v1",
     "text_blocks": ["위 서사 출력 지시와 pending.output_contract.narrative_budget에 맞춘 한국어 VN 본문"],
@@ -249,6 +271,9 @@ const AGENT_TURN_RESPONSE_SCHEMA_GUIDE: &str = r#"AgentTurnResponse 스키마:
 ```
 - next_choices는 서사 생성과 같은 응답에서 반드시 함께 작성한다. 별도 선택지 재생성 턴을 만들지 않는다.
 - resolution_proposal은 LLM 지능이 해석한 판정 제안이고, Rust가 commit 전에 audit한다. 가능한 한 작성하되, prompt_context에 없는 ref나 evidence_refs 없는 durable effect를 넣지 않는다.
+- scene_director_proposal은 선택(optional)이다. 작성할 경우 prompt_context.visible_context.active_scene_director의 current_scene/recommended_next_beats/paragraph_budget_hint에 맞춰 이번 턴의 구조적 역할을 요약한다.
+- scene_director_proposal은 resolution_proposal을 대체하지 않는다. 장면 박자와 선택지 모양만 설명하며, 새 canon 사실이나 hidden motive를 만들 권한이 없다.
+- scene_director_proposal.evidence_refs는 prompt_context JSON 안의 player-visible 문자열 ref만 쓴다. hidden/adjudication-only ref는 금지한다.
 - resolution_proposal의 모든 `target_refs`, `pressure_refs`, `gate_ref`, `grounding_ref`, `process_ref`, `effect.target_ref`는 prompt_context JSON 안에 실제 문자열로 존재하는 ref만 쓴다. 설명용 JSON pointer(`visible_context...`)나 새로 만든 관계/장소/인물 ref는 쓰지 않는다.
 - selected_context_capsules와 selected_memory_items 안의 `source_id`, `edge_id`, `capsule_id`, `entity_id`, `location_id`, `pressure_id`, `affordance_id`처럼 실제 문자열로 들어 있는 ref는 evidence로 쓸 수 있다. 단 rejected_capsules에만 있는 ref는 쓰지 않는다.
 - resolution_proposal의 visible field에는 hidden/adjudication-only 세부 내용을 절대 쓰지 않는다.

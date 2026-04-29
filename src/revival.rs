@@ -181,6 +181,7 @@ pub fn build_agent_revival_packet(options: &AgentRevivalCompileOptions<'_>) -> R
             "active_world_process_clock": pending.visible_context.active_world_process_clock,
             "active_player_intent_trace": pending.visible_context.active_player_intent_trace,
             "active_narrative_style_state": pending.visible_context.active_narrative_style_state,
+            "active_scene_director": pending.visible_context.active_scene_director,
             "active_turn_retrieval_controller": pending.visible_context.active_turn_retrieval_controller,
             "selected_context_capsules": pending.visible_context.selected_context_capsules,
             "active_autobiographical_index": pending.visible_context.active_autobiographical_index,

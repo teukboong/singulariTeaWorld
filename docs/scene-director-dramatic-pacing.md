@@ -217,26 +217,28 @@ expressed safely.
 
 ## Advisory-First Integration
 
-The first implementation is intentionally advisory-only. Rust compiles
+The current implementation keeps Rust as the deterministic scene authority and
+lets WebGPT contribute optional structural metadata. Rust compiles
 `active_scene_director` into the visible prompt context from already-visible
-scene pressure and pattern debt. WebGPT may use the packet to vary turn
-function, paragraph strategy, and choice shape, but it does not return a
-`scene_director_proposal` yet.
+scene pressure, pattern debt, plot threads, actor agency, process clocks, player
+intent, and recent scene-window hints. WebGPT may return a
+`scene_director_proposal` beside `resolution_proposal`; if supplied, Rust audits
+it before commit and materializes accepted records into the append-only scene
+logs.
 
-This keeps the first loop small:
+This keeps the loop bounded:
 
-- no new response schema
-- no new commit blocker
 - no hidden data in the director packet
 - no second plot authority
-- measurable prompt/context behavior before durable event projection
+- optional proposal compatibility for older responses
+- durable scene rhythm projection when the proposal is present
 
-Hard audit can be added later only after browser E2E shows the advisory packet
-improves rhythm without bloating prompts or over-controlling prose.
+Long-play browser E2E is still needed to tune budgets, but the core compile,
+audit, commit, and materialization path is implemented.
 
-## Later LLM Output Shape
+## LLM Output Shape
 
-`AgentTurnResponse` may later grow one optional field:
+`AgentTurnResponse` has one optional field:
 
 ```rust
 struct AgentTurnResponse {
@@ -266,7 +268,8 @@ struct SceneDirectorProposal {
 ```
 
 The proposal says what the turn was trying to do structurally. It does not
-replace `ResolutionProposal`; it sits beside it.
+replace `ResolutionProposal`; it sits beside it and must use evidence visible in
+the prompt context.
 
 Example:
 
@@ -292,7 +295,7 @@ Example:
 
 ## Rust Audit Contract
 
-In the later proposal phase, Rust validates the proposal before commit.
+When WebGPT supplies a proposal, Rust validates it before commit.
 
 Minimum checks:
 
@@ -312,9 +315,8 @@ Minimum checks:
 8. Choice-shape check: `choice_strategy` cannot ask for choices that violate
    affordance grounding.
 
-Audit failure should enter the same structured repair loop as resolution
-failures. The current advisory-only implementation does not fail commits for
-Scene Director quality.
+Audit failure enters the same repairable WebGPT commit loop as resolution
+failures. Omitted proposals remain compatible and do not block commits.
 
 ## Event Logs
 
@@ -347,6 +349,19 @@ struct SceneDirectorEventRecord {
 Scene arc events:
 
 ```rust
+struct SceneArcEventRecord {
+    schema_version: String,
+    world_id: String,
+    turn_id: String,
+    event_id: String,
+    scene_id: String,
+    event_kind: SceneArcEventKind,
+    summary: String,
+    to_scene_question: Option<String>,
+    evidence_refs: Vec<String>,
+    recorded_at: String,
+}
+
 enum SceneArcEventKind {
     SceneOpened,
     SceneQuestionUpdated,
@@ -363,8 +378,10 @@ Materialized packet:
 scene_director.json
 ```
 
-This gives prompt assembly a compact active packet and gives world.db a
-queryable history of scene rhythm.
+This gives prompt assembly a compact active packet and gives world.db/docs a
+queryable history of scene rhythm. The materializer preserves the active
+`scene_id` across fresh prompt compiles and opens a new scene id only when an
+accepted transition carries a `to_scene_question`.
 
 ## Prompt Integration
 
@@ -469,6 +486,11 @@ Acceptance:
 - packet is player-visible only
 - old worlds without scene director logs still get a safe default packet
 
+Status: implemented for prompt assembly. The baseline compiler now reads
+visible plot threads, actor agency, world process clock, player intent trace,
+recent scene window, scene pressure, and pattern debt. Missing materialized
+scene director logs fall back to a safe advisory packet.
+
 ### Phase 3: Optional Proposal Contract
 
 Add `scene_director_proposal` to `AgentTurnResponse` and prompt schema.
@@ -478,6 +500,10 @@ Acceptance:
 - WebGPT is told every turn needs a dramatic job
 - proposal is optional for compatibility
 - visible text and choices still validate through existing gates
+
+Status: implemented. `AgentTurnResponse.scene_director_proposal` is optional,
+and the WebGPT schema guide describes the proposal as structural metadata beside
+`resolution_proposal`.
 
 ### Phase 4: Commit-Time Audit
 
@@ -490,6 +516,10 @@ Acceptance:
 - transition without exit condition fails
 - hidden terms cannot appear in player-visible director fields
 
+Status: implemented for supplied proposals. Omitted proposals remain compatible;
+provided proposals are audited against player-visible prompt context and
+repairable WebGPT commit failures.
+
 ### Phase 5: Event Commit And Materialization
 
 Accepted proposals append `scene_director_events.jsonl` and rebuild
@@ -501,6 +531,12 @@ Acceptance:
 - high tension counters advance
 - transition pressure becomes visible to prompt context
 
+Status: implemented as append-only projection. Accepted proposals append
+`scene_director_events.jsonl` / `scene_arc_events.jsonl`, rebuild
+`scene_director.json`, and expose the projection through world.db/doc/debug
+surfaces. Prompt context still keeps a safe compiled fallback when no projection
+exists.
+
 ### Phase 6: UI/QA Surface
 
 Expose safe pacing status in the VN drawer and richer packet detail in the
@@ -511,6 +547,11 @@ Acceptance:
 - player sees a natural "장면 흐름" phrase
 - QA can inspect recent beat sequence
 - no hidden/reveal-condition text leaks
+
+Status: partially implemented. The VN status drawer now shows a safe
+`장면 흐름` phrase, and runtime debug details expose the materialized
+`scene_director.json` packet when present. A dedicated richer QA panel remains
+future work.
 
 ### Phase 7: Long-Play Tuning
 
@@ -525,6 +566,11 @@ Metrics:
 - transition frequency
 - player time from turn reveal to choice
 - WebGPT turn latency
+
+Status: scaffolding only. Materialized packets now expose repeated beat
+sequence, choice-shape repetition, high-tension streak, transition pressure, and
+runtime dispatch details; budget tuning still requires browser E2E sampling
+over longer play.
 
 ## What To Avoid
 

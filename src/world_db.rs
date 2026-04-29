@@ -19,6 +19,7 @@ use crate::pattern_debt::PATTERN_DEBT_FILENAME;
 use crate::player_intent::PLAYER_INTENT_TRACE_FILENAME;
 use crate::plot_thread::PLOT_THREADS_FILENAME;
 use crate::relationship_graph::{RELATIONSHIP_GRAPH_FILENAME, RelationshipGraphPacket};
+use crate::scene_director::SCENE_DIRECTOR_FILENAME;
 use crate::scene_pressure::ACTIVE_SCENE_PRESSURES_FILENAME;
 use crate::sqlite::{
     Connection, OpenFlags, OptionalExtension, SQLITE_BUSY_TIMEOUT_MS, SqliteConnectionOptions,
@@ -3385,6 +3386,12 @@ const MATERIALIZED_PROJECTION_FILES: &[MaterializedProjectionFile] = &[
         kind: "scene_pressure",
         title: "장면 압력",
         filename: ACTIVE_SCENE_PRESSURES_FILENAME,
+    },
+    MaterializedProjectionFile {
+        id: "scene_director",
+        kind: "scene_director",
+        title: "장면 흐름",
+        filename: SCENE_DIRECTOR_FILENAME,
     },
     MaterializedProjectionFile {
         id: "visual_asset_graph",

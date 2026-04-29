@@ -359,6 +359,7 @@ mod tests {
             world_id: "stw_pattern".to_owned(),
             turn_id: "turn_0001".to_owned(),
             resolution_proposal: None,
+            scene_director_proposal: None,
             visible_scene: NarrativeScene {
                 schema_version: crate::models::NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                 speaker: None,

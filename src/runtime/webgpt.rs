@@ -479,6 +479,7 @@ Prompt context artifact path for audit reference:
 fn is_repairable_webgpt_commit_error(error: &str) -> bool {
     [
         "resolution proposal audit failed",
+        "scene director proposal audit failed",
         "agent response next_choices",
         "actor agency update",
     ]

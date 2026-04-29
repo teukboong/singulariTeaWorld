@@ -999,6 +999,11 @@ fn condition_row(source: &VnStatusRowSource<'_>) -> VnStatusRow {
         "condition",
         vec![
             status_cell("🧩", "상태", source.dashboard.status.as_str()),
+            status_cell(
+                "🎬",
+                "장면 흐름",
+                scene_flow_status(source.dashboard.status.as_str(), source.open_questions),
+            ),
             status_cell("🕯️", "희망", hope_status(source.open_questions)),
             status_cell("⚠️", "치명 상태", critical_status(source.body)),
         ],
@@ -1112,6 +1117,20 @@ fn hope_status(open_questions: &[String]) -> String {
         "아직 붙잡을 수 있는 여지가 남아 있음".to_owned()
     } else {
         "아직 확인해야 할 단서가 남아 있음".to_owned()
+    }
+}
+
+fn scene_flow_status(status: &str, open_questions: &[String]) -> String {
+    if status.contains("전환") || status.contains("수렴") {
+        "다음 장면으로 넘어갈 준비".to_owned()
+    } else if open_questions.iter().any(|question| {
+        question.contains("단서") || question.contains("확인") || question.contains("알")
+    }) {
+        "단서가 행동으로 바뀌는 중".to_owned()
+    } else if status.contains("위임") || status.contains("압박") || status.contains("긴장") {
+        "압박이 좁혀지는 중".to_owned()
+    } else {
+        "현재 압력을 고르는 중".to_owned()
     }
 }
 

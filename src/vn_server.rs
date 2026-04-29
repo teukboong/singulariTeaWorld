@@ -13,6 +13,7 @@ use crate::job_ledger::{
 use crate::models::FREEFORM_CHOICE_SLOT;
 use crate::projection_health::{ProjectionHealthReport, build_projection_health_report};
 use crate::repair_extra_memory_projection;
+use crate::scene_director::SCENE_DIRECTOR_FILENAME;
 use crate::start::{StartWorldOptions, start_world};
 use crate::store::{
     WORLD_FILENAME, load_active_world_if_present, read_json, resolve_store_paths, resolve_world_id,
@@ -248,6 +249,7 @@ struct VnRuntimeDetails {
     backend_selection: VnBackendSelectionStatus,
     latest_text_dispatch: Option<serde_json::Value>,
     latest_visual_dispatch: Option<serde_json::Value>,
+    scene_director: Option<serde_json::Value>,
     world_jobs: Vec<WorldJob>,
     projection_health: ProjectionHealthReport,
     host_supervisor: HostSupervisorPlan,
@@ -811,11 +813,27 @@ fn runtime_status(state: &VnServerState) -> Result<VnRuntimeStatusResponse> {
             backend_selection: selection,
             latest_text_dispatch,
             latest_visual_dispatch,
+            scene_director: scene_director_runtime_details(state, world_id.as_str())?,
             world_jobs,
             projection_health,
             host_supervisor,
         },
     })
+}
+
+fn scene_director_runtime_details(
+    state: &VnServerState,
+    world_id: &str,
+) -> Result<Option<serde_json::Value>> {
+    let store_paths = resolve_store_paths(state.store_root.as_deref())?;
+    let path = store_paths
+        .worlds_dir
+        .join(world_id)
+        .join(SCENE_DIRECTOR_FILENAME);
+    if !path.exists() {
+        return Ok(None);
+    }
+    read_json(path.as_path()).with_context(|| format!("failed to read {}", path.display()))
 }
 
 fn repair_world_db_for_active_world(state: &VnServerState) -> Result<VnWorldDbRepairResponse> {

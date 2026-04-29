@@ -98,6 +98,7 @@ mod tests {
     use crate::player_intent::PlayerIntentTracePacket;
     use crate::plot_thread::PlotThreadPacket;
     use crate::relationship_graph::RelationshipGraphPacket;
+    use crate::scene_director::SceneDirectorPacket;
     use crate::scene_pressure::ScenePressurePacket;
     use crate::turn_retrieval_controller::TurnRetrievalControllerPacket;
     use crate::world_lore::WorldLorePacket;
@@ -132,6 +133,7 @@ mod tests {
                 active_world_process_clock: WorldProcessClockPacket::default(),
                 active_player_intent_trace: PlayerIntentTracePacket::default(),
                 active_narrative_style_state: NarrativeStyleState::default(),
+                active_scene_director: SceneDirectorPacket::default(),
                 active_turn_retrieval_controller: TurnRetrievalControllerPacket::default(),
                 selected_context_capsules: ContextCapsuleSelection::default(),
                 active_autobiographical_index: AutobiographicalIndexPacket::default(),

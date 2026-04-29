@@ -287,10 +287,14 @@ pub use runtime_profile::{
     RuntimeCapabilityProfile, RuntimeSurfaceKind,
 };
 pub use scene_director::{
-    DramaticBeat, DramaticBeatKind, DramaticBeatRecommendation, ParagraphBudgetHint,
-    SCENE_DIRECTOR_PACKET_SCHEMA_VERSION, SceneArc, SceneDirectorPacket, SceneDirectorPolicy,
-    SceneExitCondition, ScenePhase, TensionLevel, TransitionPressure,
-    compile_scene_director_packet,
+    ChoiceStrategy, DramaticBeat, DramaticBeatKind, DramaticBeatRecommendation,
+    ParagraphBudgetHint, ParagraphStrategy, SCENE_DIRECTOR_PACKET_SCHEMA_VERSION,
+    SCENE_DIRECTOR_PROPOSAL_SCHEMA_VERSION, SceneArc, SceneDirectorCompileInput,
+    SceneDirectorCritique, SceneDirectorFailureKind, SceneDirectorPacket, SceneDirectorPolicy,
+    SceneDirectorProposal, SceneDirectorTuningMetrics, SceneEffect, SceneExitCondition, ScenePhase,
+    SceneTransitionProposal, TensionLevel, TransitionPressure, audit_scene_director_proposal,
+    compile_scene_director_packet, compile_scene_director_packet_from_input,
+    merge_scene_director_history,
 };
 pub use scene_pressure::{
     ACTIVE_SCENE_PRESSURES_FILENAME, SCENE_PRESSURE_AUDIT_FILENAME,

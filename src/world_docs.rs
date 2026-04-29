@@ -7,6 +7,7 @@ use crate::models::{
 };
 use crate::plot_thread::PLOT_THREADS_FILENAME;
 use crate::relationship_graph::RELATIONSHIP_GRAPH_FILENAME;
+use crate::scene_director::SCENE_DIRECTOR_FILENAME;
 use crate::scene_pressure::ACTIVE_SCENE_PRESSURES_FILENAME;
 use crate::store::{
     CANON_EVENTS_FILENAME, ENTITIES_FILENAME, HIDDEN_STATE_FILENAME, LATEST_SNAPSHOT_FILENAME,
@@ -382,6 +383,11 @@ const DOC_PROJECTION_FILES: &[DocProjectionFile] = &[
         title: "Scene Pressure",
         filename: ACTIVE_SCENE_PRESSURES_FILENAME,
         summary_fields: &[("pressures", "pressures")],
+    },
+    DocProjectionFile {
+        title: "Scene Director",
+        filename: SCENE_DIRECTOR_FILENAME,
+        summary_fields: &[("recent_beats", "recent beats")],
     },
     DocProjectionFile {
         title: "Visual Asset Graph",
