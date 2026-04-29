@@ -161,9 +161,13 @@ init();
 async function init() {
   try {
     const packet = await loadInitialPacket();
-    renderPacket(packet);
+    if (packet) {
+      renderPacket(packet);
+    }
     await hydrateWorldLauncher();
-    await hydrateAgentPendingState();
+    if (packet) {
+      await hydrateAgentPendingState();
+    }
   } catch (error) {
     renderLoadError(error);
   }
@@ -210,9 +214,15 @@ async function loadInitialPacket() {
   if (explicitPacketUrl) {
     return fetchJson(explicitPacketUrl);
   }
-  const packet = await fetchJson(currentApiUrl);
-  state.apiAvailable = true;
-  return packet;
+  try {
+    const packet = await fetchJson(currentApiUrl);
+    state.apiAvailable = true;
+    return packet;
+  } catch (error) {
+    state.apiAvailable = true;
+    state.initialLoadError = error;
+    return null;
+  }
 }
 
 function renderPacket(packet) {
@@ -274,6 +284,10 @@ async function hydrateWorldLauncher() {
   }
   await refreshWorldList();
   renderWorldList();
+  if (!state.worlds.length) {
+    showLaunchOverlay("new");
+    return;
+  }
   if (!hasLaunchSeen()) {
     showLaunchOverlay("previous");
   }

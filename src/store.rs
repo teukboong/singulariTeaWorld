@@ -348,8 +348,31 @@ pub fn save_active_world(
 /// Returns an error when no active binding exists, the binding is malformed, or
 /// the referenced world cannot be loaded.
 pub fn load_active_world(store_root: Option<&Path>) -> Result<ActiveWorldBinding> {
+    let Some(binding) = load_active_world_if_present(store_root)? else {
+        let paths = resolve_store_paths(store_root)?;
+        bail!(
+            "active world binding not found: {}",
+            active_world_path(&paths).display()
+        );
+    };
+    Ok(binding)
+}
+
+/// Load the active world pointer if it exists.
+///
+/// # Errors
+///
+/// Returns an error when the active binding exists but is malformed, or the
+/// referenced world cannot be loaded.
+pub fn load_active_world_if_present(
+    store_root: Option<&Path>,
+) -> Result<Option<ActiveWorldBinding>> {
     let paths = resolve_store_paths(store_root)?;
-    let binding: ActiveWorldBinding = read_json(&active_world_path(&paths))?;
+    let path = active_world_path(&paths);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let binding: ActiveWorldBinding = read_json(&path)?;
     if binding.schema_version != ACTIVE_WORLD_BINDING_SCHEMA_VERSION {
         bail!(
             "active world schema_version mismatch: expected {}, got {}",
@@ -367,7 +390,7 @@ pub fn load_active_world(store_root: Option<&Path>) -> Result<ActiveWorldBinding
             snapshot.session_id
         );
     }
-    Ok(binding)
+    Ok(Some(binding))
 }
 
 /// Resolve an explicit world id, or fall back to the active world binding.
@@ -530,7 +553,10 @@ fn render_laws(world: &WorldRecord) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{InitWorldOptions, init_world, load_active_world, save_active_world};
+    use super::{
+        InitWorldOptions, init_world, load_active_world, load_active_world_if_present,
+        save_active_world,
+    };
     use crate::models::ANCHOR_CHARACTER_ID;
     use crate::store::read_json;
     use tempfile::tempdir;
@@ -624,6 +650,17 @@ premise:
         let active = load_active_world(Some(store_root.as_path()))?;
         assert_eq!(active.world_id, "stw_active_test");
         assert_eq!(active.session_id, "session_active_test");
+        Ok(())
+    }
+
+    #[test]
+    fn optional_active_world_returns_none_for_fresh_store() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store_root = temp.path().join("store");
+
+        let active = load_active_world_if_present(Some(store_root.as_path()))?;
+
+        assert!(active.is_none());
         Ok(())
     }
 }

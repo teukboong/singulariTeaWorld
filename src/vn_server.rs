@@ -15,8 +15,8 @@ use crate::projection_health::{ProjectionHealthReport, build_projection_health_r
 use crate::repair_extra_memory_projection;
 use crate::start::{StartWorldOptions, start_world};
 use crate::store::{
-    WORLD_FILENAME, read_json, resolve_store_paths, resolve_world_id, save_active_world,
-    world_file_paths, write_json,
+    WORLD_FILENAME, load_active_world_if_present, read_json, resolve_store_paths, resolve_world_id,
+    save_active_world, world_file_paths, write_json,
 };
 use crate::transfer::{ExportWorldOptions, ImportWorldOptions, export_world, import_world};
 use crate::turn::{AdvanceTurnOptions, advance_turn};
@@ -313,11 +313,11 @@ struct HttpResponse {
 ///
 /// # Errors
 ///
-/// Returns an error when the active world cannot be resolved, the host is not
+/// Returns an error when an explicit world cannot be resolved, the host is not
 /// loopback/Tailscale-scoped, or the TCP listener cannot bind.
 pub fn serve_vn(options: &VnServeOptions) -> Result<()> {
     ensure_allowed_vn_host(options.host.as_str())?;
-    let world_id = resolve_world_id(options.store_root.as_deref(), options.world_id.as_deref())?;
+    let world_id = initial_vn_world_id(options)?;
     let state = VnServerState {
         store_root: options.store_root.clone(),
         world_id: Mutex::new(world_id),
@@ -326,7 +326,10 @@ pub fn serve_vn(options: &VnServeOptions) -> Result<()> {
     let listener = TcpListener::bind(bind_addr.as_str())
         .with_context(|| format!("vn server bind failed: {bind_addr}"))?;
     println!("vn server: http://{bind_addr}/");
-    println!("world: {}", state.world_id()?);
+    match state.world_id() {
+        Ok(world_id) => println!("world: {world_id}"),
+        Err(_) => println!("world: <none>"),
+    }
     wake_existing_pending_work_once(&state);
     for stream in listener.incoming() {
         match stream {
@@ -343,6 +346,15 @@ pub fn serve_vn(options: &VnServeOptions) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn initial_vn_world_id(options: &VnServeOptions) -> Result<String> {
+    if options.world_id.is_some() {
+        return resolve_world_id(options.store_root.as_deref(), options.world_id.as_deref());
+    }
+    Ok(load_active_world_if_present(options.store_root.as_deref())?
+        .map(|binding| binding.world_id)
+        .unwrap_or_default())
 }
 
 fn route_request(state: &VnServerState, request: &HttpRequest) -> HttpResponse {
@@ -1358,7 +1370,7 @@ fn summarize_prompt(prompt: &str) -> String {
 }
 
 fn world_list(state: &VnServerState) -> Result<VnWorldListResponse> {
-    let active_world_id = state.world_id()?;
+    let active_world_id = state.world_id().unwrap_or_default();
     Ok(VnWorldListResponse {
         active_world_id,
         worlds: list_worlds(state)?,
@@ -1562,10 +1574,15 @@ fn world_summary(state: &VnServerState, world_id: &str) -> Result<VnWorldSummary
 
 impl VnServerState {
     fn world_id(&self) -> Result<String> {
-        self.world_id
+        let world_id = self
+            .world_id
             .lock()
             .map(|world_id| world_id.clone())
-            .map_err(|_| anyhow::anyhow!("vn server world lock poisoned"))
+            .map_err(|_| anyhow::anyhow!("vn server world lock poisoned"))?;
+        if world_id.is_empty() {
+            bail!("no active world selected");
+        }
+        Ok(world_id)
     }
 
     fn set_world_id(&self, next_world_id: &str) -> Result<()> {
@@ -1869,11 +1886,12 @@ fn choose_request_body(input: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        VnAgentPendingResponse, VnCgRetryRequest, VnNewWorldRequest, VnSaveWorldResponse,
-        VnServerState, VnWorldSwitchResponse, cg_gallery, cg_retry_response, choose_request_body,
-        choose_response, ensure_allowed_vn_host, load_request_body, load_world_response, new_world,
-        read_world_asset, repair_world_db_response, runtime_status, save_request_body,
-        save_world_response, validate_vn_input, world_list,
+        DEFAULT_HOST, VnAgentPendingResponse, VnCgRetryRequest, VnNewWorldRequest,
+        VnSaveWorldResponse, VnServeOptions, VnServerState, VnWorldSwitchResponse, cg_gallery,
+        cg_retry_response, choose_request_body, choose_response, ensure_allowed_vn_host,
+        initial_vn_world_id, load_request_body, load_world_response, new_world, read_world_asset,
+        repair_world_db_response, runtime_status, save_request_body, save_world_response,
+        validate_vn_input, world_list,
     };
     use crate::backend_selection::{WorldTextBackend, WorldVisualBackend};
     use crate::job_ledger::{WorldJobKind, WorldJobStatus};
@@ -2048,6 +2066,41 @@ premise:
         };
         assert_eq!(backend_selection.text_backend, WorldTextBackend::Webgpt);
         assert_eq!(backend_selection.visual_backend, WorldVisualBackend::Webgpt);
+        Ok(())
+    }
+
+    #[test]
+    fn world_launcher_allows_fresh_store_without_active_world() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let state = VnServerState {
+            store_root: Some(store.clone()),
+            world_id: Mutex::new(initial_vn_world_id(&VnServeOptions {
+                store_root: Some(store),
+                world_id: None,
+                host: DEFAULT_HOST.to_owned(),
+                port: 4188,
+            })?),
+        };
+
+        assert!(state.world_id().is_err());
+        let initial_list = world_list(&state)?;
+        assert!(initial_list.active_world_id.is_empty());
+        assert!(initial_list.worlds.is_empty());
+
+        let response = new_world(
+            &state,
+            VnNewWorldRequest {
+                seed_text: "중세 변경 마을, 남자 순찰자, 마법 길표식".to_owned(),
+                title: Some("Fresh launcher world".to_owned()),
+                randomize_opening_seed: false,
+                text_backend: Some(WorldTextBackend::Webgpt),
+                visual_backend: Some(WorldVisualBackend::Webgpt),
+            },
+        )?;
+
+        assert_eq!(response.packet.title, "Fresh launcher world");
+        assert_eq!(state.world_id()?, response.active_world_id);
         Ok(())
     }
 
