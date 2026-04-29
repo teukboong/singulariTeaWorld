@@ -376,6 +376,7 @@ mod tests {
             location_events: Vec::new(),
             extra_contacts: Vec::new(),
             hidden_state_delta: Vec::new(),
+            needs_context: Vec::new(),
             next_choices: vec![TurnChoice {
                 slot: 1,
                 tag: "관찰".to_owned(),

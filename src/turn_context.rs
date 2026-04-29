@@ -36,11 +36,16 @@ impl Default for TurnContextAssemblyPolicy {
                 "memory_revival.active_body_resource_state".to_owned(),
                 "memory_revival.active_location_graph".to_owned(),
                 "memory_revival.active_character_text_design".to_owned(),
+                "memory_revival.active_world_lore".to_owned(),
+                "memory_revival.active_relationship_graph".to_owned(),
                 "memory_revival.active_change_ledger".to_owned(),
                 "memory_revival.active_pattern_debt".to_owned(),
                 "memory_revival.active_belief_graph".to_owned(),
                 "memory_revival.active_world_process_clock".to_owned(),
                 "memory_revival.active_player_intent_trace".to_owned(),
+                "memory_revival.active_turn_retrieval_controller".to_owned(),
+                "memory_revival.selected_context_capsules".to_owned(),
+                "memory_revival.active_autobiographical_index".to_owned(),
                 "memory_revival.active_memory_revival.active_relationship_graph".to_owned(),
                 "memory_revival.active_memory_revival.active_world_lore".to_owned(),
                 "memory_revival.active_memory_revival.visible_prompt_revival".to_owned(),
@@ -79,17 +84,22 @@ mod tests {
     use crate::agent_bridge::{
         AgentOutputContract, AgentPrivateAdjudicationContext, AgentVisibleContext,
     };
+    use crate::autobiographical_index::AutobiographicalIndexPacket;
     use crate::belief_graph::BeliefGraphPacket;
     use crate::body_resource::BodyResourcePacket;
     use crate::change_ledger::ChangeLedgerPacket;
     use crate::character_text_design::CharacterTextDesignPacket;
+    use crate::context_capsule::ContextCapsuleSelection;
     use crate::extra_memory::ExtraMemoryPacket;
     use crate::location_graph::LocationGraphPacket;
     use crate::narrative_style_state::NarrativeStyleState;
     use crate::pattern_debt::PatternDebtPacket;
     use crate::player_intent::PlayerIntentTracePacket;
     use crate::plot_thread::PlotThreadPacket;
+    use crate::relationship_graph::RelationshipGraphPacket;
     use crate::scene_pressure::ScenePressurePacket;
+    use crate::turn_retrieval_controller::TurnRetrievalControllerPacket;
+    use crate::world_lore::WorldLorePacket;
     use crate::world_process_clock::WorldProcessClockPacket;
 
     #[test]
@@ -112,12 +122,17 @@ mod tests {
                 active_body_resource_state: BodyResourcePacket::default(),
                 active_location_graph: LocationGraphPacket::default(),
                 active_character_text_design: CharacterTextDesignPacket::default(),
+                active_world_lore: WorldLorePacket::default(),
+                active_relationship_graph: RelationshipGraphPacket::default(),
                 active_change_ledger: ChangeLedgerPacket::default(),
                 active_pattern_debt: PatternDebtPacket::default(),
                 active_belief_graph: BeliefGraphPacket::default(),
                 active_world_process_clock: WorldProcessClockPacket::default(),
                 active_player_intent_trace: PlayerIntentTracePacket::default(),
                 active_narrative_style_state: NarrativeStyleState::default(),
+                active_turn_retrieval_controller: TurnRetrievalControllerPacket::default(),
+                selected_context_capsules: ContextCapsuleSelection::default(),
+                active_autobiographical_index: AutobiographicalIndexPacket::default(),
             },
             private_adjudication_context: AgentPrivateAdjudicationContext {
                 hidden_timers: Vec::new(),

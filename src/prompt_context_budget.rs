@@ -15,6 +15,7 @@ const WORLD_PROCESSES_PROMPT_LIMIT: usize = 8;
 const AFFORDANCE_SLOTS_PROMPT_LIMIT: usize = 5;
 const ACTIVE_CHANGES_PROMPT_LIMIT: usize = 12;
 const ACTIVE_PATTERN_DEBT_PROMPT_LIMIT: usize = 8;
+const SELECTED_CONTEXT_CAPSULE_PROMPT_LIMIT: usize = 8;
 const OMITTED_DEBUG_SECTIONS_PROMPT_LIMIT: usize = 16;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -62,6 +63,7 @@ pub enum PromptContextInclusionReason {
     DerivedVisibleConstraint,
     AdjudicationBoundary,
     SourceOfTruthPolicy,
+    SelectedContextCapsule,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -69,6 +71,7 @@ pub enum PromptContextInclusionReason {
 pub enum PromptContextExclusionReason {
     DebugOnlySection,
     BroadSourceSection,
+    ContextCapsuleRejected,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -102,6 +105,7 @@ pub struct PromptContextBudgetReportSource<'a> {
     pub world_process_clock: &'a WorldProcessClockPacket,
     pub active_change_ledger: &'a Value,
     pub active_pattern_debt: &'a Value,
+    pub selected_context_capsules: &'a Value,
     pub omitted_debug_sections: &'a [String],
 }
 
@@ -120,7 +124,7 @@ pub fn compile_prompt_context_budget_report(
         turn_id: source.turn_id.to_owned(),
         budgets: compile_budget_buckets(source)?,
         included: compile_inclusions(source)?,
-        excluded: compile_exclusions(source.omitted_debug_sections),
+        excluded: compile_exclusions(source)?,
         compiler_policy: PromptContextBudgetPolicy::default(),
     })
 }
@@ -185,6 +189,18 @@ fn compile_budget_buckets(
     )?;
     insert_budget(
         &mut budgets,
+        "selected_context_capsules",
+        SELECTED_CONTEXT_CAPSULE_PROMPT_LIMIT,
+        array_len(
+            source
+                .selected_context_capsules
+                .pointer("/selected_capsules")
+                .unwrap_or(source.selected_context_capsules),
+            "selected_context_capsules.selected_capsules",
+        )?,
+    )?;
+    insert_budget(
+        &mut budgets,
         "omitted_debug_sections",
         OMITTED_DEBUG_SECTIONS_PROMPT_LIMIT,
         source.omitted_debug_sections.len(),
@@ -223,6 +239,7 @@ fn compile_inclusions(
     ];
     append_derived_inclusions(&mut included, source);
     append_selected_memory_inclusions(&mut included, source.selected_memory_items)?;
+    append_selected_context_capsule_inclusions(&mut included, source.selected_context_capsules)?;
     Ok(included)
 }
 
@@ -270,8 +287,11 @@ fn append_derived_inclusions(
     ]);
 }
 
-fn compile_exclusions(omitted_debug_sections: &[String]) -> Vec<PromptContextBudgetExclusion> {
-    omitted_debug_sections
+fn compile_exclusions(
+    source: PromptContextBudgetReportSource<'_>,
+) -> Result<Vec<PromptContextBudgetExclusion>> {
+    let mut excluded = source
+        .omitted_debug_sections
         .iter()
         .map(|section| PromptContextBudgetExclusion {
             section: section.clone(),
@@ -279,7 +299,38 @@ fn compile_exclusions(omitted_debug_sections: &[String]) -> Vec<PromptContextBud
             reason: exclusion_reason(section),
             revivable: revivable_debug_section(section),
         })
-        .collect()
+        .collect();
+    append_context_capsule_exclusions(&mut excluded, source.selected_context_capsules)?;
+    Ok(excluded)
+}
+
+fn append_context_capsule_exclusions(
+    excluded: &mut Vec<PromptContextBudgetExclusion>,
+    selected_context_capsules: &Value,
+) -> Result<()> {
+    let Some(rejected) = selected_context_capsules.pointer("/rejected_capsules") else {
+        return Ok(());
+    };
+    let Value::Array(items) = rejected else {
+        bail!("prompt context selected_context_capsules.rejected_capsules must be an array");
+    };
+    for (index, item) in items.iter().enumerate() {
+        let capsule_id = item
+            .pointer("/capsule_id")
+            .and_then(Value::as_str)
+            .with_context(|| {
+                format!(
+                    "prompt context selected_context_capsules.rejected_capsules[{index}] missing capsule_id"
+                )
+            })?;
+        excluded.push(PromptContextBudgetExclusion {
+            section: "visible_context.selected_context_capsules".to_owned(),
+            source_id: capsule_id.to_owned(),
+            reason: PromptContextExclusionReason::ContextCapsuleRejected,
+            revivable: true,
+        });
+    }
+    Ok(())
 }
 
 fn insert_budget(
@@ -343,6 +394,35 @@ fn append_selected_memory_inclusions(
     Ok(())
 }
 
+fn append_selected_context_capsule_inclusions(
+    included: &mut Vec<PromptContextBudgetInclusion>,
+    selected_context_capsules: &Value,
+) -> Result<()> {
+    let selected = selected_context_capsules
+        .pointer("/selected_capsules")
+        .unwrap_or(selected_context_capsules);
+    let Value::Array(items) = selected else {
+        bail!("prompt context selected_context_capsules.selected_capsules must be an array");
+    };
+    for (index, item) in items.iter().enumerate() {
+        let capsule_id = item
+            .pointer("/capsule_id")
+            .and_then(Value::as_str)
+            .with_context(|| {
+                format!(
+                    "prompt context selected_context_capsules.selected_capsules[{index}] missing capsule_id"
+                )
+            })?;
+        included.push(inclusion(
+            "visible_context.selected_context_capsules",
+            capsule_id,
+            PromptContextInclusionReason::SelectedContextCapsule,
+            false,
+        ));
+    }
+    Ok(())
+}
+
 fn exclusion_reason(section: &str) -> PromptContextExclusionReason {
     if section.contains("active_memory_revival") {
         PromptContextExclusionReason::BroadSourceSection
@@ -396,6 +476,30 @@ mod tests {
     }
 
     #[test]
+    fn reports_selected_and_rejected_context_capsules() -> anyhow::Result<()> {
+        let report = compile_prompt_context_budget_report(sample_source_with_capsules(
+            serde_json::json!([]),
+            serde_json::json!({
+                "selected_capsules": [{"capsule_id": "world_lore:gate"}],
+                "rejected_capsules": [{"capsule_id": "relationship:stale"}]
+            }),
+            Vec::new(),
+        ))?;
+
+        assert!(report.included.iter().any(|entry| {
+            entry.section == "visible_context.selected_context_capsules"
+                && entry.source_id == "world_lore:gate"
+                && entry.reason == PromptContextInclusionReason::SelectedContextCapsule
+        }));
+        assert!(report.excluded.iter().any(|entry| {
+            entry.source_id == "relationship:stale"
+                && entry.reason == PromptContextExclusionReason::ContextCapsuleRejected
+                && entry.revivable
+        }));
+        Ok(())
+    }
+
+    #[test]
     fn rejects_selected_memory_without_source_id() {
         let result = compile_prompt_context_budget_report(sample_source(
             serde_json::json!([{"payload": {"visible_summary": "missing id"}}]),
@@ -427,7 +531,20 @@ mod tests {
         selected_memory_items: Value,
         omitted_debug_sections: Vec<String>,
     ) -> PromptContextBudgetReportSource<'static> {
+        sample_source_with_capsules(
+            selected_memory_items,
+            serde_json::json!({"selected_capsules": []}),
+            omitted_debug_sections,
+        )
+    }
+
+    fn sample_source_with_capsules(
+        selected_memory_items: Value,
+        selected_context_capsules: Value,
+        omitted_debug_sections: Vec<String>,
+    ) -> PromptContextBudgetReportSource<'static> {
         let selected_memory_items = Box::leak(Box::new(selected_memory_items));
+        let selected_context_capsules = Box::leak(Box::new(selected_context_capsules));
         let omitted_debug_sections = Box::leak(Box::new(omitted_debug_sections));
         let affordance_graph = Box::leak(Box::new(AffordanceGraphPacket {
             schema_version: AFFORDANCE_GRAPH_PACKET_SCHEMA_VERSION.to_owned(),
@@ -454,7 +571,6 @@ mod tests {
         }));
         let active_change_ledger = Box::leak(Box::new(serde_json::json!({"active_changes": []})));
         let active_pattern_debt = Box::leak(Box::new(serde_json::json!({"active_patterns": []})));
-
         PromptContextBudgetReportSource {
             world_id: "stw_budget",
             turn_id: "turn_0100",
@@ -464,6 +580,7 @@ mod tests {
             world_process_clock,
             active_change_ledger,
             active_pattern_debt,
+            selected_context_capsules,
             omitted_debug_sections,
         }
     }

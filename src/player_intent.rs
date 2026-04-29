@@ -202,6 +202,7 @@ mod tests {
             location_events: Vec::new(),
             extra_contacts: Vec::new(),
             hidden_state_delta: Vec::new(),
+            needs_context: Vec::new(),
             next_choices: Vec::new(),
         };
         let plan = prepare_player_intent_event_plan(

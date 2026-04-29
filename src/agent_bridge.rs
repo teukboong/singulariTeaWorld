@@ -1,3 +1,6 @@
+use crate::autobiographical_index::{
+    AutobiographicalIndexInput, AutobiographicalIndexPacket, rebuild_autobiographical_index,
+};
 use crate::belief_graph::{
     BeliefGraphPacket, append_belief_event_plan, load_belief_graph_state,
     prepare_belief_event_plan, rebuild_belief_graph,
@@ -15,6 +18,10 @@ use crate::character_text_design::{
     CharacterTextDesignPacket, append_character_text_design_event_plan,
     compile_character_text_design_with_projection, load_character_text_design_state,
     prepare_character_text_design_event_plan, rebuild_character_text_design,
+};
+use crate::context_capsule::{
+    ContextCapsuleBuildInput, ContextCapsuleIndex, ContextCapsuleSelection,
+    ContextCapsuleSelectionInput, rebuild_context_capsule_registry, select_context_capsules,
 };
 use crate::extra_memory::{
     ExtraMemoryPacket, commit_extra_memory_projection_terminal, compile_extra_memory_projection,
@@ -48,6 +55,7 @@ use crate::plot_thread::{
 };
 use crate::relationship_graph::{
     RelationshipGraphPacket, append_relationship_graph_event_plan,
+    compile_relationship_graph_from_projection, load_relationship_graph_state,
     prepare_relationship_graph_event_plan, rebuild_relationship_graph,
 };
 use crate::response_context::{
@@ -66,10 +74,14 @@ use crate::store::{
 };
 use crate::turn::{AdvanceTurnOptions, advance_turn};
 use crate::turn_commit::{TurnCommitEnvelope, append_turn_commit_envelope};
+use crate::turn_retrieval_controller::{
+    TurnRetrievalCompileInput, TurnRetrievalControllerPacket, compile_turn_retrieval_controller,
+};
 use crate::vn::{BuildVnPacketOptions, VnPacket, build_vn_packet};
+use crate::world_db::latest_chapter_summaries;
 use crate::world_lore::{
-    WorldLorePacket, append_world_lore_update_plan, prepare_world_lore_update_plan,
-    rebuild_world_lore,
+    WorldLorePacket, append_world_lore_update_plan, compile_world_lore_from_projection,
+    load_world_lore_state, prepare_world_lore_update_plan, rebuild_world_lore,
 };
 use crate::world_process_clock::{
     WorldProcessClockPacket, append_world_process_event_plan, load_world_process_clock_state,
@@ -155,6 +167,10 @@ pub struct AgentVisibleContext {
     #[serde(default)]
     pub active_character_text_design: CharacterTextDesignPacket,
     #[serde(default)]
+    pub active_world_lore: WorldLorePacket,
+    #[serde(default)]
+    pub active_relationship_graph: RelationshipGraphPacket,
+    #[serde(default)]
     pub active_change_ledger: ChangeLedgerPacket,
     #[serde(default)]
     pub active_pattern_debt: PatternDebtPacket,
@@ -166,6 +182,12 @@ pub struct AgentVisibleContext {
     pub active_player_intent_trace: PlayerIntentTracePacket,
     #[serde(default)]
     pub active_narrative_style_state: NarrativeStyleState,
+    #[serde(default)]
+    pub active_turn_retrieval_controller: TurnRetrievalControllerPacket,
+    #[serde(default)]
+    pub selected_context_capsules: ContextCapsuleSelection,
+    #[serde(default)]
+    pub active_autobiographical_index: AutobiographicalIndexPacket,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -262,7 +284,20 @@ pub struct AgentTurnResponse {
     #[serde(default)]
     pub hidden_state_delta: Vec<AgentHiddenStateDelta>,
     #[serde(default)]
+    pub needs_context: Vec<AgentContextRepairRequest>,
+    #[serde(default)]
     pub next_choices: Vec<TurnChoice>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentContextRepairRequest {
+    pub request_id: String,
+    #[serde(default)]
+    pub capsule_kinds: Vec<String>,
+    pub query: String,
+    pub reason: String,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -701,6 +736,43 @@ pub fn commit_agent_turn(options: &AgentCommitTurnOptions) -> Result<CommittedAg
         &files,
         options.world_id.as_str(),
         pending.turn_id.as_str(),
+        "context_capsules",
+        || {
+            let active_world_lore = load_world_lore_state(
+                files.dir.as_path(),
+                WorldLorePacket {
+                    world_id: options.world_id.clone(),
+                    turn_id: pending.turn_id.clone(),
+                    ..WorldLorePacket::default()
+                },
+            )?;
+            let active_relationship_graph = load_relationship_graph_state(
+                files.dir.as_path(),
+                RelationshipGraphPacket {
+                    world_id: options.world_id.clone(),
+                    turn_id: pending.turn_id.clone(),
+                    ..RelationshipGraphPacket::default()
+                },
+            )?;
+            let active_character_text_design = load_character_text_design_state(
+                files.dir.as_path(),
+                pending.visible_context.active_character_text_design.clone(),
+            )?;
+            rebuild_context_capsule_registry(&ContextCapsuleBuildInput {
+                world_dir: files.dir.as_path(),
+                world_id: options.world_id.as_str(),
+                turn_id: pending.turn_id.as_str(),
+                active_world_lore: &active_world_lore,
+                active_relationship_graph: &active_relationship_graph,
+                active_character_text_design: &active_character_text_design,
+            })?;
+            Ok(())
+        },
+    )?;
+    commit_post_advance_materialization(
+        &files,
+        options.world_id.as_str(),
+        pending.turn_id.as_str(),
         "change_ledger",
         || {
             append_change_event_plan(files.dir.as_path(), &change_event_plan)?;
@@ -941,6 +1013,12 @@ fn validate_agent_response(pending: &PendingAgentTurn, response: &AgentTurnRespo
             pending.turn_id,
             response.world_id,
             response.turn_id
+        );
+    }
+    if !response.needs_context.is_empty() {
+        bail!(
+            "agent response requested bounded context repair before commit: requests={}",
+            response.needs_context.len()
         );
     }
     if response.visible_scene.schema_version != NARRATIVE_SCENE_SCHEMA_VERSION {
@@ -1186,6 +1264,15 @@ struct ActiveProjectionContext {
     narrative_style_state: NarrativeStyleState,
 }
 
+struct VisibleTurnRetrievalSource<'a> {
+    plot_threads: &'a PlotThreadPacket,
+    scene_pressure: &'a ScenePressurePacket,
+    relationship_graph: &'a RelationshipGraphPacket,
+    body_resource_state: &'a BodyResourcePacket,
+    location_graph: &'a LocationGraphPacket,
+    projections: &'a ActiveProjectionContext,
+}
+
 fn visible_context(input: &VisibleContextInput<'_>) -> Result<AgentVisibleContext> {
     let files = input.files;
     let snapshot = input.snapshot;
@@ -1219,7 +1306,39 @@ fn visible_context(input: &VisibleContextInput<'_>) -> Result<AgentVisibleContex
         files.dir.as_path(),
         compile_character_text_design_with_projection(input.entities, &context_projection),
     )?;
+    let active_world_lore =
+        load_visible_world_lore(input, next_turn_id.as_str(), &context_projection)?;
+    let active_relationship_graph =
+        load_visible_relationship_graph(input, next_turn_id.as_str(), &context_projection)?;
     let active_projections = load_active_projection_context(input, next_turn_id.as_str())?;
+    let active_turn_retrieval_controller = compile_visible_turn_retrieval_controller(
+        input,
+        next_turn_id.as_str(),
+        &VisibleTurnRetrievalSource {
+            plot_threads: &active_plot_threads,
+            scene_pressure: &active_scene_pressure,
+            relationship_graph: &active_relationship_graph,
+            body_resource_state: &active_body_resource_state,
+            location_graph: &active_location_graph,
+            projections: &active_projections,
+        },
+    )?;
+    let context_capsules = rebuild_and_select_visible_context_capsules(
+        input,
+        next_turn_id.as_str(),
+        &active_world_lore,
+        &active_relationship_graph,
+        &active_character_text_design,
+        &active_turn_retrieval_controller,
+    )?;
+    let active_autobiographical_index = rebuild_visible_autobiographical_index(
+        input,
+        next_turn_id.as_str(),
+        &active_plot_threads,
+        &active_relationship_graph,
+        &active_projections.world_process_clock,
+        &context_capsules.index,
+    )?;
     Ok(AgentVisibleContext {
         location: snapshot.protagonist_state.location.clone(),
         recent_scene: input.current_packet.scene.text_blocks.clone(),
@@ -1241,12 +1360,126 @@ fn visible_context(input: &VisibleContextInput<'_>) -> Result<AgentVisibleContex
         active_body_resource_state,
         active_location_graph,
         active_character_text_design,
+        active_world_lore,
+        active_relationship_graph,
         active_change_ledger: active_projections.change_ledger,
         active_pattern_debt: active_projections.pattern_debt,
         active_belief_graph: active_projections.belief_graph,
         active_world_process_clock: active_projections.world_process_clock,
         active_player_intent_trace: active_projections.player_intent_trace,
         active_narrative_style_state: active_projections.narrative_style_state,
+        active_turn_retrieval_controller,
+        selected_context_capsules: context_capsules.selection,
+        active_autobiographical_index,
+    })
+}
+
+fn compile_visible_turn_retrieval_controller(
+    input: &VisibleContextInput<'_>,
+    turn_id: &str,
+    source: &VisibleTurnRetrievalSource<'_>,
+) -> Result<TurnRetrievalControllerPacket> {
+    compile_turn_retrieval_controller(&TurnRetrievalCompileInput {
+        world_dir: input.files.dir.as_path(),
+        world_id: input.current_packet.world_id.as_str(),
+        turn_id,
+        snapshot: input.snapshot,
+        player_input: input.player_input,
+        active_plot_threads: source.plot_threads,
+        active_scene_pressure: source.scene_pressure,
+        active_relationship_graph: source.relationship_graph,
+        active_body_resource_state: source.body_resource_state,
+        active_location_graph: source.location_graph,
+        active_world_process_clock: &source.projections.world_process_clock,
+        active_player_intent_trace: &source.projections.player_intent_trace,
+    })
+}
+
+fn load_visible_world_lore(
+    input: &VisibleContextInput<'_>,
+    turn_id: &str,
+    context_projection: &crate::response_context::AgentContextProjection,
+) -> Result<WorldLorePacket> {
+    load_world_lore_state(
+        input.files.dir.as_path(),
+        compile_world_lore_from_projection(
+            input.current_packet.world_id.as_str(),
+            turn_id,
+            context_projection,
+            &[],
+        ),
+    )
+}
+
+fn load_visible_relationship_graph(
+    input: &VisibleContextInput<'_>,
+    turn_id: &str,
+    context_projection: &crate::response_context::AgentContextProjection,
+) -> Result<RelationshipGraphPacket> {
+    load_relationship_graph_state(
+        input.files.dir.as_path(),
+        compile_relationship_graph_from_projection(
+            input.current_packet.world_id.as_str(),
+            turn_id,
+            context_projection,
+            &[],
+        ),
+    )
+}
+
+struct VisibleContextCapsules {
+    index: ContextCapsuleIndex,
+    selection: ContextCapsuleSelection,
+}
+
+fn rebuild_and_select_visible_context_capsules(
+    input: &VisibleContextInput<'_>,
+    turn_id: &str,
+    active_world_lore: &WorldLorePacket,
+    active_relationship_graph: &RelationshipGraphPacket,
+    active_character_text_design: &CharacterTextDesignPacket,
+    active_turn_retrieval_controller: &TurnRetrievalControllerPacket,
+) -> Result<VisibleContextCapsules> {
+    let index = rebuild_context_capsule_registry(&ContextCapsuleBuildInput {
+        world_dir: input.files.dir.as_path(),
+        world_id: input.current_packet.world_id.as_str(),
+        turn_id,
+        active_world_lore,
+        active_relationship_graph,
+        active_character_text_design,
+    })?;
+    let selection = select_context_capsules(&ContextCapsuleSelectionInput {
+        world_dir: input.files.dir.as_path(),
+        world_id: input.current_packet.world_id.as_str(),
+        turn_id,
+        player_input: input.player_input,
+        retrieval_controller: active_turn_retrieval_controller,
+    })?;
+    Ok(VisibleContextCapsules { index, selection })
+}
+
+fn rebuild_visible_autobiographical_index(
+    input: &VisibleContextInput<'_>,
+    turn_id: &str,
+    active_plot_threads: &PlotThreadPacket,
+    active_relationship_graph: &RelationshipGraphPacket,
+    active_world_process_clock: &WorldProcessClockPacket,
+    context_capsule_index: &ContextCapsuleIndex,
+) -> Result<AutobiographicalIndexPacket> {
+    let chapter_summaries = latest_chapter_summaries(
+        input.files.dir.as_path(),
+        input.current_packet.world_id.as_str(),
+        8,
+    )?;
+    rebuild_autobiographical_index(&AutobiographicalIndexInput {
+        world_dir: input.files.dir.as_path(),
+        world_id: input.current_packet.world_id.as_str(),
+        turn_id,
+        chapter_summaries: &chapter_summaries,
+        plot_threads: active_plot_threads,
+        relationship_graph: active_relationship_graph,
+        world_process_clock: active_world_process_clock,
+        context_capsule_index,
     })
 }
 
@@ -1399,24 +1632,43 @@ fn ensure_parent_dir(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AGENT_TURN_RESPONSE_SCHEMA_VERSION, AgentCommitTurnOptions, AgentExtraContact,
-        AgentSubmitTurnOptions, AgentTurnResponse, canonical_agent_turn_response,
-        enqueue_agent_turn, load_pending_agent_turn, narrative_budget_for_level,
-        normalize_narrative_level, selected_choice, validate_agent_next_choices,
+        AGENT_PENDING_TURN_SCHEMA_VERSION, AGENT_TURN_RESPONSE_SCHEMA_VERSION,
+        AgentCommitTurnOptions, AgentContextRepairRequest, AgentExtraContact, AgentOutputContract,
+        AgentPrivateAdjudicationContext, AgentSubmitTurnOptions, AgentTurnResponse,
+        AgentVisibleContext, PendingAgentTurn, canonical_agent_turn_response, enqueue_agent_turn,
+        load_pending_agent_turn, narrative_budget_for_level, normalize_narrative_level,
+        selected_choice, validate_agent_next_choices, validate_agent_response,
     };
     use crate::agent_bridge::commit_agent_turn;
+    use crate::autobiographical_index::AutobiographicalIndexPacket;
+    use crate::belief_graph::BeliefGraphPacket;
+    use crate::body_resource::BodyResourcePacket;
+    use crate::change_ledger::ChangeLedgerPacket;
+    use crate::character_text_design::CharacterTextDesignPacket;
+    use crate::context_capsule::ContextCapsuleSelection;
     use crate::extra_memory::{
-        ExtraMemoryProjectionStatus, load_extra_memory_projection_records, load_remembered_extras,
+        ExtraMemoryPacket, ExtraMemoryProjectionStatus, load_extra_memory_projection_records,
+        load_remembered_extras,
     };
+    use crate::location_graph::LocationGraphPacket;
     use crate::models::{
         GUIDE_CHOICE_TAG, NARRATIVE_SCENE_SCHEMA_VERSION, NarrativeScene, TurnChoice, TurnSnapshot,
         default_turn_choices,
     };
+    use crate::narrative_style_state::NarrativeStyleState;
+    use crate::pattern_debt::PatternDebtPacket;
+    use crate::player_intent::PlayerIntentTracePacket;
+    use crate::plot_thread::PlotThreadPacket;
+    use crate::relationship_graph::RelationshipGraphPacket;
+    use crate::scene_pressure::ScenePressurePacket;
     use crate::store::{
         InitWorldOptions, init_world, read_json, resolve_store_paths, world_file_paths,
     };
     use crate::turn_commit::{TURN_COMMITS_FILENAME, TurnCommitEnvelope, TurnCommitStatus};
+    use crate::turn_retrieval_controller::TurnRetrievalControllerPacket;
     use crate::vn::{BuildVnPacketOptions, build_vn_packet};
+    use crate::world_lore::WorldLorePacket;
+    use crate::world_process_clock::WorldProcessClockPacket;
     use tempfile::tempdir;
 
     fn seed_body(world_id: &str) -> String {
@@ -1522,6 +1774,7 @@ premise:
             location_events: Vec::new(),
             extra_contacts: Vec::new(),
             hidden_state_delta: Vec::new(),
+            needs_context: Vec::new(),
             next_choices: legacy_slot_contract_choices(),
         };
 
@@ -1536,6 +1789,97 @@ premise:
         assert!(canonical.next_choices[5].intent.contains("6 뒤에"));
         assert_eq!(canonical.next_choices[6].slot, 7);
         assert_eq!(canonical.next_choices[6].tag, GUIDE_CHOICE_TAG);
+    }
+
+    #[test]
+    fn needs_context_request_rejects_before_commit_contract() {
+        let pending = PendingAgentTurn {
+            schema_version: AGENT_PENDING_TURN_SCHEMA_VERSION.to_owned(),
+            world_id: "stw_needs_context".to_owned(),
+            turn_id: "turn_0001".to_owned(),
+            status: "pending".to_owned(),
+            player_input: "문 앞의 낡은 표식을 읽는다".to_owned(),
+            selected_choice: None,
+            visible_context: AgentVisibleContext {
+                location: "gate".to_owned(),
+                recent_scene: Vec::new(),
+                known_facts: Vec::new(),
+                voice_anchors: Vec::new(),
+                extra_memory: ExtraMemoryPacket::default(),
+                active_scene_pressure: ScenePressurePacket::default(),
+                active_plot_threads: PlotThreadPacket::default(),
+                active_body_resource_state: BodyResourcePacket::default(),
+                active_location_graph: LocationGraphPacket::default(),
+                active_character_text_design: CharacterTextDesignPacket::default(),
+                active_world_lore: WorldLorePacket::default(),
+                active_relationship_graph: RelationshipGraphPacket::default(),
+                active_change_ledger: ChangeLedgerPacket::default(),
+                active_pattern_debt: PatternDebtPacket::default(),
+                active_belief_graph: BeliefGraphPacket::default(),
+                active_world_process_clock: WorldProcessClockPacket::default(),
+                active_player_intent_trace: PlayerIntentTracePacket::default(),
+                active_narrative_style_state: NarrativeStyleState::default(),
+                active_turn_retrieval_controller: TurnRetrievalControllerPacket::default(),
+                selected_context_capsules: ContextCapsuleSelection::default(),
+                active_autobiographical_index: AutobiographicalIndexPacket::default(),
+            },
+            private_adjudication_context: AgentPrivateAdjudicationContext {
+                hidden_timers: Vec::new(),
+                unrevealed_constraints: Vec::new(),
+                plausibility_gates: Vec::new(),
+            },
+            output_contract: AgentOutputContract {
+                language: "ko".to_owned(),
+                must_return_json: true,
+                hidden_truth_must_not_appear_in_visible_text: true,
+                narrative_level: 1,
+                narrative_budget: narrative_budget_for_level(Some(1)),
+            },
+            pending_ref: "agent_bridge/pending_turn.json".to_owned(),
+            created_at: "2026-04-29T00:00:00Z".to_owned(),
+        };
+        let response = AgentTurnResponse {
+            schema_version: AGENT_TURN_RESPONSE_SCHEMA_VERSION.to_owned(),
+            world_id: "stw_needs_context".to_owned(),
+            turn_id: "turn_0001".to_owned(),
+            visible_scene: NarrativeScene {
+                schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
+                speaker: None,
+                text_blocks: vec!["장면을 닫지 않는다.".to_owned()],
+                tone_notes: Vec::new(),
+            },
+            adjudication: None,
+            canon_event: None,
+            entity_updates: Vec::new(),
+            relationship_updates: Vec::new(),
+            plot_thread_events: Vec::new(),
+            scene_pressure_events: Vec::new(),
+            world_lore_updates: Vec::new(),
+            character_text_design_updates: Vec::new(),
+            body_resource_events: Vec::new(),
+            location_events: Vec::new(),
+            extra_contacts: Vec::new(),
+            hidden_state_delta: Vec::new(),
+            needs_context: vec![AgentContextRepairRequest {
+                request_id: "needs_context:turn_0001:ash_mark".to_owned(),
+                capsule_kinds: vec!["world_lore".to_owned()],
+                query: "ash mark custom".to_owned(),
+                reason: "selected capsules do not explain the visible mark".to_owned(),
+                evidence_refs: vec![
+                    "prompt_context.visible_context.selected_context_capsules".to_owned(),
+                ],
+            }],
+            next_choices: scene_specific_choices(),
+        };
+
+        let Err(error) = validate_agent_response(&pending, &response) else {
+            panic!("needs_context must reject before turn commit");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("requested bounded context repair before commit")
+        );
     }
 
     #[test]
@@ -1611,6 +1955,7 @@ premise:
                 location_events: Vec::new(),
                 extra_contacts: Vec::new(),
                 hidden_state_delta: Vec::new(),
+                needs_context: Vec::new(),
                 next_choices: scene_specific_choices(),
             },
         })?;
@@ -1701,6 +2046,7 @@ premise:
                     open_hooks: vec!["may report suspicious behavior".to_owned()],
                 }],
                 hidden_state_delta: Vec::new(),
+                needs_context: Vec::new(),
                 next_choices: scene_specific_choices(),
             },
         })?;
@@ -1789,6 +2135,7 @@ premise:
                     open_hooks: Vec::new(),
                 }],
                 hidden_state_delta: Vec::new(),
+                needs_context: Vec::new(),
                 next_choices: scene_specific_choices(),
             },
         });
@@ -1846,6 +2193,7 @@ premise:
                 location_events: Vec::new(),
                 extra_contacts: Vec::new(),
                 hidden_state_delta: Vec::new(),
+                needs_context: Vec::new(),
                 next_choices: Vec::new(),
             },
         }) else {
@@ -1902,6 +2250,7 @@ premise:
                 location_events: Vec::new(),
                 extra_contacts: Vec::new(),
                 hidden_state_delta: Vec::new(),
+                needs_context: Vec::new(),
                 next_choices: default_turn_choices(),
             },
         }) else {
@@ -1939,6 +2288,7 @@ premise:
             body_resource_events: Vec::new(),
             location_events: Vec::new(),
             hidden_state_delta: Vec::new(),
+            needs_context: Vec::new(),
             extra_contacts: Vec::new(),
         };
         response.next_choices[2].intent = "char:anchor의 반 걸음 뒤에 멈춰 선다".to_owned();
@@ -2010,6 +2360,7 @@ premise:
                     open_hooks: Vec::new(),
                 }],
                 hidden_state_delta: Vec::new(),
+                needs_context: Vec::new(),
                 next_choices: scene_specific_choices(),
             },
         }) else {

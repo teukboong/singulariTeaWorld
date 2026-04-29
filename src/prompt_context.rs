@@ -49,6 +49,9 @@ pub struct PromptVisibleContext {
     pub active_belief_graph: Value,
     pub active_world_process_clock: Value,
     pub active_player_intent_trace: Value,
+    pub active_turn_retrieval_controller: Value,
+    pub selected_context_capsules: Value,
+    pub active_autobiographical_index: Value,
     pub selected_memory_items: Value,
 }
 
@@ -93,6 +96,7 @@ impl Default for PromptContextPolicy {
                 "Broad source revival remains available for debug and console surfaces, not for narrative dispatch.".to_owned(),
                 "Visible context may shape prose and choices; adjudication context may shape outcomes but must not be copied into player-visible text.".to_owned(),
                 "Selected memory items are the only long-memory items physically present in the text prompt.".to_owned(),
+                "Selected context capsules replace covered broad prompt projections; broad projection files remain source-of-truth/debug surfaces.".to_owned(),
             ],
         }
     }
@@ -135,20 +139,11 @@ pub fn assemble_prompt_context_packet(
         "/output_contract",
         "output_contract",
     )?;
-    let known_facts = required_path(memory, "/known_facts")?.clone();
-    let active_change_ledger = required_path(memory, "/active_change_ledger")?.clone();
-    let active_pattern_debt = required_path(memory, "/active_pattern_debt")?.clone();
-    let active_belief_graph = required_path(memory, "/active_belief_graph")?.clone();
-    let active_world_process_clock = required_path(memory, "/active_world_process_clock")?.clone();
-    let active_player_intent_trace = required_path(memory, "/active_player_intent_trace")?.clone();
-    let active_narrative_style_state =
-        required_path(memory, "/active_narrative_style_state")?.clone();
-    let selected_memory_items =
-        required_path(active_memory, "/visible_prompt_revival/items")?.clone();
+    let prompt_memory = load_prompt_memory_values(memory, active_memory)?;
     let derived = compile_derived_context_packets(CompileDerivedContextSource {
         turn_context,
-        known_facts: &known_facts,
-        selected_memory_items: &selected_memory_items,
+        known_facts: &prompt_memory.known_facts,
+        selected_memory_items: &prompt_memory.selected_memory_items,
         scene_pressure: &scene_pressure,
         body_resource: &body_resource,
         location_graph: &location_graph,
@@ -157,25 +152,19 @@ pub fn assemble_prompt_context_packet(
     let prompt_policy = PromptContextPolicy::default();
     let budget_report = compile_prompt_budget_report(CompilePromptBudgetSource {
         turn_context,
-        selected_memory_items: &selected_memory_items,
+        selected_memory_items: &prompt_memory.selected_memory_items,
         affordance_graph: &derived.affordance_graph,
         belief_graph: &derived.belief_graph,
         world_process_clock: &derived.world_process_clock,
-        active_change_ledger: &active_change_ledger,
-        active_pattern_debt: &active_pattern_debt,
+        active_change_ledger: &prompt_memory.active_change_ledger,
+        active_pattern_debt: &prompt_memory.active_pattern_debt,
+        selected_context_capsules: &prompt_memory.selected_context_capsules,
         prompt_policy: &prompt_policy,
     })?;
 
     let visible_context = compile_visible_context(VisibleContextSource {
         memory,
-        known_facts,
-        active_change_ledger,
-        active_pattern_debt,
-        active_belief_graph,
-        active_world_process_clock,
-        active_player_intent_trace,
-        active_narrative_style_state,
-        selected_memory_items,
+        prompt_memory,
         scene_pressure: &scene_pressure,
         body_resource: &body_resource,
         location_graph: &location_graph,
@@ -202,6 +191,43 @@ pub fn assemble_prompt_context_packet(
         source_of_truth_policy: required_path(source, "/source_of_truth_policy")?.clone(),
         prompt_policy,
         budget_report,
+    })
+}
+
+struct PromptMemoryValues {
+    known_facts: Value,
+    active_change_ledger: Value,
+    active_pattern_debt: Value,
+    active_belief_graph: Value,
+    active_world_process_clock: Value,
+    active_player_intent_trace: Value,
+    active_narrative_style_state: Value,
+    active_turn_retrieval_controller: Value,
+    selected_context_capsules: Value,
+    active_autobiographical_index: Value,
+    selected_memory_items: Value,
+}
+
+fn load_prompt_memory_values(memory: &Value, active_memory: &Value) -> Result<PromptMemoryValues> {
+    Ok(PromptMemoryValues {
+        known_facts: required_path(memory, "/known_facts")?.clone(),
+        active_change_ledger: required_path(memory, "/active_change_ledger")?.clone(),
+        active_pattern_debt: required_path(memory, "/active_pattern_debt")?.clone(),
+        active_belief_graph: required_path(memory, "/active_belief_graph")?.clone(),
+        active_world_process_clock: required_path(memory, "/active_world_process_clock")?.clone(),
+        active_player_intent_trace: required_path(memory, "/active_player_intent_trace")?.clone(),
+        active_narrative_style_state: required_path(memory, "/active_narrative_style_state")?
+            .clone(),
+        active_turn_retrieval_controller: required_path(
+            memory,
+            "/active_turn_retrieval_controller",
+        )?
+        .clone(),
+        selected_context_capsules: required_path(memory, "/selected_context_capsules")?.clone(),
+        active_autobiographical_index: required_path(memory, "/active_autobiographical_index")?
+            .clone(),
+        selected_memory_items: required_path(active_memory, "/visible_prompt_revival/items")?
+            .clone(),
     })
 }
 
@@ -257,6 +283,7 @@ struct CompilePromptBudgetSource<'a> {
     world_process_clock: &'a WorldProcessClockPacket,
     active_change_ledger: &'a Value,
     active_pattern_debt: &'a Value,
+    selected_context_capsules: &'a Value,
     prompt_policy: &'a PromptContextPolicy,
 }
 
@@ -272,20 +299,14 @@ fn compile_prompt_budget_report(
         world_process_clock: source.world_process_clock,
         active_change_ledger: source.active_change_ledger,
         active_pattern_debt: source.active_pattern_debt,
+        selected_context_capsules: source.selected_context_capsules,
         omitted_debug_sections: &source.prompt_policy.omitted_debug_sections,
     })
 }
 
 struct VisibleContextSource<'a> {
     memory: &'a Value,
-    known_facts: Value,
-    active_change_ledger: Value,
-    active_pattern_debt: Value,
-    active_belief_graph: Value,
-    active_world_process_clock: Value,
-    active_player_intent_trace: Value,
-    active_narrative_style_state: Value,
-    selected_memory_items: Value,
+    prompt_memory: PromptMemoryValues,
     scene_pressure: &'a ScenePressurePacket,
     body_resource: &'a BodyResourcePacket,
     location_graph: &'a LocationGraphPacket,
@@ -297,7 +318,7 @@ struct VisibleContextSource<'a> {
 fn compile_visible_context(source: VisibleContextSource<'_>) -> Result<PromptVisibleContext> {
     Ok(PromptVisibleContext {
         recent_scene_window: required_path(source.memory, "/recent_scene_window")?.clone(),
-        known_facts: source.known_facts,
+        known_facts: source.prompt_memory.known_facts,
         active_scene_pressure: serde_json::to_value(&source.scene_pressure.visible_active)?,
         active_plot_threads: required_path(source.memory, "/active_plot_threads/active_visible")?
             .clone(),
@@ -306,19 +327,54 @@ fn compile_visible_context(source: VisibleContextSource<'_>) -> Result<PromptVis
         affordance_graph: serde_json::to_value(source.affordance_graph)?,
         belief_graph: serde_json::to_value(source.belief_graph)?,
         world_process_clock: serde_json::to_value(&source.world_process_clock.visible_processes)?,
-        active_character_text_design: required_path(
-            source.memory,
-            "/active_character_text_design",
-        )?
-        .clone(),
-        active_change_ledger: source.active_change_ledger,
-        active_pattern_debt: source.active_pattern_debt,
-        active_belief_graph: source.active_belief_graph,
-        active_world_process_clock: source.active_world_process_clock,
-        active_player_intent_trace: source.active_player_intent_trace,
-        narrative_style_state: source.active_narrative_style_state,
-        selected_memory_items: source.selected_memory_items,
+        active_character_text_design: capsule_covered_prompt_projection(
+            "active_character_text_design",
+            "character_text_design",
+            required_path(source.memory, "/active_character_text_design")?,
+            &source.prompt_memory.selected_context_capsules,
+        ),
+        active_change_ledger: source.prompt_memory.active_change_ledger,
+        active_pattern_debt: source.prompt_memory.active_pattern_debt,
+        active_belief_graph: source.prompt_memory.active_belief_graph,
+        active_world_process_clock: source.prompt_memory.active_world_process_clock,
+        active_player_intent_trace: source.prompt_memory.active_player_intent_trace,
+        active_turn_retrieval_controller: source.prompt_memory.active_turn_retrieval_controller,
+        selected_context_capsules: source.prompt_memory.selected_context_capsules,
+        active_autobiographical_index: source.prompt_memory.active_autobiographical_index,
+        narrative_style_state: source.prompt_memory.active_narrative_style_state,
+        selected_memory_items: source.prompt_memory.selected_memory_items,
     })
+}
+
+fn capsule_covered_prompt_projection(
+    section: &str,
+    capsule_kind: &str,
+    full_projection: &Value,
+    selected_context_capsules: &Value,
+) -> Value {
+    if !has_selected_capsule_kind(selected_context_capsules, capsule_kind) {
+        return full_projection.clone();
+    }
+    serde_json::json!({
+        "covered_by_selected_context_capsules": true,
+        "section": section,
+        "capsule_kind": capsule_kind,
+        "source": "visible_context.selected_context_capsules.selected_capsules",
+    })
+}
+
+fn has_selected_capsule_kind(selected_context_capsules: &Value, capsule_kind: &str) -> bool {
+    selected_context_capsules
+        .pointer("/selected_capsules")
+        .and_then(Value::as_array)
+        .is_some_and(|capsules| {
+            capsules.iter().any(|capsule| {
+                capsule
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| kind == capsule_kind)
+            })
+        })
 }
 
 #[derive(Clone, Copy)]
@@ -475,12 +531,17 @@ mod tests {
                         "compiler_policy": {"source": "test", "nearby_location_budget": 3, "use_rules": []}
                     },
                     "active_character_text_design": {"active_designs": []},
+                    "active_world_lore": {"entries": []},
+                    "active_relationship_graph": {"active_edges": []},
                     "active_change_ledger": {"active_changes": []},
                     "active_pattern_debt": {"active_patterns": []},
                     "active_belief_graph": {"protagonist_visible_beliefs": []},
                     "active_world_process_clock": {"visible_processes": [], "adjudication_only_processes": []},
                     "active_player_intent_trace": {"active_intents": []},
                     "active_narrative_style_state": {"active_style_events": []},
+                    "active_turn_retrieval_controller": {"active_goals": [], "active_role_stance": [], "retrieval_cues": []},
+                    "selected_context_capsules": {"selected_capsules": [], "budget_report": {}},
+                    "active_autobiographical_index": {"periods": [], "general_events": []},
                     "active_memory_revival": {
                         "player_visible_archive_view": {
                             "entries": [{"summary": "debug archive must stay out of prompt context"}]
@@ -571,6 +632,41 @@ mod tests {
                 .section
                 .ends_with("active_memory_revival.active_relationship_graph")
         }));
+        Ok(())
+    }
+
+    #[test]
+    fn selected_context_capsule_replaces_covered_character_text_projection() -> anyhow::Result<()> {
+        let mut turn_context = sample_turn_context();
+        turn_context.source_revival["memory_revival"]["active_character_text_design"] = serde_json::json!({
+            "active_designs": [{
+                "entity_id": "char:gate_guard",
+                "visible_name": "Gate Guard",
+                "speech": ["full broad projection should not be sent"]
+            }]
+        });
+        turn_context.source_revival["memory_revival"]["selected_context_capsules"] = serde_json::json!({
+            "selected_capsules": [{
+                "capsule_id": "character_text:char_gate_guard",
+                "kind": "character_text_design",
+                "reason": "current_goal_match",
+                "body": {
+                    "payload": {
+                        "entity_id": "char:gate_guard",
+                        "speech": ["capsule speech only"]
+                    }
+                }
+            }],
+            "rejected_capsules": [],
+            "budget_report": {}
+        });
+
+        let context = assemble_prompt_context_packet(&turn_context)?;
+        let serialized = serde_json::to_string(&context.visible_context)?;
+
+        assert!(serialized.contains("capsule speech only"));
+        assert!(serialized.contains("covered_by_selected_context_capsules"));
+        assert!(!serialized.contains("full broad projection should not be sent"));
         Ok(())
     }
 }

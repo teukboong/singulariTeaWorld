@@ -1,0 +1,117 @@
+[composer]
+primary = [
+  "[data-testid='prompt-textarea']",
+  "textarea[placeholder*='무엇이든 물어보세요']",
+  "textarea[placeholder*='Message']",
+  "textarea[placeholder*='Send a message']",
+  "textarea[aria-label*='ChatGPT와 채팅']",
+  "div[contenteditable='true'][aria-label*='ChatGPT와 채팅']",
+  "div[contenteditable='true'][role='textbox']"
+]
+
+[send_button]
+primary = [
+  "button[data-testid='send-button']",
+  "button[aria-label*='Send prompt']",
+  "button[aria-label*='Send message']",
+  "button[aria-label*='Send']"
+]
+
+[new_chat]
+primary = [
+  "a[data-testid='create-new-chat-button']",
+  "button[data-testid='create-new-chat-button']",
+  "a[aria-label*='New chat']",
+  "button[aria-label*='New chat']",
+  "a[aria-label*='새 채팅']",
+  "button[aria-label*='새 채팅']",
+  "a[href='/']"
+]
+
+[stop_button]
+primary = [
+  "button[data-testid='stop-button']",
+  "button[aria-label*='Stop']"
+]
+
+[attach_button]
+primary = [
+  "button[data-testid='attachments-button']",
+  "button[aria-label*='Attach']",
+  "button[aria-label*='Upload']"
+]
+
+[file_input]
+primary = [
+  "input[type='file']"
+]
+
+[assistant_turn]
+primary = [
+  "[data-message-author-role='assistant']",
+  "article[data-message-author-role='assistant']",
+  "[data-testid^='conversation-turn-'][data-message-author-role='assistant']"
+]
+
+[assistant_content]
+primary = [
+  "[data-testid='conversation-turn-content']",
+  "[data-testid='message-content']",
+  "[class*='markdown']",
+  ".prose",
+  "main"
+]
+
+[model_label]
+primary = [
+  "[data-testid='model-switcher-dropdown-button']",
+  "button[data-testid*='model']"
+]
+
+[reasoning_button]
+primary = [
+  "button:has-text('생각 수준')",
+  "button:has-text('Thinking')",
+  "button:has-text('심화 추론')",
+  "button:has-text('생각 강도')",
+  "button:has-text('라이트')",
+  "button:has-text('표준')",
+  "button:has-text('확장')",
+  "button:has-text('헤비')",
+  "button:has-text('Light')",
+  "button:has-text('Standard')",
+  "button:has-text('Extended')",
+  "button:has-text('Heavy')",
+  "[data-testid='composer-footer-actions'] button",
+  "button.__composer-pill"
+]
+
+[menu_surface]
+primary = [
+  "[role='menu']",
+  "[role='listbox']",
+  "[data-radix-popper-content-wrapper]",
+  "[data-slot='popover-content']",
+  "[data-state='open']"
+]
+
+[login_hint]
+primary = [
+  "button[data-testid='login-button']",
+  "button:has-text('로그인')",
+  "button:has-text('Log in')",
+  "a[href*='login']",
+  "input[type='email']"
+]
+
+[challenge_hint]
+primary = [
+  "script[src*='/cdn-cgi/challenge-platform/']",
+  "script[src*='challenges.cloudflare.com/turnstile']",
+  "meta[http-equiv='refresh'][content='360']"
+]
+
+[rate_limit_hint]
+primary = [
+  "[data-testid='rate-limit-message']"
+]

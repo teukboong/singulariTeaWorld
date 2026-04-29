@@ -1,6 +1,9 @@
+#![recursion_limit = "256"]
+
 pub mod adjudication;
 pub mod affordance_graph;
 pub mod agent_bridge;
+pub mod autobiographical_index;
 pub mod backend_selection;
 pub mod belief_graph;
 pub mod body_resource;
@@ -8,6 +11,7 @@ pub mod change_ledger;
 pub mod character_text_design;
 pub mod chat;
 pub mod codex_view;
+pub mod context_capsule;
 pub mod entity_update;
 pub mod extra_memory;
 pub mod host_supervisor;
@@ -36,6 +40,7 @@ pub mod transfer;
 pub mod turn;
 pub mod turn_commit;
 pub mod turn_context;
+pub mod turn_retrieval_controller;
 pub mod validate;
 pub mod visual_asset_graph;
 pub mod visual_assets;
@@ -60,6 +65,13 @@ pub use agent_bridge::{
     AgentResponseAdjudication, AgentResponseCanonEvent, AgentSubmitTurnOptions, AgentTurnResponse,
     AgentVisibleContext, AgentVoiceAnchor, CommittedAgentTurn, PendingAgentChoice,
     PendingAgentTurn, commit_agent_turn, enqueue_agent_turn, load_pending_agent_turn,
+};
+pub use autobiographical_index::{
+    AUTOBIOGRAPHICAL_GENERAL_EVENT_SCHEMA_VERSION, AUTOBIOGRAPHICAL_INDEX_FILENAME,
+    AUTOBIOGRAPHICAL_INDEX_SCHEMA_VERSION, AUTOBIOGRAPHICAL_PERIOD_SCHEMA_VERSION,
+    AutobiographicalGeneralEvent, AutobiographicalGeneralEventKind, AutobiographicalIndexInput,
+    AutobiographicalIndexPacket, AutobiographicalIndexPolicy, AutobiographicalPeriod,
+    load_autobiographical_index_state, rebuild_autobiographical_index,
 };
 pub use backend_selection::{
     WORLD_BACKEND_SELECTION_FILENAME, WORLD_BACKEND_SELECTION_SCHEMA_VERSION,
@@ -104,6 +116,18 @@ pub use chat::{
 pub use codex_view::{
     BuildCodexViewOptions, CodexViewSection, build_codex_view, render_codex_view_markdown,
     render_codex_view_section_markdown,
+};
+pub use context_capsule::{
+    CONTEXT_CAPSULE_DIR, CONTEXT_CAPSULE_INDEX_ENTRY_SCHEMA_VERSION,
+    CONTEXT_CAPSULE_INDEX_FILENAME, CONTEXT_CAPSULE_INDEX_SCHEMA_VERSION,
+    CONTEXT_CAPSULE_SCHEMA_VERSION, CONTEXT_CAPSULE_SELECTION_EVENT_SCHEMA_VERSION,
+    CONTEXT_CAPSULE_SELECTION_EVENTS_FILENAME, CONTEXT_CAPSULE_SELECTION_SCHEMA_VERSION,
+    ContextCapsule, ContextCapsuleBudgetReport, ContextCapsuleBuildInput,
+    ContextCapsuleEvidenceRef, ContextCapsuleIndex, ContextCapsuleIndexEntry, ContextCapsuleKind,
+    ContextCapsulePolicy, ContextCapsuleRejectReason, ContextCapsuleSelection,
+    ContextCapsuleSelectionEvent, ContextCapsuleSelectionInput, ContextCapsuleSelectionReason,
+    ContextCapsuleVisibility, RejectedContextCapsule, SelectedContextCapsule,
+    rebuild_context_capsule_registry, select_context_capsules,
 };
 pub use entity_update::{EntityUpdateInput, apply_structured_entity_updates};
 pub use extra_memory::{
@@ -264,6 +288,17 @@ pub use turn_commit::{
 pub use turn_context::{
     TURN_CONTEXT_PACKET_SCHEMA_VERSION, TurnContextAssemblyPolicy, TurnContextPacket,
     assemble_turn_context_packet,
+};
+pub use turn_retrieval_controller::{
+    TURN_RETRIEVAL_CONSTRAINT_SCHEMA_VERSION, TURN_RETRIEVAL_CONTROLLER_FILENAME,
+    TURN_RETRIEVAL_CONTROLLER_SCHEMA_VERSION, TURN_RETRIEVAL_CUE_SCHEMA_VERSION,
+    TURN_RETRIEVAL_EVENT_SCHEMA_VERSION, TURN_RETRIEVAL_EVENTS_FILENAME,
+    TURN_RETRIEVAL_GOAL_SCHEMA_VERSION, TURN_RETRIEVAL_ROLE_STANCE_SCHEMA_VERSION,
+    TurnRetrievalCompileInput, TurnRetrievalConstraint, TurnRetrievalControllerPacket,
+    TurnRetrievalCue, TurnRetrievalCueReason, TurnRetrievalEventKind, TurnRetrievalEventRecord,
+    TurnRetrievalGoal, TurnRetrievalGoalSource, TurnRetrievalPolicy, TurnRetrievalPriority,
+    TurnRetrievalRoleStance, TurnRetrievalTargetKind, TurnRetrievalVisibility,
+    compile_turn_retrieval_controller, load_turn_retrieval_controller_state,
 };
 pub use validate::{ValidationReport, ValidationStatus, validate_world};
 pub use visual_asset_graph::{

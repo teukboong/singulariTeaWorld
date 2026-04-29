@@ -27,6 +27,7 @@ use singulari_world::{
     load_visual_job_claim, release_visual_job_claim, serve_vn,
 };
 use std::collections::HashSet;
+use std::ffi::OsStr;
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -1896,7 +1897,7 @@ fn emit_host_text_and_visual_events_parallel(
             .map(|claim| {
                 scope.spawn(move || match visual_backend {
                     HostWorkerVisualBackend::Webgpt => {
-                        dispatch_visual_job_via_webgpt(store_root, claim, options)
+                        dispatch_visual_job_via_webgpt_with_claim_release(store_root, claim, options)
                             .map(HostVisualDispatchResult::Webgpt)
                     }
                     HostWorkerVisualBackend::None => {
@@ -1935,6 +1936,40 @@ fn emit_host_text_and_visual_events_parallel(
         }
     }
     Ok(emitted_any)
+}
+
+fn dispatch_visual_job_via_webgpt_with_claim_release(
+    store_root: Option<&Path>,
+    claim: &singulari_world::VisualJobClaim,
+    options: &HostWorkerOptions,
+) -> Result<WebGptImageDispatchRecord> {
+    match dispatch_visual_job_via_webgpt(store_root, claim, options) {
+        Ok(record) => Ok(record),
+        Err(dispatch_error) => {
+            let release = release_visual_job_claim(&ReleaseVisualJobClaimOptions {
+                store_root: store_root.map(Path::to_path_buf),
+                world_id: claim.world_id.clone(),
+                slot: claim.slot.clone(),
+            })
+            .with_context(|| {
+                format!(
+                    "failed to release visual job claim after WebGPT image dispatch failed: world_id={}, slot={}, claim_id={}",
+                    claim.world_id, claim.slot, claim.claim_id
+                )
+            })?;
+            let released_claim_id = release
+                .claim
+                .as_ref()
+                .map(|released| released.claim_id.as_str())
+                .unwrap_or("<none>");
+            Err(dispatch_error).with_context(|| {
+                format!(
+                    "released visual job claim after WebGPT image dispatch failed: world_id={}, slot={}, claim_id={}, released_claim_id={released_claim_id}",
+                    claim.world_id, claim.slot, claim.claim_id
+                )
+            })
+        }
+    }
 }
 
 fn emit_text_dispatch_result(
@@ -2039,15 +2074,24 @@ fn claim_next_host_visual_jobs(
     world_id: &str,
     claimed_by: &str,
 ) -> Result<Vec<singulari_world::VisualJobClaim>> {
+    let mut claimed = undispatched_owned_visual_claims(store_root, world_id, claimed_by)?;
     let jobs = current_host_visual_jobs(store_root, world_id)?;
-    let mut claimed = Vec::new();
-    let mut claimed_session_kinds = HashSet::new();
+    let mut claimed_session_kinds = claimed
+        .iter()
+        .map(|claim| WebGptImageSessionKind::from_slot(claim.slot.as_str()))
+        .collect::<HashSet<_>>();
     for job in jobs {
         let session_kind = WebGptImageSessionKind::from_slot(job.slot.as_str());
         if !claimed_session_kinds.insert(session_kind) {
             continue;
         }
-        if load_visual_job_claim(store_root, world_id, job.slot.as_str())?.is_some() {
+        if let Some(existing_claim) = load_visual_job_claim(store_root, world_id, job.slot.as_str())?
+        {
+            if existing_claim.claimed_by == claimed_by
+                && !visual_dispatch_record_exists_for_claim(store_root, &existing_claim)?
+            {
+                claimed.push(existing_claim);
+            }
             continue;
         }
         let outcome = claim_visual_job(&ClaimVisualJobOptions {
@@ -2067,6 +2111,53 @@ fn claim_next_host_visual_jobs(
         claimed.push(*claim);
     }
     Ok(claimed)
+}
+
+fn undispatched_owned_visual_claims(
+    store_root: Option<&Path>,
+    world_id: &str,
+    claimed_by: &str,
+) -> Result<Vec<singulari_world::VisualJobClaim>> {
+    let paths = resolve_store_paths(store_root)?;
+    let claims_dir = paths.worlds_dir.join(world_id).join("visual_jobs").join("claims");
+    if !claims_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut claims = Vec::new();
+    for entry in fs::read_dir(&claims_dir)
+        .with_context(|| format!("failed to read {}", claims_dir.display()))?
+    {
+        let entry = entry.with_context(|| format!("failed to read entry in {}", claims_dir.display()))?;
+        let path = entry.path();
+        if path.extension().and_then(OsStr::to_str) != Some("json") {
+            continue;
+        }
+        let raw = fs::read_to_string(path.as_path())
+            .with_context(|| format!("failed to read visual job claim {}", path.display()))?;
+        let claim = serde_json::from_str::<singulari_world::VisualJobClaim>(raw.as_str())
+            .with_context(|| format!("failed to parse visual job claim {}", path.display()))?;
+        if claim.world_id == world_id
+            && claim.claimed_by == claimed_by
+            && !visual_dispatch_record_exists_for_claim(store_root, &claim)?
+        {
+            claims.push(claim);
+        }
+    }
+    claims.sort_by(|left, right| left.claimed_at.cmp(&right.claimed_at));
+    Ok(claims)
+}
+
+fn visual_dispatch_record_exists_for_claim(
+    store_root: Option<&Path>,
+    claim: &singulari_world::VisualJobClaim,
+) -> Result<bool> {
+    let dispatch_dir = visual_dispatch_dir_for_world(store_root, claim.world_id.as_str())?;
+    let slot_component = safe_file_component(claim.slot.as_str());
+    let claim_component = safe_file_component(claim.claim_id.as_str());
+    let record_path = dispatch_dir.join(format!(
+        "{slot_component}-{claim_component}-webgpt-image.json"
+    ));
+    Ok(record_path.exists())
 }
 
 fn webgpt_image_completed_event(record: &WebGptImageDispatchRecord) -> serde_json::Value {
@@ -2821,7 +2912,7 @@ fn resolve_webgpt_mcp_wrapper(options: &HostWorkerOptions) -> Result<PathBuf> {
         return Ok(wrapper);
     }
     anyhow::bail!(
-        "webgpt text backend requires --webgpt-mcp-wrapper, SINGULARI_WORLD_WEBGPT_MCP_WRAPPER in env/.env, or a sibling webgpt-mcp-checkout/scripts/webgpt-mcp.sh"
+        "webgpt backend requires the bundled webgpt-mcp-checkout/scripts/webgpt-mcp.sh, --webgpt-mcp-wrapper, or SINGULARI_WORLD_WEBGPT_MCP_WRAPPER in env/.env; run scripts/setup-webgpt-runtime.sh on a fresh clone"
     );
 }
 
@@ -3734,6 +3825,7 @@ const AGENT_TURN_RESPONSE_SCHEMA_GUIDE: &str = r#"AgentTurnResponse 스키마:
       "evidence_refs": ["private_adjudication_context"]
     }
   ],
+  "needs_context": [],
   "next_choices": [
     {"slot":1,"tag":"현재 장면에 맞춘 짧은 선택명","intent":"현재 장면 단서와 player_input에서 이어지는 구체 행동"},
     {"slot":2,"tag":"현재 장면에 맞춘 짧은 선택명","intent":"몸, 장소, 물건, 흔적 중 이번 장면에 실제로 나온 단서를 살핀다"},
@@ -3753,6 +3845,7 @@ const AGENT_TURN_RESPONSE_SCHEMA_GUIDE: &str = r#"AgentTurnResponse 스키마:
 - scene_pressure_events는 이번 턴에서 실제로 강해지거나 약해진 visible_active pressure만 적는다. hidden_adjudication_only pressure_id는 절대 쓰지 않는다.
 - entity_updates/relationship_updates/world_lore_updates/character_text_design_updates는 전부 typed schema다. 변화가 없으면 빈 배열이며, 임의 key/value JSON을 넣지 않는다.
 - body_resource_events/location_events도 typed schema다. 장면에 실제 증거가 없으면 빈 배열로 둔다.
+- needs_context는 기본적으로 빈 배열이다. 현재 prompt_context.selected_context_capsules에 없는 맥락 없이는 응답을 닫을 수 없을 때만 request_id/capsule_kinds/query/reason/evidence_refs를 넣는다. needs_context가 비어 있지 않으면 host는 그 응답을 커밋하지 않는다.
 - slot 번호가 기능 계약이다. tag는 UI 문구이므로 장면에 맞게 짧게 바꿔도 된다. 단 slot 7 tag는 "판단 위임"으로 유지한다.
 - extra_contacts는 주변 인물이 플레이어와 직접 상호작용했거나, 의미 있는 목격/거래/도움/위협/감정 흔적을 남겼을 때만 쓴다.
 - extra_contacts 항목을 쓸 때는 surface_label, contact_summary를 반드시 실제 장면 내용으로 채운다. 스키마 설명 문구나 예시 문구를 값으로 복사하지 않는다.
@@ -3834,6 +3927,8 @@ fn build_webgpt_turn_prompt(
 - prompt_context.visible_context.active_belief_graph는 장기 누적된 믿음/오해/추론 경계다. 세계의 객관 진실이 아니라 holder/confidence가 붙은 인식 상태로만 써라.
 - prompt_context.visible_context.active_world_process_clock는 장기 진행 압력이다. 매 턴 자동 진행하지 말고 player action, time passage, pressure evidence가 닿을 때만 결과에 반영해라.
 - prompt_context.visible_context.active_player_intent_trace는 최근 플레이어 행동 모양이다. 플레이어 성격으로 고정하지 말고 다음 선택지 affordance를 미세 조정하는 scene-scoped 압력으로만 써라.
+- prompt_context.visible_context.active_turn_retrieval_controller는 이번 턴의 검색 목표와 cue다. canon이나 인물 심리가 아니라 selected_context_capsules를 왜 읽었는지 설명하는 selector brain으로만 써라.
+- prompt_context.visible_context.selected_context_capsules는 이번 턴 compiler가 실제로 로드한 context capsule 본문이다. rejected_capsules는 이번 턴에 의도적으로 배제된 맥락이므로 복원하거나 우회하지 마라. broad projection보다 selected capsule을 우선하되, capsule은 source of truth가 아니라 prompt transport unit임을 유지해라.
 - prompt_context.visible_context.selected_memory_items는 이번 턴에 물리적으로 선택된 장기기억이다. 각 item의 reason/evidence_refs/source_id를 따라 필요한 항목만 쓰고, selected_memory_items 전체를 다시 요약하지 마라.
 - prompt_context.adjudication_context는 판정 전용이다. hidden_world_process_clock를 포함해 visible_scene, next_choices, canon_event, image prompt에 복사하지 마라.
 - prompt_context.prompt_policy.omitted_debug_sections는 의도적으로 프롬프트에서 뺀 debug/source 섹션이다. 비어 있는 사실을 임의로 복원하지 마라.
@@ -4470,6 +4565,8 @@ premise:
             "\"active_belief_graph\"",
             "\"active_world_process_clock\"",
             "\"active_player_intent_trace\"",
+            "\"active_turn_retrieval_controller\"",
+            "\"selected_context_capsules\"",
             "\"affordance_graph\"",
             "\"ordinary_choice_slots\"",
             "\"forbidden_shortcuts\"",

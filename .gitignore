@@ -1,5 +1,9 @@
 target/
 dist/
+webgpt-mcp-checkout/target/
+webgpt-mcp-checkout/chatgpt-worker/node_modules/
+!webgpt-mcp-checkout/chatgpt-worker/dist/
+!webgpt-mcp-checkout/chatgpt-worker/dist/index.js
 .DS_Store
 Thumbs.db
 

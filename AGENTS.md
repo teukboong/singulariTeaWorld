@@ -81,6 +81,7 @@ From this repository, build the binary and start the VN server:
 
 ```bash
 cargo build --locked --release --bin singulari-world --bin singulari-world-mcp
+scripts/setup-webgpt-runtime.sh
 
 target/release/singulari-world --store-root .world-store vn-serve --port 4177
 ```
@@ -104,7 +105,7 @@ target/release/singulari-world --store-root .world-store host-worker \
   --interval-ms 750
 ```
 
-The built-in backend calls `webgpt_research` through a sibling
+The built-in backend calls `webgpt_research` through the bundled
 `webgpt-mcp-checkout/scripts/webgpt-mcp.sh` wrapper unless
 `--webgpt-mcp-wrapper` or `SINGULARI_WORLD_WEBGPT_MCP_WRAPPER` in process env
 or repository-local `.env` overrides it. It must not inspect parent Hesperides

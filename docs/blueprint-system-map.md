@@ -127,6 +127,8 @@ flowchart BT
   Visual["Visual Asset Graph<br/>docs/visual-asset-graph-blueprint.md"]
   Pressure["Scene Pressure<br/>docs/scene-pressure-blueprint.md"]
   RevivalPolicy["Memory Revival Policy<br/>docs/memory-revival-policy-blueprint.md"]
+  RetrievalController["Turn Retrieval Controller<br/>docs/working-self-memory-blueprint.md"]
+  Capsules["Context Capsules<br/>docs/context-capsule-lazy-revival-blueprint.md"]
 
   Extra --> Relations
   Extra --> CharacterText
@@ -157,6 +159,10 @@ flowchart BT
   Visual --> Pressure
 
   Pressure --> RevivalPolicy
+  RevivalPolicy --> Capsules
+  Capsules -.-> RetrievalController
+  RetrievalController -.-> Capsules
+  Capsules --> Pressure
 ```
 
 ## Proposed Unified Turn Loop

@@ -1,7 +1,12 @@
+use crate::autobiographical_index::{AUTOBIOGRAPHICAL_INDEX_FILENAME, AutobiographicalIndexPacket};
 use crate::belief_graph::BELIEF_GRAPH_FILENAME;
 use crate::body_resource::BODY_RESOURCE_STATE_FILENAME;
 use crate::change_ledger::CHANGE_LEDGER_FILENAME;
 use crate::character_text_design::{CHARACTER_TEXT_DESIGN_FILENAME, CharacterTextDesignPacket};
+use crate::context_capsule::{
+    CONTEXT_CAPSULE_DIR, CONTEXT_CAPSULE_INDEX_FILENAME, CONTEXT_CAPSULE_SELECTION_EVENTS_FILENAME,
+    ContextCapsuleIndex, ContextCapsuleSelectionEvent,
+};
 use crate::location_graph::LOCATION_GRAPH_FILENAME;
 use crate::models::{
     ANCHOR_CHARACTER_ID, CanonEvent, CharacterRecord, EntityRecords, EntityUpdateRecord,
@@ -22,6 +27,9 @@ use crate::sqlite::{
 use crate::store::{
     CANON_EVENTS_FILENAME, ENTITIES_FILENAME, ENTITY_UPDATES_FILENAME, HIDDEN_STATE_FILENAME,
     LATEST_SNAPSHOT_FILENAME, PLAYER_KNOWLEDGE_FILENAME, WORLD_FILENAME, read_json,
+};
+use crate::turn_retrieval_controller::{
+    TURN_RETRIEVAL_CONTROLLER_FILENAME, TurnRetrievalControllerPacket,
 };
 use crate::visual_asset_graph::VISUAL_ASSET_GRAPH_FILENAME;
 use crate::world_lore::{WORLD_LORE_FILENAME, WorldLorePacket};
@@ -243,6 +251,7 @@ pub fn sync_world_db_materialized_projections(
     let conn = open_world_db(world_dir)?;
     migrate_world_db(&conn)?;
     upsert_materialized_projection_files(&conn, world_dir, world_id, updated_at)?;
+    upsert_context_capsule_audit(&conn, world_dir, world_id, updated_at)?;
     rebuild_world_search_index_for_conn(&conn, world_id)?;
     Ok(())
 }
@@ -290,6 +299,12 @@ pub fn record_turn_in_world_db(input: &RecordTurnDbInput<'_>) -> Result<()> {
         input.turn_log_entry.created_at.as_str(),
     )?;
     upsert_materialized_projection_files(
+        &conn,
+        input.world_dir,
+        input.world.world_id.as_str(),
+        input.turn_log_entry.created_at.as_str(),
+    )?;
+    upsert_context_capsule_audit(
         &conn,
         input.world_dir,
         input.world.world_id.as_str(),
@@ -798,6 +813,7 @@ pub fn repair_world_db(world_dir: &Path, world_id: &str) -> Result<WorldDbRepair
         upsert_render_packet(&conn, packet, world.updated_at.as_str())?;
     }
     upsert_materialized_projection_files(&conn, world_dir, world_id, world.updated_at.as_str())?;
+    upsert_context_capsule_audit(&conn, world_dir, world_id, world.updated_at.as_str())?;
     create_chapter_summary_for_open_events(&conn, world_id, 1, true, world.updated_at.as_str())?;
     rebuild_world_search_index_for_conn(&conn, world_id)?;
     let search_documents = count_world_rows(&conn, "world_search_fts", world_id)?;
@@ -1008,6 +1024,84 @@ const WORLD_DB_SCHEMA_SQL: &str = r"
             PRIMARY KEY (world_id, entity_id)
         );
 
+        CREATE TABLE IF NOT EXISTS turn_retrieval_goals (
+            world_id TEXT NOT NULL,
+            goal_id TEXT NOT NULL,
+            turn_id TEXT NOT NULL,
+            source TEXT NOT NULL,
+            priority TEXT NOT NULL,
+            visibility TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            raw_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (world_id, goal_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS turn_retrieval_cues (
+            world_id TEXT NOT NULL,
+            cue_id TEXT NOT NULL,
+            turn_id TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            target_kinds TEXT NOT NULL,
+            visibility TEXT NOT NULL,
+            cue TEXT NOT NULL,
+            raw_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (world_id, cue_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS context_capsules (
+            world_id TEXT NOT NULL,
+            capsule_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            visibility TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            triggers TEXT NOT NULL,
+            evidence_refs TEXT NOT NULL,
+            content_ref TEXT NOT NULL,
+            token_estimate INTEGER NOT NULL,
+            raw_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (world_id, capsule_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS context_capsule_selection_events (
+            world_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            turn_id TEXT NOT NULL,
+            selected_capsule_ids TEXT NOT NULL,
+            rejected_capsule_ids TEXT NOT NULL,
+            raw_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (world_id, event_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS autobiographical_periods (
+            world_id TEXT NOT NULL,
+            period_id TEXT NOT NULL,
+            turn_id TEXT NOT NULL,
+            label TEXT NOT NULL,
+            turn_start TEXT NOT NULL,
+            turn_end TEXT NOT NULL,
+            dominant_goals TEXT NOT NULL,
+            capsule_refs TEXT NOT NULL,
+            raw_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (world_id, period_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS autobiographical_general_events (
+            world_id TEXT NOT NULL,
+            event_cluster_id TEXT NOT NULL,
+            turn_id TEXT NOT NULL,
+            event_kind TEXT NOT NULL,
+            pattern TEXT NOT NULL,
+            capsule_refs TEXT NOT NULL,
+            raw_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (world_id, event_cluster_id)
+        );
+
         CREATE TABLE IF NOT EXISTS player_knowledge (
             world_id TEXT PRIMARY KEY,
             raw_json TEXT NOT NULL,
@@ -1077,6 +1171,18 @@ const WORLD_DB_SCHEMA_SQL: &str = r"
             ON relationship_edges(world_id, source_entity_id);
         CREATE INDEX IF NOT EXISTS idx_character_text_designs_world_role
             ON character_text_designs(world_id, role);
+        CREATE INDEX IF NOT EXISTS idx_turn_retrieval_goals_world_turn
+            ON turn_retrieval_goals(world_id, turn_id);
+        CREATE INDEX IF NOT EXISTS idx_turn_retrieval_cues_world_turn
+            ON turn_retrieval_cues(world_id, turn_id);
+        CREATE INDEX IF NOT EXISTS idx_context_capsules_world_kind
+            ON context_capsules(world_id, kind);
+        CREATE INDEX IF NOT EXISTS idx_context_capsule_selection_events_world_turn
+            ON context_capsule_selection_events(world_id, turn_id);
+        CREATE INDEX IF NOT EXISTS idx_autobiographical_periods_world_turn
+            ON autobiographical_periods(world_id, turn_id);
+        CREATE INDEX IF NOT EXISTS idx_autobiographical_general_events_world_kind
+            ON autobiographical_general_events(world_id, event_kind);
         CREATE INDEX IF NOT EXISTS idx_state_changes_world_turn
             ON state_changes(world_id, turn_id);
         CREATE INDEX IF NOT EXISTS idx_world_facts_world_category
@@ -1894,6 +2000,12 @@ fn upsert_typed_memory_projection(
         "world_lore" => upsert_world_lore_entries(conn, world_id, value, updated_at),
         "relationship_graph" => upsert_relationship_edges(conn, world_id, value, updated_at),
         "character_text_design" => upsert_character_text_designs(conn, world_id, value, updated_at),
+        "turn_retrieval_controller" => {
+            upsert_turn_retrieval_controller(conn, world_id, value, updated_at)
+        }
+        "autobiographical_index" => {
+            upsert_autobiographical_index(conn, world_id, value, updated_at)
+        }
         _ => Ok(()),
     }
 }
@@ -2033,6 +2145,241 @@ fn character_text_design_summary(
     .join(" | ")
 }
 
+fn upsert_turn_retrieval_controller(
+    conn: &Connection,
+    world_id: &str,
+    value: &serde_json::Value,
+    updated_at: &str,
+) -> Result<()> {
+    let packet: TurnRetrievalControllerPacket = serde_json::from_value(value.clone())
+        .context("world.db turn_retrieval_controller materialized projection parse failed")?;
+    conn.execute(
+        "DELETE FROM turn_retrieval_goals WHERE world_id = ?1",
+        params![world_id],
+    )
+    .context("world.db turn_retrieval_goals clear failed")?;
+    conn.execute(
+        "DELETE FROM turn_retrieval_cues WHERE world_id = ?1",
+        params![world_id],
+    )
+    .context("world.db turn_retrieval_cues clear failed")?;
+    let turn_id = packet.turn_id.clone();
+    for goal in packet.active_goals {
+        let raw_json = to_json(&goal)?;
+        conn.execute(
+            r"
+            INSERT OR REPLACE INTO turn_retrieval_goals(
+                world_id, goal_id, turn_id, source, priority, visibility,
+                summary, raw_json, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            ",
+            params![
+                world_id,
+                goal.goal_id,
+                turn_id,
+                format!("{:?}", goal.source),
+                format!("{:?}", goal.priority),
+                format!("{:?}", goal.visibility),
+                goal.summary,
+                raw_json,
+                updated_at,
+            ],
+        )
+        .context("world.db turn_retrieval_goal upsert failed")?;
+    }
+    for cue in packet.retrieval_cues {
+        let raw_json = to_json(&cue)?;
+        conn.execute(
+            r"
+            INSERT OR REPLACE INTO turn_retrieval_cues(
+                world_id, cue_id, turn_id, reason, target_kinds, visibility,
+                cue, raw_json, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            ",
+            params![
+                world_id,
+                cue.cue_id,
+                turn_id,
+                format!("{:?}", cue.reason),
+                cue.target_kinds
+                    .iter()
+                    .map(|kind| format!("{kind:?}"))
+                    .collect::<Vec<_>>()
+                    .join(","),
+                format!("{:?}", cue.visibility),
+                cue.cue,
+                raw_json,
+                updated_at,
+            ],
+        )
+        .context("world.db turn_retrieval_cue upsert failed")?;
+    }
+    Ok(())
+}
+
+fn upsert_context_capsule_audit(
+    conn: &Connection,
+    world_dir: &Path,
+    world_id: &str,
+    updated_at: &str,
+) -> Result<()> {
+    let capsule_root = world_dir.join(CONTEXT_CAPSULE_DIR);
+    let index_path = capsule_root.join(CONTEXT_CAPSULE_INDEX_FILENAME);
+    if index_path.is_file() {
+        let index: ContextCapsuleIndex = read_json(&index_path).with_context(|| {
+            format!(
+                "world.db context capsule index read failed: {}",
+                index_path.display()
+            )
+        })?;
+        if index.world_id != world_id {
+            bail!(
+                "world.db context capsule index world_id mismatch: expected={}, actual={}, path={}",
+                world_id,
+                index.world_id,
+                index_path.display()
+            );
+        }
+        conn.execute(
+            "DELETE FROM context_capsules WHERE world_id = ?1",
+            params![world_id],
+        )
+        .context("world.db context_capsules clear failed")?;
+        for entry in index.entries {
+            let raw_json = to_json(&entry)?;
+            conn.execute(
+                r"
+                INSERT OR REPLACE INTO context_capsules(
+                    world_id, capsule_id, kind, visibility, summary, triggers,
+                    evidence_refs, content_ref, token_estimate, raw_json, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                ",
+                params![
+                    world_id,
+                    entry.capsule_id,
+                    format!("{:?}", entry.kind),
+                    format!("{:?}", entry.visibility),
+                    entry.summary,
+                    entry.triggers.join(" "),
+                    entry
+                        .evidence_refs
+                        .iter()
+                        .map(|evidence| format!("{}:{}", evidence.source, evidence.id))
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    entry.content_ref,
+                    i64::try_from(entry.token_estimate).unwrap_or(i64::MAX),
+                    raw_json,
+                    updated_at,
+                ],
+            )
+            .context("world.db context_capsule upsert failed")?;
+        }
+    }
+
+    let events_path = capsule_root.join(CONTEXT_CAPSULE_SELECTION_EVENTS_FILENAME);
+    if events_path.is_file() {
+        for event in read_context_capsule_selection_events(&events_path)? {
+            if event.world_id != world_id {
+                bail!(
+                    "world.db context capsule selection event world_id mismatch: expected={}, actual={}, event_id={}, path={}",
+                    world_id,
+                    event.world_id,
+                    event.event_id,
+                    events_path.display()
+                );
+            }
+            let raw_json = to_json(&event)?;
+            conn.execute(
+                r"
+                INSERT OR REPLACE INTO context_capsule_selection_events(
+                    world_id, event_id, turn_id, selected_capsule_ids,
+                    rejected_capsule_ids, raw_json, created_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                ",
+                params![
+                    world_id,
+                    event.event_id,
+                    event.turn_id,
+                    event.selected_capsule_ids.join(" "),
+                    event.rejected_capsule_ids.join(" "),
+                    raw_json,
+                    event.created_at,
+                ],
+            )
+            .context("world.db context_capsule_selection_event upsert failed")?;
+        }
+    }
+    Ok(())
+}
+
+fn upsert_autobiographical_index(
+    conn: &Connection,
+    world_id: &str,
+    value: &serde_json::Value,
+    updated_at: &str,
+) -> Result<()> {
+    let packet: AutobiographicalIndexPacket = serde_json::from_value(value.clone())
+        .context("world.db autobiographical_index materialized projection parse failed")?;
+    conn.execute(
+        "DELETE FROM autobiographical_periods WHERE world_id = ?1",
+        params![world_id],
+    )
+    .context("world.db autobiographical_periods clear failed")?;
+    conn.execute(
+        "DELETE FROM autobiographical_general_events WHERE world_id = ?1",
+        params![world_id],
+    )
+    .context("world.db autobiographical_general_events clear failed")?;
+    for period in packet.periods {
+        let raw_json = to_json(&period)?;
+        conn.execute(
+            r"
+            INSERT OR REPLACE INTO autobiographical_periods(
+                world_id, period_id, turn_id, label, turn_start, turn_end,
+                dominant_goals, capsule_refs, raw_json, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            ",
+            params![
+                world_id,
+                period.period_id,
+                packet.turn_id.as_str(),
+                period.label,
+                period.turn_range[0],
+                period.turn_range[1],
+                period.dominant_goals.join(" "),
+                period.capsule_refs.join(" "),
+                raw_json,
+                updated_at,
+            ],
+        )
+        .context("world.db autobiographical_period upsert failed")?;
+    }
+    for event in packet.general_events {
+        let raw_json = to_json(&event)?;
+        conn.execute(
+            r"
+            INSERT OR REPLACE INTO autobiographical_general_events(
+                world_id, event_cluster_id, turn_id, event_kind, pattern,
+                capsule_refs, raw_json, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            ",
+            params![
+                world_id,
+                event.event_cluster_id,
+                packet.turn_id.as_str(),
+                format!("{:?}", event.event_kind),
+                event.pattern,
+                event.capsule_refs.join(" "),
+                raw_json,
+                updated_at,
+            ],
+        )
+        .context("world.db autobiographical_general_event upsert failed")?;
+    }
+    Ok(())
+}
+
 fn summarize_materialized_projection(kind: &str, value: &serde_json::Value) -> String {
     match kind {
         "body_resource" => {
@@ -2070,6 +2417,18 @@ fn summarize_materialized_projection(kind: &str, value: &serde_json::Value) -> S
         "narrative_style_state" => {
             summarize_count_fields(value, &[("active_style_events", "style_events")])
         }
+        "turn_retrieval_controller" => summarize_count_fields(
+            value,
+            &[
+                ("active_goals", "goals"),
+                ("active_role_stance", "role_stance"),
+                ("retrieval_cues", "cues"),
+            ],
+        ),
+        "autobiographical_index" => summarize_count_fields(
+            value,
+            &[("periods", "periods"), ("general_events", "general_events")],
+        ),
         _ => "projection available".to_owned(),
     }
 }
@@ -2107,6 +2466,12 @@ fn rebuild_world_search_index_for_conn(conn: &Connection, world_id: &str) -> Res
     index_world_lore_entries(conn, world_id)?;
     index_relationship_edges(conn, world_id)?;
     index_character_text_designs(conn, world_id)?;
+    index_turn_retrieval_goals(conn, world_id)?;
+    index_turn_retrieval_cues(conn, world_id)?;
+    index_context_capsules(conn, world_id)?;
+    index_context_capsule_selection_events(conn, world_id)?;
+    index_autobiographical_periods(conn, world_id)?;
+    index_autobiographical_general_events(conn, world_id)?;
     Ok(())
 }
 
@@ -2452,6 +2817,216 @@ fn index_character_text_designs(conn: &Connection, world_id: &str) -> Result<()>
     Ok(())
 }
 
+fn index_turn_retrieval_goals(conn: &Connection, world_id: &str) -> Result<()> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT goal_id, turn_id, source, priority, summary
+             FROM turn_retrieval_goals
+             WHERE world_id = ?1 AND visibility = ?2",
+        )
+        .context("world.db search index turn_retrieval_goals prepare failed")?;
+    let rows = stmt
+        .query_map(params![world_id, "PlayerVisible"], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })
+        .context("world.db search index turn_retrieval_goals query failed")?;
+    for row in rows {
+        let (goal_id, turn_id, source, priority, summary) =
+            row.context("world.db search index turn_retrieval_goal row failed")?;
+        insert_search_document(
+            conn,
+            world_id,
+            "turn_retrieval_goals",
+            goal_id.as_str(),
+            format!("{turn_id} {source} {priority}").as_str(),
+            summary.as_str(),
+            PLAYER_VISIBLE,
+        )?;
+    }
+    Ok(())
+}
+
+fn index_turn_retrieval_cues(conn: &Connection, world_id: &str) -> Result<()> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT cue_id, turn_id, reason, target_kinds, cue
+             FROM turn_retrieval_cues
+             WHERE world_id = ?1 AND visibility = ?2",
+        )
+        .context("world.db search index turn_retrieval_cues prepare failed")?;
+    let rows = stmt
+        .query_map(params![world_id, "PlayerVisible"], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })
+        .context("world.db search index turn_retrieval_cues query failed")?;
+    for row in rows {
+        let (cue_id, turn_id, reason, target_kinds, cue) =
+            row.context("world.db search index turn_retrieval_cue row failed")?;
+        insert_search_document(
+            conn,
+            world_id,
+            "turn_retrieval_cues",
+            cue_id.as_str(),
+            format!("{turn_id} {reason} {target_kinds}").as_str(),
+            cue.as_str(),
+            PLAYER_VISIBLE,
+        )?;
+    }
+    Ok(())
+}
+
+fn index_context_capsules(conn: &Connection, world_id: &str) -> Result<()> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT capsule_id, kind, visibility, summary, triggers
+             FROM context_capsules
+             WHERE world_id = ?1
+               AND visibility IN ('PlayerVisible', 'InferredVisible')",
+        )
+        .context("world.db search index context_capsules prepare failed")?;
+    let rows = stmt
+        .query_map(params![world_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })
+        .context("world.db search index context_capsules query failed")?;
+    for row in rows {
+        let (capsule_id, kind, visibility, summary, triggers) =
+            row.context("world.db search index context_capsule row failed")?;
+        insert_search_document(
+            conn,
+            world_id,
+            "context_capsules",
+            capsule_id.as_str(),
+            format!("{kind} {visibility} {triggers}").as_str(),
+            summary.as_str(),
+            PLAYER_VISIBLE,
+        )?;
+    }
+    Ok(())
+}
+
+fn index_context_capsule_selection_events(conn: &Connection, world_id: &str) -> Result<()> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT event_id, turn_id, selected_capsule_ids, rejected_capsule_ids
+             FROM context_capsule_selection_events
+             WHERE world_id = ?1",
+        )
+        .context("world.db search index context_capsule_selection_events prepare failed")?;
+    let rows = stmt
+        .query_map(params![world_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .context("world.db search index context_capsule_selection_events query failed")?;
+    for row in rows {
+        let (event_id, turn_id, selected, rejected) =
+            row.context("world.db search index context_capsule_selection_event row failed")?;
+        insert_search_document(
+            conn,
+            world_id,
+            "context_capsule_selection_events",
+            event_id.as_str(),
+            format!("{turn_id} context capsule selection").as_str(),
+            format!("selected {selected} rejected {rejected}").as_str(),
+            SYSTEM_VISIBLE,
+        )?;
+    }
+    Ok(())
+}
+
+fn index_autobiographical_periods(conn: &Connection, world_id: &str) -> Result<()> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT period_id, label, turn_start, turn_end, dominant_goals, capsule_refs
+             FROM autobiographical_periods
+             WHERE world_id = ?1",
+        )
+        .context("world.db search index autobiographical_periods prepare failed")?;
+    let rows = stmt
+        .query_map(params![world_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })
+        .context("world.db search index autobiographical_periods query failed")?;
+    for row in rows {
+        let (period_id, label, turn_start, turn_end, goals, capsule_refs) =
+            row.context("world.db search index autobiographical_period row failed")?;
+        insert_search_document(
+            conn,
+            world_id,
+            "autobiographical_periods",
+            period_id.as_str(),
+            format!("{label} {turn_start} {turn_end}").as_str(),
+            format!("{goals} {capsule_refs}").as_str(),
+            PLAYER_VISIBLE,
+        )?;
+    }
+    Ok(())
+}
+
+fn index_autobiographical_general_events(conn: &Connection, world_id: &str) -> Result<()> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT event_cluster_id, event_kind, pattern, capsule_refs
+             FROM autobiographical_general_events
+             WHERE world_id = ?1",
+        )
+        .context("world.db search index autobiographical_general_events prepare failed")?;
+    let rows = stmt
+        .query_map(params![world_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .context("world.db search index autobiographical_general_events query failed")?;
+    for row in rows {
+        let (event_id, event_kind, pattern, capsule_refs) =
+            row.context("world.db search index autobiographical_general_event row failed")?;
+        insert_search_document(
+            conn,
+            world_id,
+            "autobiographical_general_events",
+            event_id.as_str(),
+            event_kind.as_str(),
+            format!("{pattern} {capsule_refs}").as_str(),
+            PLAYER_VISIBLE,
+        )?;
+    }
+    Ok(())
+}
+
 fn insert_search_document(
     conn: &Connection,
     world_id: &str,
@@ -2586,6 +3161,26 @@ fn read_structured_updates_jsonl(path: &Path) -> Result<Vec<StructuredEntityUpda
     Ok(updates)
 }
 
+fn read_context_capsule_selection_events(path: &Path) -> Result<Vec<ContextCapsuleSelectionEvent>> {
+    let raw =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let mut events = Vec::new();
+    for (index, line) in raw.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let event = serde_json::from_str(line).with_context(|| {
+            format!(
+                "failed to parse {} line {} as ContextCapsuleSelectionEvent",
+                path.display(),
+                index + 1
+            )
+        })?;
+        events.push(event);
+    }
+    Ok(events)
+}
+
 fn read_session_snapshots(world_dir: &Path) -> Result<Vec<TurnSnapshot>> {
     read_session_json_files(world_dir, "snapshots")
 }
@@ -2653,6 +3248,12 @@ const WORLD_SCOPED_TABLES: &[&str] = &[
     "world_lore_entries",
     "relationship_edges",
     "character_text_designs",
+    "turn_retrieval_goals",
+    "turn_retrieval_cues",
+    "context_capsules",
+    "context_capsule_selection_events",
+    "autobiographical_periods",
+    "autobiographical_general_events",
     "snapshots",
     "chapter_summaries",
     "world_search_fts",
@@ -2668,6 +3269,12 @@ const WORLD_REPAIR_CLEAR_TABLES: &[&str] = &[
     "world_lore_entries",
     "relationship_edges",
     "character_text_designs",
+    "turn_retrieval_goals",
+    "turn_retrieval_cues",
+    "context_capsule_selection_events",
+    "context_capsules",
+    "autobiographical_general_events",
+    "autobiographical_periods",
     "entity_updates",
     "character_memories",
     "state_changes",
@@ -2772,6 +3379,18 @@ const MATERIALIZED_PROJECTION_FILES: &[MaterializedProjectionFile] = &[
         title: "서사 문체 상태",
         filename: NARRATIVE_STYLE_STATE_FILENAME,
     },
+    MaterializedProjectionFile {
+        id: "turn_retrieval_controller",
+        kind: "turn_retrieval_controller",
+        title: "턴 검색 컨트롤러",
+        filename: TURN_RETRIEVAL_CONTROLLER_FILENAME,
+    },
+    MaterializedProjectionFile {
+        id: "autobiographical_index",
+        kind: "autobiographical_index",
+        title: "자전적 기억 인덱스",
+        filename: AUTOBIOGRAPHICAL_INDEX_FILENAME,
+    },
 ];
 
 #[cfg(test)]
@@ -2780,8 +3399,29 @@ mod tests {
         force_chapter_summary, latest_chapter_summaries, repair_world_db, search_world_db,
         sync_world_db_materialized_projections, validate_world_db, world_db_stats,
     };
+    use crate::autobiographical_index::{
+        AUTOBIOGRAPHICAL_GENERAL_EVENT_SCHEMA_VERSION, AUTOBIOGRAPHICAL_INDEX_FILENAME,
+        AUTOBIOGRAPHICAL_INDEX_SCHEMA_VERSION, AUTOBIOGRAPHICAL_PERIOD_SCHEMA_VERSION,
+        AutobiographicalGeneralEvent, AutobiographicalGeneralEventKind,
+        AutobiographicalIndexPacket, AutobiographicalIndexPolicy, AutobiographicalPeriod,
+    };
+    use crate::context_capsule::{
+        CONTEXT_CAPSULE_DIR, CONTEXT_CAPSULE_INDEX_ENTRY_SCHEMA_VERSION,
+        CONTEXT_CAPSULE_INDEX_FILENAME, CONTEXT_CAPSULE_INDEX_SCHEMA_VERSION,
+        CONTEXT_CAPSULE_SELECTION_EVENT_SCHEMA_VERSION, CONTEXT_CAPSULE_SELECTION_EVENTS_FILENAME,
+        ContextCapsuleEvidenceRef, ContextCapsuleIndex, ContextCapsuleIndexEntry,
+        ContextCapsuleKind, ContextCapsulePolicy, ContextCapsuleSelectionEvent,
+        ContextCapsuleVisibility,
+    };
     use crate::store::{InitWorldOptions, init_world};
     use crate::turn::{AdvanceTurnOptions, advance_turn};
+    use crate::turn_retrieval_controller::{
+        TURN_RETRIEVAL_CONTROLLER_FILENAME, TURN_RETRIEVAL_CONTROLLER_SCHEMA_VERSION,
+        TURN_RETRIEVAL_CUE_SCHEMA_VERSION, TURN_RETRIEVAL_GOAL_SCHEMA_VERSION,
+        TurnRetrievalControllerPacket, TurnRetrievalCue, TurnRetrievalCueReason, TurnRetrievalGoal,
+        TurnRetrievalGoalSource, TurnRetrievalPolicy, TurnRetrievalPriority,
+        TurnRetrievalTargetKind, TurnRetrievalVisibility,
+    };
     use crate::world_lore::{
         WORLD_LORE_ENTRY_SCHEMA_VERSION, WORLD_LORE_FILENAME, WorldLoreDomain, WorldLoreEntry,
         WorldLorePacket,
@@ -2939,6 +3579,257 @@ premise:
         assert!(
             hits.iter()
                 .any(|hit| hit.source_table == "world_lore_entries")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn search_indexes_turn_retrieval_controller_audit() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let seed_path = temp.path().join("seed.yaml");
+        let store = temp.path().join("store");
+        std::fs::write(
+            &seed_path,
+            r#"
+schema_version: singulari.world_seed.v1
+world_id: stw_retrieval_search
+title: "검색 컨트롤러 세계"
+premise:
+  genre: "중세 판타지"
+  protagonist: "문지기 앞의 여행자"
+"#,
+        )?;
+        let initialized = init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store),
+            session_id: None,
+        })?;
+        crate::store::write_json(
+            &initialized
+                .world_dir
+                .join(TURN_RETRIEVAL_CONTROLLER_FILENAME),
+            &TurnRetrievalControllerPacket {
+                world_id: "stw_retrieval_search".to_owned(),
+                turn_id: "turn_0001".to_owned(),
+                active_goals: vec![TurnRetrievalGoal {
+                    schema_version: TURN_RETRIEVAL_GOAL_SCHEMA_VERSION.to_owned(),
+                    goal_id: "goal:turn_0001:gate_passage".to_owned(),
+                    source: TurnRetrievalGoalSource::PlotThread,
+                    summary: "Find lawful passage through the ash gate.".to_owned(),
+                    priority: TurnRetrievalPriority::High,
+                    visibility: TurnRetrievalVisibility::PlayerVisible,
+                    source_refs: vec!["plot_thread:gate".to_owned()],
+                }],
+                retrieval_cues: vec![TurnRetrievalCue {
+                    schema_version: TURN_RETRIEVAL_CUE_SCHEMA_VERSION.to_owned(),
+                    cue_id: "cue:turn_0001:ash_gate".to_owned(),
+                    cue: "ash gate lawful passage".to_owned(),
+                    reason: TurnRetrievalCueReason::CurrentGoalMatch,
+                    target_kinds: vec![TurnRetrievalTargetKind::WorldLore],
+                    visibility: TurnRetrievalVisibility::PlayerVisible,
+                    source_refs: vec!["goal:turn_0001:gate_passage".to_owned()],
+                }],
+                retrieval_policy: TurnRetrievalPolicy::default(),
+                schema_version: TURN_RETRIEVAL_CONTROLLER_SCHEMA_VERSION.to_owned(),
+                ..TurnRetrievalControllerPacket::default()
+            },
+        )?;
+        sync_world_db_materialized_projections(
+            &initialized.world_dir,
+            "stw_retrieval_search",
+            "2026-04-29T00:00:00Z",
+        )?;
+
+        let hits = search_world_db(
+            &initialized.world_dir,
+            "stw_retrieval_search",
+            "lawful passage",
+            10,
+        )?;
+
+        assert!(
+            hits.iter()
+                .any(|hit| hit.source_table == "turn_retrieval_goals")
+        );
+        assert!(
+            hits.iter()
+                .any(|hit| hit.source_table == "turn_retrieval_cues")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn search_indexes_context_capsule_audit() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let seed_path = temp.path().join("seed.yaml");
+        let store = temp.path().join("store");
+        std::fs::write(
+            &seed_path,
+            r#"
+schema_version: singulari.world_seed.v1
+world_id: stw_capsule_search
+title: "캡슐 검색 세계"
+premise:
+  genre: "중세 판타지"
+  protagonist: "문지기 앞의 여행자"
+"#,
+        )?;
+        let initialized = init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store),
+            session_id: None,
+        })?;
+        let capsule_root = initialized.world_dir.join(CONTEXT_CAPSULE_DIR);
+        std::fs::create_dir_all(&capsule_root)?;
+        crate::store::write_json(
+            &capsule_root.join(CONTEXT_CAPSULE_INDEX_FILENAME),
+            &ContextCapsuleIndex {
+                schema_version: CONTEXT_CAPSULE_INDEX_SCHEMA_VERSION.to_owned(),
+                world_id: "stw_capsule_search".to_owned(),
+                turn_id: "turn_0001".to_owned(),
+                entries: vec![ContextCapsuleIndexEntry {
+                    schema_version: CONTEXT_CAPSULE_INDEX_ENTRY_SCHEMA_VERSION.to_owned(),
+                    world_id: "stw_capsule_search".to_owned(),
+                    capsule_id: "world_lore:ash_gate_custom".to_owned(),
+                    kind: ContextCapsuleKind::WorldLore,
+                    visibility: ContextCapsuleVisibility::PlayerVisible,
+                    summary: "Ash gate passage requires a stamped bone token.".to_owned(),
+                    triggers: vec!["ash gate".to_owned(), "bone token".to_owned()],
+                    evidence_refs: vec![ContextCapsuleEvidenceRef {
+                        source: "world_lore".to_owned(),
+                        id: "lore:ash_gate_custom".to_owned(),
+                    }],
+                    content_ref: "context_capsules/world_lore/ash_gate_custom.json".to_owned(),
+                    token_estimate: 12,
+                    last_used_turn: None,
+                    recent_use_count: 0,
+                    updated_at: "2026-04-29T00:00:00Z".to_owned(),
+                }],
+                compiler_policy: ContextCapsulePolicy::default(),
+            },
+        )?;
+        crate::store::append_jsonl(
+            &capsule_root.join(CONTEXT_CAPSULE_SELECTION_EVENTS_FILENAME),
+            &ContextCapsuleSelectionEvent {
+                schema_version: CONTEXT_CAPSULE_SELECTION_EVENT_SCHEMA_VERSION.to_owned(),
+                world_id: "stw_capsule_search".to_owned(),
+                turn_id: "turn_0001".to_owned(),
+                event_id: "context_capsule_selection_event:turn_0001".to_owned(),
+                selected_capsule_ids: vec!["world_lore:ash_gate_custom".to_owned()],
+                rejected_capsule_ids: vec!["relationship:stale_market".to_owned()],
+                created_at: "2026-04-29T00:00:00Z".to_owned(),
+            },
+        )?;
+
+        sync_world_db_materialized_projections(
+            &initialized.world_dir,
+            "stw_capsule_search",
+            "2026-04-29T00:00:00Z",
+        )?;
+
+        let capsule_hits = search_world_db(
+            &initialized.world_dir,
+            "stw_capsule_search",
+            "bone token",
+            10,
+        )?;
+        let event_hits = search_world_db(
+            &initialized.world_dir,
+            "stw_capsule_search",
+            "stale_market",
+            10,
+        )?;
+
+        assert!(
+            capsule_hits
+                .iter()
+                .any(|hit| hit.source_table == "context_capsules")
+        );
+        assert!(
+            event_hits
+                .iter()
+                .any(|hit| { hit.source_table == "context_capsule_selection_events" })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn search_indexes_autobiographical_index_layers() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let seed_path = temp.path().join("seed.yaml");
+        let store = temp.path().join("store");
+        std::fs::write(
+            &seed_path,
+            r#"
+schema_version: singulari.world_seed.v1
+world_id: stw_autobio_search
+title: "자전 기억 검색 세계"
+premise:
+  genre: "중세 판타지"
+  protagonist: "문지기 앞의 여행자"
+"#,
+        )?;
+        let initialized = init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store),
+            session_id: None,
+        })?;
+        crate::store::write_json(
+            &initialized.world_dir.join(AUTOBIOGRAPHICAL_INDEX_FILENAME),
+            &AutobiographicalIndexPacket {
+                schema_version: AUTOBIOGRAPHICAL_INDEX_SCHEMA_VERSION.to_owned(),
+                world_id: "stw_autobio_search".to_owned(),
+                turn_id: "turn_0005".to_owned(),
+                periods: vec![AutobiographicalPeriod {
+                    schema_version: AUTOBIOGRAPHICAL_PERIOD_SCHEMA_VERSION.to_owned(),
+                    period_id: "period:opening_gate".to_owned(),
+                    label: "Opening gate sequence".to_owned(),
+                    turn_range: ["turn_0000".to_owned(), "turn_0005".to_owned()],
+                    dominant_goals: vec!["secure stamped token".to_owned()],
+                    capsule_refs: vec!["world_lore:gate_tax".to_owned()],
+                    evidence_refs: vec!["chapter_summary:chapter_0001".to_owned()],
+                }],
+                general_events: vec![AutobiographicalGeneralEvent {
+                    schema_version: AUTOBIOGRAPHICAL_GENERAL_EVENT_SCHEMA_VERSION.to_owned(),
+                    event_cluster_id: "general_event:authority_friction".to_owned(),
+                    pattern: "Local authority tests protagonist legitimacy.".to_owned(),
+                    event_kind: AutobiographicalGeneralEventKind::RelationshipPattern,
+                    capsule_refs: vec!["relationship:guard_protagonist".to_owned()],
+                    evidence_refs: vec!["relationship_graph_event:turn_0002:00".to_owned()],
+                }],
+                compiler_policy: AutobiographicalIndexPolicy::default(),
+                updated_at: "2026-04-29T00:00:00Z".to_owned(),
+            },
+        )?;
+
+        sync_world_db_materialized_projections(
+            &initialized.world_dir,
+            "stw_autobio_search",
+            "2026-04-29T00:00:00Z",
+        )?;
+
+        let period_hits = search_world_db(
+            &initialized.world_dir,
+            "stw_autobio_search",
+            "stamped token",
+            10,
+        )?;
+        let event_hits = search_world_db(
+            &initialized.world_dir,
+            "stw_autobio_search",
+            "authority tests",
+            10,
+        )?;
+
+        assert!(
+            period_hits
+                .iter()
+                .any(|hit| hit.source_table == "autobiographical_periods")
+        );
+        assert!(
+            event_hits
+                .iter()
+                .any(|hit| { hit.source_table == "autobiographical_general_events" })
         );
         Ok(())
     }

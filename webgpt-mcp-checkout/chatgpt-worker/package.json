@@ -1,0 +1,11 @@
+{
+  "name": "webgpt-mcp-chatgpt-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node ./scripts/build.mjs"
+  },
+  "dependencies": {
+    "playwright-core": "1.59.1"
+  }
+}

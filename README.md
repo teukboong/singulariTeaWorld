@@ -28,6 +28,7 @@ Detailed operator guides:
 
 ```bash
 scripts/smoke-local.sh
+scripts/setup-webgpt-runtime.sh
 
 cargo run --locked --bin singulari-world -- start \
   --seed-text "<world-seed>" \
@@ -35,6 +36,13 @@ cargo run --locked --bin singulari-world -- start \
 
 cargo run --locked --bin singulari-world -- vn-serve --port 4177
 ```
+
+`scripts/setup-webgpt-runtime.sh` is the one-time WebGPT backend prep for a
+fresh clone. It installs the bundled `chatgpt-worker` npm dependencies, rebuilds
+the worker bundle, and builds `webgpt-mcp-checkout/target/release/webgpt-mcp`.
+After that, the default host worker uses this repo's bundled
+`webgpt-mcp-checkout/scripts/webgpt-mcp.sh` without needing a parent
+Hesperides checkout.
 
 ## Common VN Web Play Mode
 
@@ -80,7 +88,7 @@ target/release/singulari-world --store-root .world-store host-worker \
   --interval-ms 750
 ```
 
-By default the worker finds a sibling
+By default the worker uses the bundled
 `webgpt-mcp-checkout/scripts/webgpt-mcp.sh` wrapper, or uses
 `SINGULARI_WORLD_WEBGPT_MCP_WRAPPER` in the process env or repository-local
 `.env` / `--webgpt-mcp-wrapper` for an explicit checkout. It does not inspect
