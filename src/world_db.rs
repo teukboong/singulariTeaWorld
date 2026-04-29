@@ -164,7 +164,7 @@ pub fn initialize_world_db(
         world.world_id.as_str(),
         ANCHOR_CHARACTER_ID,
         SYSTEM_VISIBLE,
-        "초기 극점은 아직 인물, 장소, 물건, 세력, 위협 중 어디에도 고정되지 않았다",
+        "초기 초점은 아직 고정되지 않았다",
         initial_event.event_id.as_str(),
         world.updated_at.as_str(),
     )?;

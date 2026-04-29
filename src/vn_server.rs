@@ -2025,7 +2025,7 @@ premise:
         let response = new_world(
             &state,
             VnNewWorldRequest {
-                seed_text: "중세 변경 마을, 남자 순찰자, 봉인된 길표식".to_owned(),
+                seed_text: "중세 변경 마을, 남자 순찰자, 마법 길표식".to_owned(),
                 title: Some("런처 새 세계".to_owned()),
                 text_backend: Some(WorldTextBackend::Webgpt),
                 visual_backend: Some(WorldVisualBackend::Webgpt),

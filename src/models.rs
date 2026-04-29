@@ -371,27 +371,12 @@ impl CharacterVoiceAnchor {
     #[must_use]
     pub fn protagonist_default() -> Self {
         Self {
-            speech: vec![
-                "모르는 세계 지식은 단정하지 않고 확인한 단서부터 말한다".to_owned(),
-                "모르는 세계 지식은 단정하지 않고 조건을 먼저 세운다".to_owned(),
-            ],
-            endings: vec![
-                "긴장할수록 짧은 평서문과 낮은 의문문으로 끊는다".to_owned(),
-                "결론을 단정하기보다 '~같다', '~부터 보자'처럼 확인의 여지를 남긴다".to_owned(),
-            ],
-            tone: vec![
-                "자기 확신보다 관찰 순서를 앞세우는 절제된 어투를 쓴다".to_owned(),
-                "모르는 일을 아는 척하지 않고, 필요한 말만 낮게 덧붙인다".to_owned(),
-            ],
-            gestures: vec![
-                "이름, 기록, 동의가 얽힐 때 왼손목을 누르거나 가린다".to_owned(),
-                "위험한 선택 전 주변 단서와 사람의 반응을 먼저 본다".to_owned(),
-            ],
-            habits: vec![
-                "능력이나 선택의 대가와 흔적을 먼저 의식한다".to_owned(),
-                "확신보다 관찰을 앞세우고 모르는 부분은 유보한다".to_owned(),
-            ],
-            drift: vec!["상황 파악에서 자기 이름과 선택에 책임지는 선언으로 이동한다".to_owned()],
+            speech: Vec::new(),
+            endings: Vec::new(),
+            tone: Vec::new(),
+            gestures: Vec::new(),
+            habits: Vec::new(),
+            drift: Vec::new(),
         }
     }
 
@@ -411,7 +396,7 @@ impl CharacterVoiceAnchor {
                 "친밀함은 설명보다 거리 조절과 짧은 확인으로 드러낸다".to_owned(),
             ],
             gestures: vec![
-                "위험할수록 손목이나 표식을 감추고, 보호할 때 한 걸음 앞으로 선다".to_owned(),
+                "위험할수록 말보다 위치와 거리로 먼저 경고한다".to_owned(),
                 "가까이 두되 함부로 닿지 않는 거리감으로 신뢰를 표현한다".to_owned(),
             ],
             habits: vec![
@@ -821,8 +806,8 @@ impl EntityRecords {
                 name: "Unresolved dramatic focus".to_owned(),
                 known_to_protagonist: false,
                 notes: vec![
-                    "첫 극점은 인물, 장소, 물건, 세력, 맹세, 위협, 질문 중 플레이어-visible 사건에서 떠오른다".to_owned(),
-                    "시드가 명시하지 않은 숨은 인물이나 운명적 안내자를 자동 생성하지 않는다".to_owned(),
+                    "초기 초점은 플레이어-visible 사건 증거가 생긴 뒤에만 정해진다".to_owned(),
+                    "시드가 명시하지 않은 숨은 구조를 자동 생성하지 않는다".to_owned(),
                 ],
             }],
         }
@@ -838,14 +823,14 @@ impl HiddenState {
             secrets: vec![HiddenStateSecret {
                 secret_id: "sec_dramatic_focus_unresolved_001".to_owned(),
                 status: "veiled".to_owned(),
-                truth: "The initial dramatic focus is unresolved. It may become a character, place, object, faction, oath, threat, or question only after player-visible evidence establishes it.".to_owned(),
+                truth: "The initial dramatic focus is unresolved. It may only become concrete after player-visible evidence establishes it.".to_owned(),
                 reveal_conditions: vec![
                     "the seed explicitly declares a focus".to_owned(),
                     "player-visible scenes establish a repeated pressure center".to_owned(),
                 ],
                 forbidden_leaks: vec![
-                    "do not assume the focus is a hidden character".to_owned(),
-                    "do not turn sparse seeds into reincarnation, system, cheat, or destined-guide stories".to_owned(),
+                    "do not assume a concrete focus before visible evidence".to_owned(),
+                    "do not turn sparse seeds into unstated genre structures".to_owned(),
                 ],
             }],
             timers: Vec::new(),
@@ -865,8 +850,7 @@ impl PlayerKnowledge {
             ],
             open_questions: vec![
                 "첫 장면의 즉시 압력은 아직 구체화되지 않았다".to_owned(),
-                "중요한 인물, 장소, 물건, 세력, 위협은 플레이어-visible 사건에서 정해진다"
-                    .to_owned(),
+                "중요한 세계 사실은 플레이어-visible 사건 증거에서 정해진다".to_owned(),
             ],
         }
     }
@@ -886,12 +870,11 @@ impl TurnSnapshot {
                 location: OPENING_LOCATION_ID.to_owned(),
                 inventory: Vec::new(),
                 body: Vec::new(),
-                mind: vec!["pre-event calm".to_owned()],
+                mind: vec!["pre-event baseline".to_owned()],
             },
             open_questions: vec![
                 "첫 사건은 아직 시작되지 않았다".to_owned(),
-                "이 세계의 극점은 아직 인물, 장소, 물건, 세력, 위협 중 어디에도 고정되지 않았다"
-                    .to_owned(),
+                "이 세계의 초점은 아직 고정되지 않았다".to_owned(),
             ],
             last_choices: default_turn_choices(),
         }
@@ -937,7 +920,7 @@ fn default_presented_choice(slot: u8) -> TurnChoice {
         _ => TurnChoice {
             slot,
             tag: "흐름".to_owned(),
-            intent: "시간, 위험, 주변 움직임이 한 박자 뒤 어떻게 밀려오는지 본다".to_owned(),
+            intent: "현재 확인된 변화가 다음 행동에 어떤 압력을 만드는지 본다".to_owned(),
         },
     }
 }
@@ -1069,15 +1052,15 @@ fn initial_anchor_character(world: &WorldRecord) -> CharacterRecord {
         knowledge_state: "veiled".to_owned(),
         traits: TraitSet {
             confirmed: vec![
-                "초기 극점은 아직 인물로 고정되지 않았다".to_owned(),
+                "초기 초점은 아직 구체화되지 않았다".to_owned(),
                 "플레이어-visible 사건이 반복 압력 중심을 만들 때만 구체화된다".to_owned(),
                 format!("anchor invariant: {}", world.anchor_character.invariant),
             ],
             rumored: Vec::new(),
             hidden: vec![
-                "극점 종류".to_owned(),
+                "초점 종류".to_owned(),
                 "반복 압력의 원인".to_owned(),
-                "세계와 주인공에게 생기는 대가".to_owned(),
+                "세계와 행위자에게 생기는 대가".to_owned(),
             ],
         },
         voice_anchor: CharacterVoiceAnchor::anchor_default(),

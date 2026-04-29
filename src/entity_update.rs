@@ -104,8 +104,7 @@ fn apply_delegated_judgment_trace(
     updates: &mut StructuredEntityUpdates,
     input: &EntityUpdateInput<'_>,
 ) {
-    let relation_summary =
-        "주인공이 세계 안 인물이 아니라 메타 GM 판단 슬롯인 판단 위임에 한 박자를 맡긴 기록";
+    let relation_summary = "플레이어가 위임 선택을 사용한 기록";
     updates.relationship_updates.push(RelationshipUpdateRecord {
         update_id: format!(
             "{}:{}",
@@ -124,7 +123,7 @@ fn apply_delegated_judgment_trace(
 }
 
 fn apply_faction_pressure(updates: &mut StructuredEntityUpdates, input: &EntityUpdateInput<'_>) {
-    let summary = "아직 이름 없는 시간/장소/세력 압력이 흐름 후보로 기록됨".to_owned();
+    let summary = "아직 구체화되지 않은 장면 압력이 흐름 후보로 기록됨".to_owned();
     updates.entity_updates.push(EntityUpdateRecord {
         update_id: format!("{}:{}", input.event.event_id, UPDATE_KIND_FACTION_PRESSURE),
         world_id: input.event.world_id.clone(),

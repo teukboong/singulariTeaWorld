@@ -15,7 +15,7 @@ const GENERATED_WORLD_ID_PREFIX: &str = "stw";
 const MAX_TITLE_CHARS: usize = 32;
 const DEFAULT_NON_GOALS: &[&str] = &[
     "초반부터 세계관 백과를 전부 공개하지 않는다",
-    "시드가 명시하지 않은 전생/치트/시스템/숨은 안내자를 자동 구조로 쓰지 않는다",
+    "시드가 명시하지 않은 장르 장치나 숨은 구조를 자동으로 만들지 않는다",
     "매 턴 최소 하나의 세계 압력을 움직여 건조한 로그가 되지 않게 한다",
 ];
 const GENRE_HINTS: &[&str] = &[
@@ -58,16 +58,6 @@ const PROTAGONIST_HINTS: &[&str] = &[
     "male protagonist",
     "여주",
     "female protagonist",
-    "현대인",
-    "modern person",
-    "전생",
-    "reincarnated",
-    "환생",
-    "reincarnation",
-    "빙의",
-    "possessed",
-    "회귀",
-    "regressor",
     "플레이어",
     "player",
     "용사",
@@ -83,8 +73,6 @@ const PROTAGONIST_HINTS: &[&str] = &[
     "merchant",
 ];
 const SPECIAL_CONDITION_HINTS: &[&str] = &[
-    "치트",
-    "cheat",
     "능력",
     "ability",
     "스킬",
@@ -93,10 +81,6 @@ const SPECIAL_CONDITION_HINTS: &[&str] = &[
     "blessing",
     "저주",
     "curse",
-    "봉인",
-    "seal",
-    "시스템",
-    "system",
     "성좌",
     "constellation",
     "특전",
@@ -105,12 +89,8 @@ const SPECIAL_CONDITION_HINTS: &[&str] = &[
     "awakening",
     "권능",
     "authority",
-    "기억",
-    "memory",
     "마법",
     "magic",
-    "회귀",
-    "regression",
     "talent",
     "gifted",
 ];
@@ -302,7 +282,7 @@ mod tests {
     #[test]
     fn compact_seed_sets_anchor_character_invariant() -> anyhow::Result<()> {
         let seed = world_seed_from_compact_text(
-            "중세 변경 마을, 남자 순찰자, 봉인된 길표식",
+            "중세 변경 마을, 남자 순찰자, 마법 길표식",
             Some("stw_seed_test"),
             Some("테스트 세계"),
         )?;
@@ -313,7 +293,7 @@ mod tests {
         assert_eq!(seed.premise.protagonist, "남자 순찰자");
         assert_eq!(
             seed.premise.special_condition.as_deref(),
-            Some("봉인된 길표식")
+            Some("마법 길표식")
         );
         Ok(())
     }
@@ -340,7 +320,7 @@ mod tests {
     fn start_world_persists_compact_seed() -> anyhow::Result<()> {
         let temp = tempdir()?;
         let started = start_world(&StartWorldOptions {
-            seed_text: "중세 변경 마을, 남자 순찰자, 봉인된 길표식".to_owned(),
+            seed_text: "중세 변경 마을, 남자 순찰자, 마법 길표식".to_owned(),
             world_id: Some("stw_start_test".to_owned()),
             title: None,
             store_root: Some(temp.path().join("store")),

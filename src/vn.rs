@@ -1074,7 +1074,7 @@ fn human_mind_status(mind: &[String]) -> String {
     let visible = mind
         .iter()
         .filter_map(|entry| match entry.as_str() {
-            "pre-event calm" => Some("낯선 상황에서도 침착함".to_owned()),
+            "pre-event baseline" => Some("첫 행동 전 상태를 유지하는 중".to_owned()),
             "선택한 방향으로 몸이 움직이기 시작한다" => {
                 Some("방금 고른 행동의 단서를 정리하는 중".to_owned())
             }
@@ -1083,7 +1083,7 @@ fn human_mind_status(mind: &[String]) -> String {
             value => Some(value.to_owned()),
         })
         .collect::<Vec<_>>();
-    list_or(&visible, "낯선 세계를 붙잡아 해석하는 중")
+    list_or(&visible, "현재 단서를 정리하는 중")
 }
 
 fn need_value(value: Option<&str>) -> String {
@@ -1179,7 +1179,7 @@ fn player_visible_phase(phase: &str) -> String {
 fn display_event(event: &str) -> String {
     match event {
         "" | "none" => "아직 이름 붙은 사건 없음".to_owned(),
-        "interlude" => "첫 사건 전조".to_owned(),
+        "interlude" => "첫 사건 전".to_owned(),
         other => other.to_owned(),
     }
 }

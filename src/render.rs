@@ -111,18 +111,15 @@ fn render_adjudication(adjudication: &AdjudicationReport) -> String {
 fn render_macro_time_flow(packet: &RenderPacket) -> String {
     let mut sections = Vec::new();
     sections.push(format!("## {} — 시간의 흐름", packet.turn_id));
-    sections.push(
-        "시점이 한 걸음 물러난다. 세계는 아직 확정되지 않은 갈피들을 천천히 펼쳐 보인다."
-            .to_owned(),
-    );
+    sections.push("시점이 한 걸음 물러난다. 아직 확정되지 않은 변화 후보만 기록한다.".to_owned());
     sections.push(
         [
-            "### 다가오는 운명의 갈피들",
-            "1. 아직 이름 붙지 않은 첫 사건의 문턱",
-            "2. 몸, 자원, 시간 중 하나가 비용으로 떠오를 가능성",
-            "3. 가까운 장소가 구체적인 위험이나 기회로 변하는 순간",
-            "4. 아직 정해지지 않은 인물, 장소, 물건, 세력 중 하나가 극점이 되는 순간",
-            "5. 다음 사건 압력이 선택지로 좁혀지는 순간",
+            "### 다음 변화 후보",
+            "1. player-visible facts에서 이어질 수 있는 직접 변화",
+            "2. 현재 몸, 자원, 시간 제약 중 실제로 확인된 비용",
+            "3. 현재 위치에서 관찰 가능한 위험이나 기회",
+            "4. 아직 확정되지 않은 초점이 증거로 좁혀지는 순간",
+            "5. 다음 행동 압력이 선택지로 좁혀지는 순간",
         ]
         .join("\n"),
     );
@@ -152,7 +149,7 @@ fn normal_story(packet: &RenderPacket) -> String {
     let dashboard = &packet.visible_state.dashboard;
     let paragraphs = [
         format!(
-            "세계는 `{}`의 표면에서 천천히 숨을 고른다. 아직 문장은 완전한 장편 서사로 부풀지 않았지만, 방금 일어난 변화는 세계의 장부에 남았다.",
+            "`{}`에서 기록된 변화만 남긴다. 아직 장면 서사가 비어 있으므로, 플레이어가 확인한 표면 사실만 표시한다.",
             dashboard.location
         ),
         format!(
@@ -187,7 +184,7 @@ fn render_dashboard(dashboard: &DashboardSummary) -> String {
             "* [🪪 이름: 미정] | [🌱 나이: 미정] | [🔢 턴: {}]",
             dashboard.phase
         ),
-        "* [⏰ 시간: 전조] | [👂 감각: 주변을 더 살펴야 함] | [🍃 바람: 아직 미정] | [⌛ 경과: 한 박자]",
+        "* [⏰ 시간: 미정] | [👂 감각: 추가 관찰 필요] | [🍃 바람: 아직 미정] | [⌛ 경과: 미정]",
     ]
     .join("\n")
 }

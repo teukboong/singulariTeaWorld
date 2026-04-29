@@ -367,13 +367,13 @@ premise:
         vec![
             TurnChoice {
                 slot: 1,
-                tag: "발소리".to_owned(),
-                intent: "젖은 흙 위에 새로 찍힌 발자국을 따라 조심스럽게 움직인다".to_owned(),
+                tag: "단서".to_owned(),
+                intent: "이번 장면에서 새로 드러난 단서를 따라 조심스럽게 움직인다".to_owned(),
             },
             TurnChoice {
                 slot: 2,
                 tag: "몸 상태".to_owned(),
-                intent: "손목의 통증과 낯선 장비가 지금 가능한 행동을 얼마나 제한하는지 살핀다"
+                intent: "현재 몸 상태와 주변 조건이 가능한 행동을 얼마나 제한하는지 살핀다"
                     .to_owned(),
             },
             TurnChoice {
@@ -384,12 +384,12 @@ premise:
             TurnChoice {
                 slot: 4,
                 tag: "기록".to_owned(),
-                intent: "방금 본 문장과 발자국의 의미를 세계 기록에서 대조한다".to_owned(),
+                intent: "방금 본 단서의 의미를 세계 기록에서 대조한다".to_owned(),
             },
             TurnChoice {
                 slot: 5,
                 tag: "먼 시야".to_owned(),
-                intent: "이 장소를 둘러싼 이동 흐름을 한 박자 멀리서 본다".to_owned(),
+                intent: "이 장소를 둘러싼 변화 압력을 더 넓게 본다".to_owned(),
             },
             TurnChoice {
                 slot: 6,

@@ -111,9 +111,7 @@ fn time_gate(input: &AdjudicationInput<'_>) -> AdjudicationGate {
         ),
         TurnInputKind::NumericChoice
         | TurnInputKind::GuideChoice
-        | TurnInputKind::FreeformAction => {
-            constrained_gate("time", "행동은 최소 한 박자의 시간을 소비한다")
-        }
+        | TurnInputKind::FreeformAction => constrained_gate("time", "행동은 실제 시간을 소비한다"),
     }
 }
 

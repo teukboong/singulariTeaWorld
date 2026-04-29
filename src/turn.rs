@@ -452,7 +452,7 @@ fn next_current_event(previous: &TurnSnapshot, input: &ClassifiedInput) -> Optio
     {
         return Some(CurrentEvent {
             event_id: "event_opening_prelude".to_owned(),
-            progress: "첫 전조가 막 움직이기 시작함".to_owned(),
+            progress: "첫 변화가 기록되기 시작함".to_owned(),
             rail_required: true,
         });
     }
@@ -539,15 +539,15 @@ fn build_render_packet(
             },
             scan_targets: vec![
                 ScanTarget {
-                    target: "주인공".to_owned(),
+                    target: "현재 행위자".to_owned(),
                     class: "self".to_owned(),
                     distance: "현재 몸".to_owned(),
-                    thought: "아직 첫 사건의 압력이 완전히 도착하지 않았다".to_owned(),
+                    thought: "아직 장면 압력이 구체화되지 않았다".to_owned(),
                 },
                 ScanTarget {
-                    target: "주변의 긴장".to_owned(),
+                    target: "현재 장면".to_owned(),
                     class: "environment".to_owned(),
-                    distance: "시야 가장자리".to_owned(),
+                    distance: "관찰 범위".to_owned(),
                     thought: "아직 원인을 단정하기에는 단서가 부족하다".to_owned(),
                 },
             ],
@@ -598,12 +598,12 @@ fn event_consequences(
 
 fn mind_note(input: &ClassifiedInput) -> String {
     match input.kind {
-        TurnInputKind::GuideChoice => "판단 위임에 한 박자를 맡기기로 한다".to_owned(),
-        TurnInputKind::CodexQuery => "세계 기록을 열어보려는 주의가 선다".to_owned(),
-        TurnInputKind::MacroTimeFlow => "시간의 흐름을 멀리서 보려 한다".to_owned(),
-        TurnInputKind::CcCanvas => "장면을 다른 표면으로 펼칠 준비가 된다".to_owned(),
-        TurnInputKind::NumericChoice => "선택한 방향으로 몸이 움직이기 시작한다".to_owned(),
-        TurnInputKind::FreeformAction => "즉흥적인 의도가 세계 법칙 앞에 놓인다".to_owned(),
+        TurnInputKind::GuideChoice => "위임 선택이 접수됐다".to_owned(),
+        TurnInputKind::CodexQuery => "공개 기록 조회가 접수됐다".to_owned(),
+        TurnInputKind::MacroTimeFlow => "시간 흐름 조회가 접수됐다".to_owned(),
+        TurnInputKind::CcCanvas => "장면 변환 요청이 접수됐다".to_owned(),
+        TurnInputKind::NumericChoice => "선택한 행동이 접수됐다".to_owned(),
+        TurnInputKind::FreeformAction => "직접 서술한 행동이 접수됐다".to_owned(),
     }
 }
 
