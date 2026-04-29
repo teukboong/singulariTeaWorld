@@ -1746,16 +1746,17 @@ fn handle_host_worker(
             emitted_this_tick = true;
         }
         if options.once {
-            if !emitted_this_tick {
-                emit_host_event(&serde_json::json!({
-                        "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
-                    "event": "worker_idle",
-                    "world_id": world_id,
-                        "text_backend": text_backend.as_str(),
-                        "visual_backend": visual_backend.as_str(),
-                    "consumer": HOST_WORKER_CONSUMER,
-                }))?;
+            if emitted_this_tick {
+                continue;
             }
+            emit_host_event(&serde_json::json!({
+                    "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
+                "event": "worker_idle",
+                "world_id": world_id,
+                    "text_backend": text_backend.as_str(),
+                    "visual_backend": visual_backend.as_str(),
+                "consumer": HOST_WORKER_CONSUMER,
+            }))?;
             break;
         }
         thread::sleep(interval);
