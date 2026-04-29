@@ -203,6 +203,9 @@ pub(super) struct WebGptDispatchRecord {
     pub(super) prompt_path: String,
     pub(super) prompt_context_path: String,
     pub(super) response_path: String,
+    pub(super) repair_attempts: u8,
+    pub(super) repair_prompt_path: Option<String>,
+    pub(super) repair_response_path: Option<String>,
     pub(super) result_path: Option<String>,
     pub(super) stdout_path: String,
     pub(super) stderr_path: String,
@@ -220,6 +223,10 @@ pub(super) struct WebGptDispatchRecord {
     pub(super) completed_at: String,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "text dispatch owns claim, WebGPT call, bounded repair, commit, and durable record"
+)]
 pub(super) fn dispatch_pending_agent_turn_via_webgpt(
     store_root: Option<&Path>,
     pending: &singulari_world::PendingAgentTurn,
@@ -243,6 +250,18 @@ pub(super) fn dispatch_pending_agent_turn_via_webgpt(
     let result_path = dispatch_dir.join(format!("{}-webgpt-result.json", pending.turn_id));
     let stdout_path = dispatch_dir.join(format!("{}-webgpt-stdout.log", pending.turn_id));
     let stderr_path = dispatch_dir.join(format!("{}-webgpt-stderr.log", pending.turn_id));
+    let repair_prompt_path =
+        dispatch_dir.join(format!("{}-webgpt-repair-1-prompt.md", pending.turn_id));
+    let repair_response_path = dispatch_dir.join(format!(
+        "{}-webgpt-repair-1-agent-response.json",
+        pending.turn_id
+    ));
+    let repair_result_path =
+        dispatch_dir.join(format!("{}-webgpt-repair-1-result.json", pending.turn_id));
+    let repair_stdout_path =
+        dispatch_dir.join(format!("{}-webgpt-repair-1-stdout.log", pending.turn_id));
+    let repair_stderr_path =
+        dispatch_dir.join(format!("{}-webgpt-repair-1-stderr.log", pending.turn_id));
     let prompt_artifacts =
         write_webgpt_prompt_artifacts(store_root, pending, &prompt_context_path, &prompt_path)?;
     let dispatcher = resolve_webgpt_dispatcher(store_root, pending, options)?;
@@ -280,8 +299,8 @@ pub(super) fn dispatch_pending_agent_turn_via_webgpt(
         None,
     )?;
 
-    let dispatch_result = dispatcher.run(paths)?;
-    let mcp_completed_at = Utc::now();
+    let mut dispatch_result = dispatcher.run(paths)?;
+    let mut mcp_completed_at = Utc::now();
     if let Some(raw_conversation_id) = dispatch_result.raw_conversation_id.as_deref() {
         save_webgpt_conversation_binding(
             store_root,
@@ -291,20 +310,67 @@ pub(super) fn dispatch_pending_agent_turn_via_webgpt(
         )?;
     }
 
-    let commit_result = commit_webgpt_dispatch_if_success(
+    let mut final_paths = paths;
+    let mut commit_result = commit_webgpt_dispatch_if_success(
         store_root,
         pending,
         response_path.as_path(),
         &dispatch_result,
     );
+    let mut repair_attempts = 0;
+    if let Some(error) = commit_result.error.as_deref()
+        && dispatch_result.success
+        && is_repairable_webgpt_commit_error(error)
+    {
+        repair_attempts = 1;
+        write_webgpt_repair_prompt(
+            prompt_path.as_path(),
+            prompt_context_path.as_path(),
+            response_path.as_path(),
+            error,
+            repair_prompt_path.as_path(),
+        )?;
+        final_paths = WebGptTurnPaths {
+            world_id: pending.world_id.as_str(),
+            turn_id: pending.turn_id.as_str(),
+            prompt_path: repair_prompt_path.as_path(),
+            prompt_context_path: prompt_context_path.as_path(),
+            response_path: repair_response_path.as_path(),
+            result_path: repair_result_path.as_path(),
+            stdout_path: repair_stdout_path.as_path(),
+            stderr_path: repair_stderr_path.as_path(),
+        };
+        dispatch_result = dispatcher.run(final_paths)?;
+        mcp_completed_at = Utc::now();
+        if let Some(raw_conversation_id) = dispatch_result.raw_conversation_id.as_deref() {
+            save_webgpt_conversation_binding(
+                store_root,
+                pending.world_id.as_str(),
+                WebGptConversationLane::Text,
+                raw_conversation_id,
+            )?;
+        }
+        commit_result = commit_webgpt_dispatch_if_success(
+            store_root,
+            pending,
+            repair_response_path.as_path(),
+            &dispatch_result,
+        );
+    }
 
     let record = webgpt_dispatch_record(
         pending,
         &dispatcher,
-        paths,
+        final_paths,
         record_path.as_path(),
         dispatch_result,
         commit_result,
+        WebGptRepairRecord {
+            attempts: repair_attempts,
+            prompt_path: (repair_attempts > 0).then(|| repair_prompt_path.display().to_string()),
+            response_path: (repair_attempts > 0)
+                .then(|| repair_response_path.display().to_string()),
+        },
         WebGptDispatchTiming {
             dispatched_at,
             mcp_completed_at,
@@ -355,6 +421,70 @@ fn write_webgpt_prompt_artifacts(
     })
 }
 
+fn write_webgpt_repair_prompt(
+    original_prompt_path: &Path,
+    prompt_context_path: &Path,
+    rejected_response_path: &Path,
+    commit_error: &str,
+    repair_prompt_path: &Path,
+) -> Result<()> {
+    let original_prompt = fs::read_to_string(original_prompt_path)
+        .with_context(|| format!("failed to read {}", original_prompt_path.display()))?;
+    let rejected_response = fs::read_to_string(rejected_response_path)
+        .with_context(|| format!("failed to read {}", rejected_response_path.display()))?;
+    let repair_prompt = format!(
+        r"{original_prompt}
+
+## Structured Repair Request
+
+The previous AgentTurnResponse was rejected before world mutation.
+
+Commit/audit error:
+
+```text
+{commit_error}
+```
+
+Rejected AgentTurnResponse:
+
+```json
+{rejected_response}
+```
+
+Repair scope:
+
+- Return one complete `AgentTurnResponse` JSON object only.
+- Keep the same `schema_version`, `world_id`, and `turn_id`.
+- Do not ask for more context unless the original prompt context truly cannot
+  support a safe turn.
+- Change only the invalid proposal, choice grounding, actor agency, or
+  evidence fields needed to satisfy the audit.
+- Preserve player-visible continuity from the original prompt.
+- Hidden/adjudication-only details must not appear in visible_scene,
+  next_choices, player-visible summaries, image prompts, or Codex View fields.
+
+Prompt context artifact path for audit reference:
+
+```text
+{}
+```
+",
+        prompt_context_path.display()
+    );
+    fs::write(repair_prompt_path, repair_prompt.as_bytes())
+        .with_context(|| format!("failed to write {}", repair_prompt_path.display()))
+}
+
+fn is_repairable_webgpt_commit_error(error: &str) -> bool {
+    [
+        "resolution proposal audit failed",
+        "agent response next_choices",
+        "actor agency update",
+    ]
+    .iter()
+    .any(|needle| error.contains(needle))
+}
+
 fn write_webgpt_text_job(
     store_root: Option<&Path>,
     pending: &singulari_world::PendingAgentTurn,
@@ -375,6 +505,10 @@ fn write_webgpt_text_job(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "record assembly is clearer with explicit dispatch, commit, repair, and timing inputs"
+)]
 fn webgpt_dispatch_record(
     pending: &singulari_world::PendingAgentTurn,
     dispatcher: &WebGptDispatcher,
@@ -382,6 +516,7 @@ fn webgpt_dispatch_record(
     record_path: &Path,
     dispatch_result: WebGptDispatchResult,
     commit_result: WebGptCommitResult,
+    repair: WebGptRepairRecord,
     timing: WebGptDispatchTiming,
 ) -> WebGptDispatchRecord {
     let completed_at = Utc::now();
@@ -404,6 +539,9 @@ fn webgpt_dispatch_record(
         prompt_path: paths.prompt_path.display().to_string(),
         prompt_context_path: paths.prompt_context_path.display().to_string(),
         response_path: paths.response_path.display().to_string(),
+        repair_attempts: repair.attempts,
+        repair_prompt_path: repair.prompt_path,
+        repair_response_path: repair.response_path,
         result_path: Some(paths.result_path.display().to_string()),
         stdout_path: paths.stdout_path.display().to_string(),
         stderr_path: paths.stderr_path.display().to_string(),
@@ -429,6 +567,12 @@ fn webgpt_dispatch_record(
         error: dispatch_result.error.or(commit_result.error),
         completed_at: completed_at.to_rfc3339(),
     }
+}
+
+struct WebGptRepairRecord {
+    attempts: u8,
+    prompt_path: Option<String>,
+    response_path: Option<String>,
 }
 
 #[derive(Clone, Copy)]

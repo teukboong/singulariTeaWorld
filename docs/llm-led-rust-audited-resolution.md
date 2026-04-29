@@ -240,7 +240,7 @@ Minimum audit checks:
 
 Audit failure should not silently fallback to generic narration.
 
-## Structured Repair Loop
+## Structured Repair Loop — implemented
 
 When the proposal is close but invalid, Rust should return a narrow critique and
 allow a bounded retry.
@@ -269,9 +269,14 @@ Repair examples:
 
 Retry policy:
 
-- one retry for schema or visibility repair
-- one retry for gate/evidence repair
+- one retry for resolution, choice-grounding, or actor-agency repair
 - terminal failure if the repaired proposal still mutates unsupported state
+
+The WebGPT host worker now performs that single bounded repair automatically for
+repairable commit failures. It writes a repair prompt containing the audit
+error and rejected `AgentTurnResponse`, asks WebGPT for a complete replacement
+response, then commits only if the replacement passes the same Rust audit.
+Non-repairable failures still fail loud before mutation.
 
 ## Freeform Slot 6
 
