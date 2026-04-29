@@ -6,6 +6,9 @@ use crate::consequence_spine::{
 };
 use crate::relationship_graph::RelationshipGraphPacket;
 use crate::response_context::ContextVisibility;
+use crate::social_exchange::{
+    DialogueStanceKind, SocialExchangePacket, SocialIntensity, UnresolvedSocialAsk,
+};
 use crate::store::{append_jsonl, read_json, write_json};
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
@@ -321,6 +324,112 @@ pub fn merge_consequence_actor_agency(
             .clone_into(&mut packet.compiler_policy.source);
     }
     packet
+}
+
+#[must_use]
+pub fn merge_social_exchange_actor_agency(
+    mut packet: ActorAgencyPacket,
+    social_exchange: &SocialExchangePacket,
+) -> ActorAgencyPacket {
+    let mut existing_goals = packet
+        .active_goals
+        .iter()
+        .map(|goal| goal.goal_id.clone())
+        .collect::<BTreeSet<_>>();
+    for stance in &social_exchange.active_stances {
+        if packet.active_goals.len() >= packet.compiler_policy.active_goal_budget {
+            break;
+        }
+        if !stance_should_drive_actor(stance.stance, stance.intensity) {
+            continue;
+        }
+        let goal_id = format!("goal:social_stance:{}", stance.stance_id);
+        if !existing_goals.insert(goal_id.clone()) {
+            continue;
+        }
+        packet.active_goals.push(ActorGoal {
+            schema_version: ACTOR_GOAL_SCHEMA_VERSION.to_owned(),
+            actor_ref: stance.actor_ref.clone(),
+            goal_id,
+            visibility: ContextVisibility::PlayerVisible,
+            desire: actor_desire_from_stance(stance.stance),
+            fear_or_constraint: stance.player_visible_signal.clone(),
+            current_leverage: stance
+                .relationship_refs
+                .iter()
+                .chain(stance.consequence_refs.iter())
+                .cloned()
+                .collect(),
+            pressure_refs: vec![format!("pressure:social_stance:{}", stance.stance_id)],
+            evidence_refs: stance.source_refs.clone(),
+            source_event_id: format!("social_exchange:{}", stance.stance_id),
+        });
+    }
+    for ask in &social_exchange.unresolved_asks {
+        if packet.active_goals.len() >= packet.compiler_policy.active_goal_budget {
+            break;
+        }
+        let goal_id = format!("goal:unresolved_ask:{}", ask.ask_id);
+        if !existing_goals.insert(goal_id.clone()) {
+            continue;
+        }
+        packet
+            .active_goals
+            .push(goal_from_unresolved_ask(ask, goal_id));
+    }
+    if !social_exchange.active_stances.is_empty() || !social_exchange.unresolved_asks.is_empty() {
+        "materialized_from_actor_events_consequences_and_social_exchange_v1"
+            .clone_into(&mut packet.compiler_policy.source);
+    }
+    packet
+}
+
+fn stance_should_drive_actor(stance: DialogueStanceKind, intensity: SocialIntensity) -> bool {
+    matches!(
+        intensity,
+        SocialIntensity::Medium | SocialIntensity::High | SocialIntensity::Crisis
+    ) && matches!(
+        stance,
+        DialogueStanceKind::WaryTesting
+            | DialogueStanceKind::Evasive
+            | DialogueStanceKind::Threatening
+            | DialogueStanceKind::Bargaining
+            | DialogueStanceKind::Indebted
+            | DialogueStanceKind::Pressuring
+            | DialogueStanceKind::Withholding
+    )
+}
+
+fn actor_desire_from_stance(stance: DialogueStanceKind) -> String {
+    match stance {
+        DialogueStanceKind::WaryTesting => "상대의 신원이나 의도를 먼저 확인하려 한다.",
+        DialogueStanceKind::Evasive | DialogueStanceKind::Withholding => {
+            "정보를 바로 내주지 않고 조건이나 우회로를 유지하려 한다."
+        }
+        DialogueStanceKind::Threatening | DialogueStanceKind::Pressuring => {
+            "대화 압박을 유지해 플레이어 선택을 좁히려 한다."
+        }
+        DialogueStanceKind::Bargaining => "도움이나 정보를 교환 조건으로 묶으려 한다.",
+        DialogueStanceKind::Indebted => "남은 빚을 인정하되 위험을 제한하려 한다.",
+        _ => "현재 대화 태도에 맞춰 거리를 조정한다.",
+    }
+    .to_owned()
+}
+
+fn goal_from_unresolved_ask(ask: &UnresolvedSocialAsk, goal_id: String) -> ActorGoal {
+    ActorGoal {
+        schema_version: ACTOR_GOAL_SCHEMA_VERSION.to_owned(),
+        actor_ref: ask.asked_to_ref.clone(),
+        goal_id,
+        visibility: ContextVisibility::PlayerVisible,
+        desire: "미해결 질문에 대한 답변, 회피, 조건 제시 중 하나로 대화 압력을 정리하려 한다."
+            .to_owned(),
+        fear_or_constraint: ask.last_response.clone(),
+        current_leverage: ask.allowed_next_moves.clone(),
+        pressure_refs: vec![format!("pressure:unresolved_ask:{}", ask.ask_id)],
+        evidence_refs: ask.source_refs.clone(),
+        source_event_id: format!("social_exchange:{}", ask.ask_id),
+    }
 }
 
 fn consequence_should_drive_actor(consequence: &ActiveConsequence) -> bool {
@@ -664,6 +773,42 @@ mod tests {
         assert!(packet.active_goals[0].pressure_refs[0].starts_with("pressure:consequence:"));
     }
 
+    #[test]
+    fn social_exchange_creates_actor_goal_leverage() {
+        let packet = merge_social_exchange_actor_agency(
+            ActorAgencyPacket {
+                world_id: "stw_actor".to_owned(),
+                turn_id: "turn_0004".to_owned(),
+                ..ActorAgencyPacket::default()
+            },
+            &SocialExchangePacket {
+                world_id: "stw_actor".to_owned(),
+                turn_id: "turn_0004".to_owned(),
+                active_stances: vec![crate::social_exchange::DialogueStance {
+                    schema_version: crate::social_exchange::SOCIAL_EXCHANGE_STANCE_SCHEMA_VERSION
+                        .to_owned(),
+                    stance_id: "stance:char:guard->player".to_owned(),
+                    actor_ref: "char:guard".to_owned(),
+                    target_ref: "player".to_owned(),
+                    stance: DialogueStanceKind::Withholding,
+                    intensity: SocialIntensity::High,
+                    summary: "문지기가 답을 미룬다.".to_owned(),
+                    player_visible_signal: "신원 확인 전에는 답하지 않는다.".to_owned(),
+                    source_refs: vec!["visible_scene.text_blocks[0]".to_owned()],
+                    relationship_refs: Vec::new(),
+                    consequence_refs: Vec::new(),
+                    opened_turn_id: "turn_0003".to_owned(),
+                    last_changed_turn_id: "turn_0004".to_owned(),
+                }],
+                ..SocialExchangePacket::default()
+            },
+        );
+
+        assert_eq!(packet.active_goals.len(), 1);
+        assert_eq!(packet.active_goals[0].actor_ref, "char:guard");
+        assert!(packet.active_goals[0].pressure_refs[0].starts_with("pressure:social_stance:"));
+    }
+
     fn sample_relationship_graph() -> RelationshipGraphPacket {
         RelationshipGraphPacket {
             schema_version: crate::relationship_graph::RELATIONSHIP_GRAPH_PACKET_SCHEMA_VERSION
@@ -693,6 +838,7 @@ mod tests {
             resolution_proposal: None,
             scene_director_proposal: None,
             consequence_proposal: None,
+            social_exchange_proposal: None,
             visible_scene: NarrativeScene {
                 schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                 speaker: None,

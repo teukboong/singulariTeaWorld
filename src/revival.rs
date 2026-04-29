@@ -183,6 +183,7 @@ pub fn build_agent_revival_packet(options: &AgentRevivalCompileOptions<'_>) -> R
             "active_narrative_style_state": pending.visible_context.active_narrative_style_state,
             "active_scene_director": pending.visible_context.active_scene_director,
             "active_consequence_spine": pending.visible_context.active_consequence_spine,
+            "active_social_exchange": pending.visible_context.active_social_exchange,
             "active_turn_retrieval_controller": pending.visible_context.active_turn_retrieval_controller,
             "selected_context_capsules": pending.visible_context.selected_context_capsules,
             "active_autobiographical_index": pending.visible_context.active_autobiographical_index,

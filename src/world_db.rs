@@ -22,6 +22,7 @@ use crate::plot_thread::PLOT_THREADS_FILENAME;
 use crate::relationship_graph::{RELATIONSHIP_GRAPH_FILENAME, RelationshipGraphPacket};
 use crate::scene_director::SCENE_DIRECTOR_FILENAME;
 use crate::scene_pressure::ACTIVE_SCENE_PRESSURES_FILENAME;
+use crate::social_exchange::DIALOGUE_STANCE_FILENAME;
 use crate::sqlite::{
     Connection, OpenFlags, OptionalExtension, SQLITE_BUSY_TIMEOUT_MS, SqliteConnectionOptions,
     configure_sqlite_connection, params,
@@ -3399,6 +3400,12 @@ const MATERIALIZED_PROJECTION_FILES: &[MaterializedProjectionFile] = &[
         kind: "consequence_spine",
         title: "선택의 여파",
         filename: ACTIVE_CONSEQUENCES_FILENAME,
+    },
+    MaterializedProjectionFile {
+        id: "dialogue_stance",
+        kind: "social_exchange",
+        title: "대화 태도와 교환",
+        filename: DIALOGUE_STANCE_FILENAME,
     },
     MaterializedProjectionFile {
         id: "visual_asset_graph",

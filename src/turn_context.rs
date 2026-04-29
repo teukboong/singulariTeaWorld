@@ -101,6 +101,7 @@ mod tests {
     use crate::relationship_graph::RelationshipGraphPacket;
     use crate::scene_director::SceneDirectorPacket;
     use crate::scene_pressure::ScenePressurePacket;
+    use crate::social_exchange::SocialExchangePacket;
     use crate::turn_retrieval_controller::TurnRetrievalControllerPacket;
     use crate::world_lore::WorldLorePacket;
     use crate::world_process_clock::WorldProcessClockPacket;
@@ -136,6 +137,7 @@ mod tests {
                 active_narrative_style_state: NarrativeStyleState::default(),
                 active_scene_director: SceneDirectorPacket::default(),
                 active_consequence_spine: ConsequenceSpinePacket::default(),
+                active_social_exchange: SocialExchangePacket::default(),
                 active_turn_retrieval_controller: TurnRetrievalControllerPacket::default(),
                 selected_context_capsules: ContextCapsuleSelection::default(),
                 active_autobiographical_index: AutobiographicalIndexPacket::default(),

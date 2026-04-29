@@ -15,6 +15,7 @@ use crate::models::FREEFORM_CHOICE_SLOT;
 use crate::projection_health::{ProjectionHealthReport, build_projection_health_report};
 use crate::repair_extra_memory_projection;
 use crate::scene_director::SCENE_DIRECTOR_FILENAME;
+use crate::social_exchange::DIALOGUE_STANCE_FILENAME;
 use crate::start::{StartWorldOptions, start_world};
 use crate::store::{
     WORLD_FILENAME, load_active_world_if_present, read_json, resolve_store_paths, resolve_world_id,
@@ -252,6 +253,7 @@ struct VnRuntimeDetails {
     latest_visual_dispatch: Option<serde_json::Value>,
     scene_director: Option<serde_json::Value>,
     consequence_spine: Option<serde_json::Value>,
+    social_exchange: Option<serde_json::Value>,
     world_jobs: Vec<WorldJob>,
     projection_health: ProjectionHealthReport,
     host_supervisor: HostSupervisorPlan,
@@ -820,6 +822,11 @@ fn runtime_status(state: &VnServerState) -> Result<VnRuntimeStatusResponse> {
                 state,
                 world_id.as_str(),
                 ACTIVE_CONSEQUENCES_FILENAME,
+            )?,
+            social_exchange: materialized_runtime_details(
+                state,
+                world_id.as_str(),
+                DIALOGUE_STANCE_FILENAME,
             )?,
             world_jobs,
             projection_health,

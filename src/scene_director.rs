@@ -390,6 +390,7 @@ pub fn compile_scene_director_packet(
         active_actor_agency: None,
         active_world_process_clock: None,
         active_player_intent_trace: None,
+        active_social_exchange: None,
         recent_scene_window: None,
     })
 }
@@ -404,6 +405,7 @@ pub struct SceneDirectorCompileInput<'a> {
     pub active_actor_agency: Option<&'a Value>,
     pub active_world_process_clock: Option<&'a Value>,
     pub active_player_intent_trace: Option<&'a Value>,
+    pub active_social_exchange: Option<&'a Value>,
     pub recent_scene_window: Option<&'a Value>,
 }
 
@@ -444,6 +446,7 @@ pub fn compile_scene_director_packet_from_input(
         repetition.scene_beat,
         unresolved_probe_turns,
         scene_signals.has_active_actor_leverage,
+        scene_signals.has_social_dialogue_pressure,
         scene_signals.has_active_process_pressure,
         &dominant_pressure_refs,
     );
@@ -499,6 +502,7 @@ fn scene_id_for(turn_id: &str, scene_question: &str) -> String {
 }
 
 #[derive(Debug, Default)]
+#[allow(clippy::struct_excessive_bools)]
 struct SceneDirectorSignals {
     actor_refs: Vec<String>,
     unresolved_visible_threads: Vec<String>,
@@ -506,6 +510,7 @@ struct SceneDirectorSignals {
     unresolved_probe_turns: u8,
     process_transition_pressure: bool,
     has_active_actor_leverage: bool,
+    has_social_dialogue_pressure: bool,
     has_active_process_pressure: bool,
 }
 
@@ -523,6 +528,9 @@ fn collect_scene_director_signals(input: &SceneDirectorCompileInput<'_>) -> Scen
     if let Some(player_intent_trace) = input.active_player_intent_trace {
         collect_player_intent_signals(player_intent_trace, &mut signals);
     }
+    if let Some(social_exchange) = input.active_social_exchange {
+        collect_social_exchange_signals(social_exchange, &mut signals);
+    }
     if let Some(recent_scene_window) = input.recent_scene_window {
         collect_recent_scene_signals(recent_scene_window, &mut signals);
     }
@@ -531,6 +539,40 @@ fn collect_scene_director_signals(input: &SceneDirectorCompileInput<'_>) -> Scen
     signals.unresolved_visible_threads.sort();
     signals.unresolved_visible_threads.dedup();
     signals
+}
+
+fn collect_social_exchange_signals(social_exchange: &Value, signals: &mut SceneDirectorSignals) {
+    for stance in social_exchange
+        .get("active_stances")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(actor_ref) = stance.get("actor_ref").and_then(Value::as_str) {
+            signals.actor_refs.push(actor_ref.to_owned());
+        }
+        if stance
+            .get("intensity")
+            .and_then(Value::as_str)
+            .is_some_and(|intensity| matches!(intensity, "medium" | "high" | "crisis"))
+        {
+            signals.has_social_dialogue_pressure = true;
+        }
+    }
+    if social_exchange
+        .get("unresolved_asks")
+        .and_then(Value::as_array)
+        .is_some_and(|asks| !asks.is_empty())
+    {
+        signals.unresolved_probe_turns = signals.unresolved_probe_turns.saturating_add(1);
+    }
+    if social_exchange
+        .get("active_commitments")
+        .and_then(Value::as_array)
+        .is_some_and(|commitments| !commitments.is_empty())
+    {
+        signals.has_social_dialogue_pressure = true;
+    }
 }
 
 fn collect_plot_thread_signals(plot_threads: &Value, signals: &mut SceneDirectorSignals) {
@@ -840,12 +882,14 @@ fn inferred_recent_beats(
 }
 
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 fn recommendations(
     tension: TensionLevel,
     transition_pressure: TransitionPressure,
     repeated_scene_beat_count: u8,
     unresolved_probe_turns: u8,
     has_active_actor_leverage: bool,
+    has_social_dialogue_pressure: bool,
     has_active_process_pressure: bool,
     pressure_refs: &[String],
 ) -> Vec<DramaticBeatRecommendation> {
@@ -901,6 +945,20 @@ fn recommendations(
             recommendation(
                 DramaticBeatKind::Complicate,
                 "Let the actor pressure change the problem shape without inventing hidden motive.",
+                pressure_refs,
+            ),
+        ];
+    }
+    if has_social_dialogue_pressure {
+        return vec![
+            recommendation(
+                DramaticBeatKind::ChoicePressure,
+                "Active dialogue stance, commitment, or unresolved ask should reshape the next social option.",
+                pressure_refs,
+            ),
+            recommendation(
+                DramaticBeatKind::Complicate,
+                "Let the social exchange contract change dialogue posture without exposing hidden motive.",
                 pressure_refs,
             ),
         ];
@@ -1867,6 +1925,7 @@ mod tests {
                     "evidence": "단서를 확인한다"
                 }]
             })),
+            active_social_exchange: None,
             recent_scene_window: Some(&json!(["표식을 살핀다.", "다시 묻는다."])),
         });
 

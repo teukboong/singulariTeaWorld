@@ -10,6 +10,7 @@ use crate::response_context::{
     AgentContextEventRecord, AgentContextProjection, load_agent_context_event_records,
     load_agent_context_projection,
 };
+use crate::social_exchange::{SocialExchangePacket, load_social_exchange_state};
 use crate::store::{TURN_LOG_FILENAME, load_world_record, resolve_store_paths, world_file_paths};
 use crate::visual_asset_graph::{
     VisualAssetGraphPacket, compile_visual_asset_graph_packet, load_visual_asset_graph_state,
@@ -621,6 +622,14 @@ fn vn_codex_surface(
     context_events.reverse();
     context_events.truncate(12);
     let context_projection = load_agent_context_projection(files.dir.as_path())?;
+    let active_social_exchange = load_social_exchange_state(
+        files.dir.as_path(),
+        SocialExchangePacket {
+            world_id: world.world_id.clone(),
+            turn_id: packet.turn_id.clone(),
+            ..SocialExchangePacket::default()
+        },
+    )?;
     Ok(VnCodexSurface {
         full_markdown: redact_guide_choice_public_hints(&render_packet_markdown(packet)),
         dashboard: player_visible_dashboard(world, &packet.visible_state.dashboard, place_record),
@@ -634,6 +643,7 @@ fn vn_codex_surface(
             &packet.visible_state.dashboard,
             place_record,
             protagonist_record,
+            &active_social_exchange,
         ),
         turn_log,
         context_events,
@@ -790,6 +800,7 @@ fn protagonist_status(
     dashboard: &DashboardSummary,
     place: Option<&crate::models::PlaceRecord>,
     protagonist: Option<&crate::models::CharacterRecord>,
+    active_social_exchange: &SocialExchangePacket,
 ) -> VnProtagonistStatus {
     let protagonist_name = protagonist
         .map(|character| character.name.visible.as_str())
@@ -844,6 +855,7 @@ fn protagonist_status(
         body: &body,
         mind: &mind,
         open_questions: &open_questions,
+        active_social_exchange,
     };
     let dashboard_rows = protagonist_status_rows(&status_source);
     VnProtagonistStatus {
@@ -880,6 +892,7 @@ struct VnStatusRowSource<'a> {
     body: &'a [String],
     mind: &'a [String],
     open_questions: &'a [String],
+    active_social_exchange: &'a SocialExchangePacket,
 }
 
 fn protagonist_status_rows(source: &VnStatusRowSource<'_>) -> Vec<VnStatusRow> {
@@ -1009,6 +1022,7 @@ fn condition_row(source: &VnStatusRowSource<'_>) -> VnStatusRow {
                 "여파",
                 consequence_status(source.dashboard.status.as_str(), source.open_questions),
             ),
+            status_cell("💬", "대화", dialogue_status(source.active_social_exchange)),
             status_cell("🕯️", "희망", hope_status(source.open_questions)),
             status_cell("⚠️", "치명 상태", critical_status(source.body)),
         ],
@@ -1152,6 +1166,43 @@ fn consequence_status(status: &str, open_questions: &[String]) -> String {
     } else {
         "여파는 잠잠하지만 기록됨".to_owned()
     }
+}
+
+fn dialogue_status(social_exchange: &SocialExchangePacket) -> String {
+    if social_exchange.unresolved_asks.iter().any(|ask| {
+        matches!(
+            ask.current_status,
+            crate::social_exchange::AskStatus::Evaded
+        )
+    }) {
+        return "답변이 유보된 질문이 있음".to_owned();
+    }
+    if !social_exchange.active_commitments.is_empty() {
+        return "대화가 조건에 걸려 있음".to_owned();
+    }
+    if let Some(stance) = social_exchange.active_stances.first() {
+        return match stance.stance {
+            crate::social_exchange::DialogueStanceKind::WaryTesting => {
+                "상대가 아직 시험하는 중".to_owned()
+            }
+            crate::social_exchange::DialogueStanceKind::Evasive
+            | crate::social_exchange::DialogueStanceKind::Withholding => {
+                "답변이 아직 열리지 않음".to_owned()
+            }
+            crate::social_exchange::DialogueStanceKind::Bargaining => {
+                "대화가 교환 조건을 요구함".to_owned()
+            }
+            crate::social_exchange::DialogueStanceKind::Indebted => {
+                "빚이나 약속이 대화에 남아 있음".to_owned()
+            }
+            crate::social_exchange::DialogueStanceKind::Threatening
+            | crate::social_exchange::DialogueStanceKind::Pressuring => {
+                "대화 압박이 남아 있음".to_owned()
+            }
+            _ => "대화는 잠시 중립".to_owned(),
+        };
+    }
+    "대화는 잠시 중립".to_owned()
 }
 
 fn critical_status(body: &[String]) -> String {

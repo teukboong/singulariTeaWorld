@@ -5,6 +5,9 @@ use crate::resolution::{
     GateKind, GateStatus, ProposedEffectKind, ResolutionOutcomeKind, ResolutionProposal,
     ResolutionVisibility,
 };
+use crate::social_exchange::{
+    DialogueStanceKind, SocialCommitmentKind, SocialExchangeProposal, SocialIntensity,
+};
 use crate::store::{append_jsonl, read_json, write_json};
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
@@ -294,6 +297,7 @@ pub fn prepare_consequence_event_plan(
     current: &ConsequenceSpinePacket,
     proposal: Option<&ConsequenceProposal>,
     resolution: Option<&ResolutionProposal>,
+    social_exchange: Option<&SocialExchangeProposal>,
 ) -> Result<ConsequenceEventPlan> {
     let mut records = Vec::new();
     let recorded_at = Utc::now().to_rfc3339();
@@ -358,6 +362,20 @@ pub fn prepare_consequence_event_plan(
         let mut derived = derive_consequence_records(
             current,
             resolution,
+            records.len(),
+            &existing_refs,
+            recorded_at.as_str(),
+        );
+        records.append(&mut derived);
+    }
+    if let Some(social_exchange) = social_exchange {
+        let existing_refs = records
+            .iter()
+            .flat_map(|record| record.source_refs.iter().map(String::as_str))
+            .collect::<BTreeSet<_>>();
+        let mut derived = derive_consequence_records_from_social_exchange(
+            current,
+            social_exchange,
             records.len(),
             &existing_refs,
             recorded_at.as_str(),
@@ -687,6 +705,154 @@ fn derive_consequence_records(
     records
 }
 
+fn derive_consequence_records_from_social_exchange(
+    current: &ConsequenceSpinePacket,
+    social_exchange: &SocialExchangeProposal,
+    offset: usize,
+    existing_refs: &BTreeSet<&str>,
+    recorded_at: &str,
+) -> Vec<ConsequenceEventRecord> {
+    let mut records = Vec::new();
+    for (index, exchange) in social_exchange.exchanges.iter().enumerate() {
+        if exchange
+            .source_refs
+            .iter()
+            .any(|reference| existing_refs.contains(reference.as_str()))
+            || !exchange_should_be_consequence(exchange.stance_after, exchange.intensity_after)
+        {
+            continue;
+        }
+        records.push(derived_social_record(
+            current,
+            offset + records.len(),
+            consequence_kind_from_stance(exchange.stance_after),
+            ConsequenceScope::Relationship,
+            severity_from_social_intensity(exchange.intensity_after),
+            format!(
+                "consequence:{}:social_exchange:{index}",
+                social_exchange.turn_id
+            ),
+            exchange.summary.clone(),
+            exchange.player_visible_signal.clone(),
+            exchange.source_refs.clone(),
+            exchange
+                .relationship_refs
+                .iter()
+                .chain(exchange.consequence_refs.iter())
+                .cloned()
+                .collect(),
+            recorded_at,
+        ));
+    }
+    for (index, commitment) in social_exchange.commitments.iter().enumerate() {
+        if commitment
+            .source_refs
+            .iter()
+            .any(|reference| existing_refs.contains(reference.as_str()))
+        {
+            continue;
+        }
+        records.push(derived_social_record(
+            current,
+            offset + records.len(),
+            consequence_kind_from_commitment(commitment.kind),
+            ConsequenceScope::Relationship,
+            ConsequenceSeverity::Moderate,
+            format!(
+                "consequence:{}:social_commitment:{index}",
+                social_exchange.turn_id
+            ),
+            commitment.summary.clone(),
+            commitment.condition.clone(),
+            commitment.source_refs.clone(),
+            commitment.consequence_refs.clone(),
+            recorded_at,
+        ));
+    }
+    records
+}
+
+#[allow(clippy::too_many_arguments)]
+fn derived_social_record(
+    current: &ConsequenceSpinePacket,
+    index: usize,
+    kind: ConsequenceKind,
+    scope: ConsequenceScope,
+    severity: ConsequenceSeverity,
+    consequence_id: String,
+    summary: String,
+    player_visible_signal: String,
+    source_refs: Vec<String>,
+    linked_projection_refs: Vec<String>,
+    recorded_at: &str,
+) -> ConsequenceEventRecord {
+    ConsequenceEventRecord {
+        schema_version: CONSEQUENCE_EVENT_SCHEMA_VERSION.to_owned(),
+        world_id: current.world_id.clone(),
+        turn_id: current.turn_id.clone(),
+        event_id: format!("consequence_event:{}:{index:02}", current.turn_id),
+        consequence_id,
+        event_kind: ConsequenceEventKind::Introduced,
+        kind,
+        scope,
+        severity,
+        summary,
+        player_visible_signal,
+        source_refs,
+        linked_entity_refs: Vec::new(),
+        linked_projection_refs,
+        recorded_at: recorded_at.to_owned(),
+    }
+}
+
+fn exchange_should_be_consequence(stance: DialogueStanceKind, intensity: SocialIntensity) -> bool {
+    matches!(intensity, SocialIntensity::High | SocialIntensity::Crisis)
+        || matches!(
+            stance,
+            DialogueStanceKind::Offended
+                | DialogueStanceKind::Threatening
+                | DialogueStanceKind::Indebted
+                | DialogueStanceKind::Withholding
+        )
+}
+
+const fn consequence_kind_from_stance(stance: DialogueStanceKind) -> ConsequenceKind {
+    match stance {
+        DialogueStanceKind::Offended | DialogueStanceKind::Threatening => {
+            ConsequenceKind::SuspicionRaised
+        }
+        DialogueStanceKind::Withholding | DialogueStanceKind::Evasive => {
+            ConsequenceKind::OpportunityLost
+        }
+        DialogueStanceKind::Cooperative | DialogueStanceKind::GuardedHelpful => {
+            ConsequenceKind::TrustShift
+        }
+        _ => ConsequenceKind::SocialDebt,
+    }
+}
+
+const fn consequence_kind_from_commitment(kind: SocialCommitmentKind) -> ConsequenceKind {
+    match kind {
+        SocialCommitmentKind::Promise
+        | SocialCommitmentKind::Debt
+        | SocialCommitmentKind::ConditionalPermission
+        | SocialCommitmentKind::Truce => ConsequenceKind::SocialDebt,
+        SocialCommitmentKind::Threat | SocialCommitmentKind::Demand => {
+            ConsequenceKind::SuspicionRaised
+        }
+        SocialCommitmentKind::Price => ConsequenceKind::OpportunityOpened,
+    }
+}
+
+const fn severity_from_social_intensity(intensity: SocialIntensity) -> ConsequenceSeverity {
+    match intensity {
+        SocialIntensity::Trace | SocialIntensity::Low => ConsequenceSeverity::Minor,
+        SocialIntensity::Medium => ConsequenceSeverity::Moderate,
+        SocialIntensity::High => ConsequenceSeverity::Major,
+        SocialIntensity::Crisis => ConsequenceSeverity::Critical,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn derived_record(
     current: &ConsequenceSpinePacket,
@@ -967,7 +1133,7 @@ mod tests {
             ..ConsequenceSpinePacket::default()
         };
         let proposal = sample_resolution();
-        let plan = prepare_consequence_event_plan(&packet, None, Some(&proposal))?;
+        let plan = prepare_consequence_event_plan(&packet, None, Some(&proposal), None)?;
 
         assert!(
             plan.records
@@ -990,13 +1156,49 @@ mod tests {
             turn_id: "turn_0003".to_owned(),
             ..ConsequenceSpinePacket::default()
         };
-        let plan = prepare_consequence_event_plan(&packet, None, Some(&sample_resolution()))?;
+        let plan = prepare_consequence_event_plan(&packet, None, Some(&sample_resolution()), None)?;
         append_consequence_event_plan(temp.path(), &plan)?;
         let rebuilt = rebuild_consequence_spine(temp.path(), &packet)?;
 
         assert!(!rebuilt.active.is_empty());
         assert!(!rebuilt.pressure_links.is_empty());
         assert!(temp.path().join(ACTIVE_CONSEQUENCES_FILENAME).is_file());
+        Ok(())
+    }
+
+    #[test]
+    fn derives_consequence_from_social_exchange_commitment() -> anyhow::Result<()> {
+        let packet = ConsequenceSpinePacket {
+            world_id: "world".to_owned(),
+            turn_id: "turn_0003".to_owned(),
+            ..ConsequenceSpinePacket::default()
+        };
+        let social = SocialExchangeProposal {
+            schema_version: crate::social_exchange::SOCIAL_EXCHANGE_PROPOSAL_SCHEMA_VERSION
+                .to_owned(),
+            world_id: "world".to_owned(),
+            turn_id: "turn_0003".to_owned(),
+            exchanges: Vec::new(),
+            commitments: vec![crate::social_exchange::SocialCommitmentMutation {
+                commitment_id: "commitment:guard:entry".to_owned(),
+                actor_ref: "char:guard".to_owned(),
+                target_ref: "player".to_owned(),
+                kind: SocialCommitmentKind::ConditionalPermission,
+                summary: "문지기는 신원을 밝히면 검문을 이어가겠다고 했다.".to_owned(),
+                condition: "이름과 온 길을 말해야 한다.".to_owned(),
+                due_window: crate::social_exchange::SocialDueWindow::CurrentScene,
+                source_refs: vec!["visible_scene.text_blocks[0]".to_owned()],
+                consequence_refs: Vec::new(),
+            }],
+            unresolved_asks: Vec::new(),
+            leverage_updates: Vec::new(),
+            paid_off_or_closed: Vec::new(),
+            ephemeral_social_notes: Vec::new(),
+        };
+        let plan = prepare_consequence_event_plan(&packet, None, None, Some(&social))?;
+
+        assert_eq!(plan.records.len(), 1);
+        assert_eq!(plan.records[0].kind, ConsequenceKind::SocialDebt);
         Ok(())
     }
 

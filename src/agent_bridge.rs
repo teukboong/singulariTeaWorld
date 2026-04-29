@@ -1,7 +1,7 @@
 use crate::actor_agency::{
     ActorAgencyPacket, AgentActorGoalUpdate, AgentActorMoveUpdate, append_actor_agency_event_plan,
-    load_actor_agency_state, merge_consequence_actor_agency, prepare_actor_agency_event_plan,
-    rebuild_actor_agency_packet,
+    load_actor_agency_state, merge_consequence_actor_agency, merge_social_exchange_actor_agency,
+    prepare_actor_agency_event_plan, rebuild_actor_agency_packet,
 };
 use crate::autobiographical_index::{
     AutobiographicalIndexInput, AutobiographicalIndexPacket, rebuild_autobiographical_index,
@@ -87,8 +87,13 @@ use crate::scene_director::{
 use crate::scene_pressure::{
     ScenePressureEvent, ScenePressurePacket, append_scene_pressure_audit,
     append_scene_pressure_event_plan, compile_scene_pressure_packet, load_active_scene_pressures,
-    merge_consequence_scene_pressures, prepare_scene_pressure_event_plan,
-    rebuild_active_scene_pressures,
+    merge_consequence_scene_pressures, merge_social_exchange_scene_pressures,
+    prepare_scene_pressure_event_plan, rebuild_active_scene_pressures,
+};
+use crate::social_exchange::{
+    SocialExchangePacket, SocialExchangeProposal, append_social_exchange_event_plan,
+    audit_social_exchange_contract, load_social_exchange_state, prepare_social_exchange_event_plan,
+    rebuild_social_exchange,
 };
 use crate::store::{
     WorldFilePaths, append_jsonl, read_json, resolve_store_paths, world_file_paths, write_json,
@@ -211,6 +216,8 @@ pub struct AgentVisibleContext {
     #[serde(default)]
     pub active_consequence_spine: ConsequenceSpinePacket,
     #[serde(default)]
+    pub active_social_exchange: SocialExchangePacket,
+    #[serde(default)]
     pub active_turn_retrieval_controller: TurnRetrievalControllerPacket,
     #[serde(default)]
     pub selected_context_capsules: ContextCapsuleSelection,
@@ -292,6 +299,8 @@ pub struct AgentTurnResponse {
     pub scene_director_proposal: Option<SceneDirectorProposal>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consequence_proposal: Option<ConsequenceProposal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub social_exchange_proposal: Option<SocialExchangeProposal>,
     pub visible_scene: NarrativeScene,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adjudication: Option<AgentResponseAdjudication>,
@@ -637,6 +646,12 @@ pub fn commit_agent_turn(options: &AgentCommitTurnOptions) -> Result<CommittedAg
         response.resolution_proposal.as_ref(),
     )
     .context("consequence proposal audit failed")?;
+    audit_social_exchange_contract(
+        &prompt_context,
+        &pending.visible_context.active_social_exchange,
+        &response,
+    )
+    .context("social exchange proposal audit failed")?;
     let body_resource_event_plan = prepare_body_resource_event_plan(
         options.world_id.as_str(),
         pending.turn_id.as_str(),
@@ -676,6 +691,12 @@ pub fn commit_agent_turn(options: &AgentCommitTurnOptions) -> Result<CommittedAg
         &pending.visible_context.active_consequence_spine,
         response.consequence_proposal.as_ref(),
         response.resolution_proposal.as_ref(),
+        response.social_exchange_proposal.as_ref(),
+    )?;
+    let social_exchange_event_plan = prepare_social_exchange_event_plan(
+        &pending.visible_context.active_social_exchange,
+        &response,
+        &pending.visible_context.active_consequence_spine,
     )?;
     let player_intent_event_plan = prepare_player_intent_event_plan(
         options.world_id.as_str(),
@@ -1010,6 +1031,24 @@ pub fn commit_agent_turn(options: &AgentCommitTurnOptions) -> Result<CommittedAg
                     world_id: options.world_id.clone(),
                     turn_id: pending.turn_id.clone(),
                     ..pending.visible_context.active_consequence_spine.clone()
+                },
+            )?;
+            Ok(())
+        },
+    )?;
+    commit_post_advance_materialization(
+        &files,
+        options.world_id.as_str(),
+        pending.turn_id.as_str(),
+        "social_exchange",
+        || {
+            append_social_exchange_event_plan(files.dir.as_path(), &social_exchange_event_plan)?;
+            rebuild_social_exchange(
+                files.dir.as_path(),
+                &SocialExchangePacket {
+                    world_id: options.world_id.clone(),
+                    turn_id: pending.turn_id.clone(),
+                    ..pending.visible_context.active_social_exchange.clone()
                 },
             )?;
             Ok(())
@@ -1473,18 +1512,29 @@ fn visible_context(input: &VisibleContextInput<'_>) -> Result<AgentVisibleContex
             ..ConsequenceSpinePacket::default()
         },
     )?;
-    let active_scene_pressure = merge_consequence_scene_pressures(
-        load_active_scene_pressures(
-            files.dir.as_path(),
-            compile_scene_pressure_packet(
-                snapshot,
-                input.selected_choice,
-                &extra_memory,
-                input.private_context,
-                input.player_input,
+    let active_social_exchange = load_social_exchange_state(
+        files.dir.as_path(),
+        SocialExchangePacket {
+            world_id: input.current_packet.world_id.clone(),
+            turn_id: next_turn_id.clone(),
+            ..SocialExchangePacket::default()
+        },
+    )?;
+    let active_scene_pressure = merge_social_exchange_scene_pressures(
+        merge_consequence_scene_pressures(
+            load_active_scene_pressures(
+                files.dir.as_path(),
+                compile_scene_pressure_packet(
+                    snapshot,
+                    input.selected_choice,
+                    &extra_memory,
+                    input.private_context,
+                    input.player_input,
+                )?,
             )?,
-        )?,
-        &active_consequence_spine,
+            &active_consequence_spine,
+        ),
+        &active_social_exchange,
     );
     let active_plot_threads =
         load_plot_threads(files.dir.as_path(), compile_plot_thread_packet(snapshot))?;
@@ -1506,6 +1556,10 @@ fn visible_context(input: &VisibleContextInput<'_>) -> Result<AgentVisibleContex
     let mut active_projections = load_active_projection_context(input, next_turn_id.as_str())?;
     active_projections.actor_agency =
         merge_consequence_actor_agency(active_projections.actor_agency, &active_consequence_spine);
+    active_projections.actor_agency = merge_social_exchange_actor_agency(
+        active_projections.actor_agency,
+        &active_social_exchange,
+    );
     active_projections.world_process_clock = merge_consequence_world_processes(
         active_projections.world_process_clock,
         &active_consequence_spine,
@@ -1543,6 +1597,7 @@ fn visible_context(input: &VisibleContextInput<'_>) -> Result<AgentVisibleContex
     let actor_agency_value = serde_json::to_value(&active_projections.actor_agency)?;
     let world_process_clock_value = serde_json::to_value(&active_projections.world_process_clock)?;
     let player_intent_trace_value = serde_json::to_value(&active_projections.player_intent_trace)?;
+    let active_social_exchange_value = serde_json::to_value(&active_social_exchange)?;
     let recent_scene_window_value = serde_json::to_value(&input.current_packet.scene.text_blocks)?;
     let compiled_scene_director =
         compile_scene_director_packet_from_input(SceneDirectorCompileInput {
@@ -1554,6 +1609,7 @@ fn visible_context(input: &VisibleContextInput<'_>) -> Result<AgentVisibleContex
             active_actor_agency: Some(&actor_agency_value),
             active_world_process_clock: Some(&world_process_clock_value),
             active_player_intent_trace: Some(&player_intent_trace_value),
+            active_social_exchange: Some(&active_social_exchange_value),
             recent_scene_window: Some(&recent_scene_window_value),
         });
     let active_scene_director = merge_scene_director_history(
@@ -1595,6 +1651,7 @@ fn visible_context(input: &VisibleContextInput<'_>) -> Result<AgentVisibleContex
         active_narrative_style_state: active_projections.narrative_style_state,
         active_scene_director,
         active_consequence_spine,
+        active_social_exchange,
         active_turn_retrieval_controller,
         selected_context_capsules: context_capsules.selection,
         active_autobiographical_index,
@@ -1904,6 +1961,7 @@ mod tests {
     };
     use crate::scene_director::SceneDirectorPacket;
     use crate::scene_pressure::ScenePressurePacket;
+    use crate::social_exchange::SocialExchangePacket;
     use crate::store::{
         InitWorldOptions, init_world, read_json, resolve_store_paths, world_file_paths,
     };
@@ -2038,6 +2096,7 @@ premise:
             resolution_proposal: None,
             scene_director_proposal: None,
             consequence_proposal: None,
+            social_exchange_proposal: None,
             visible_scene: NarrativeScene {
                 schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                 speaker: None,
@@ -2106,6 +2165,7 @@ premise:
                 active_narrative_style_state: NarrativeStyleState::default(),
                 active_scene_director: SceneDirectorPacket::default(),
                 active_consequence_spine: ConsequenceSpinePacket::default(),
+                active_social_exchange: SocialExchangePacket::default(),
                 active_turn_retrieval_controller: TurnRetrievalControllerPacket::default(),
                 selected_context_capsules: ContextCapsuleSelection::default(),
                 active_autobiographical_index: AutobiographicalIndexPacket::default(),
@@ -2132,6 +2192,7 @@ premise:
             resolution_proposal: None,
             scene_director_proposal: None,
             consequence_proposal: None,
+            social_exchange_proposal: None,
             visible_scene: NarrativeScene {
                 schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                 speaker: None,
@@ -2232,6 +2293,7 @@ premise:
                 resolution_proposal: None,
                 scene_director_proposal: None,
                 consequence_proposal: None,
+                social_exchange_proposal: None,
                 visible_scene: NarrativeScene {
                     schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                     speaker: None,
@@ -2315,6 +2377,7 @@ premise:
                 resolution_proposal: None,
                 scene_director_proposal: None,
                 consequence_proposal: None,
+                social_exchange_proposal: None,
                 visible_scene: NarrativeScene {
                     schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                     speaker: None,
@@ -2409,6 +2472,7 @@ premise:
                 resolution_proposal: None,
                 scene_director_proposal: None,
                 consequence_proposal: None,
+                social_exchange_proposal: None,
                 visible_scene: NarrativeScene {
                     schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                     speaker: None,
@@ -2485,6 +2549,7 @@ premise:
                 resolution_proposal: None,
                 scene_director_proposal: None,
                 consequence_proposal: None,
+                social_exchange_proposal: None,
                 visible_scene: NarrativeScene {
                     schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                     speaker: None,
@@ -2547,6 +2612,7 @@ premise:
                 resolution_proposal: None,
                 scene_director_proposal: None,
                 consequence_proposal: None,
+                social_exchange_proposal: None,
                 visible_scene: NarrativeScene {
                     schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                     speaker: None,
@@ -2612,6 +2678,7 @@ premise:
                 )),
                 scene_director_proposal: None,
                 consequence_proposal: None,
+                social_exchange_proposal: None,
                 visible_scene: NarrativeScene {
                     schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                     speaker: None,
@@ -2659,6 +2726,7 @@ premise:
             resolution_proposal: None,
             scene_director_proposal: None,
             consequence_proposal: None,
+            social_exchange_proposal: None,
             visible_scene: NarrativeScene {
                 schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                 speaker: None,
@@ -2722,6 +2790,7 @@ premise:
                 resolution_proposal: None,
                 scene_director_proposal: None,
                 consequence_proposal: None,
+                social_exchange_proposal: None,
                 visible_scene: NarrativeScene {
                     schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                     speaker: None,

@@ -39,6 +39,7 @@ pub mod revival;
 pub mod runtime_profile;
 pub mod scene_director;
 pub mod scene_pressure;
+pub mod social_exchange;
 pub mod sqlite;
 pub mod start;
 pub mod store;
@@ -65,7 +66,8 @@ pub use actor_agency::{
     ActorAgencyPolicy, ActorGoal, ActorGoalEventRecord, ActorMove, ActorMoveEventRecord,
     AgentActorGoalUpdate, AgentActorMoveUpdate, append_actor_agency_event_plan,
     build_actor_agency_from_events, load_actor_agency_state, merge_consequence_actor_agency,
-    prepare_actor_agency_event_plan, rebuild_actor_agency_packet,
+    merge_social_exchange_actor_agency, prepare_actor_agency_event_plan,
+    rebuild_actor_agency_packet,
 };
 pub use adjudication::{AdjudicationInput, adjudicate_turn};
 pub use affordance_graph::{
@@ -317,7 +319,23 @@ pub use scene_pressure::{
     ScenePressurePacket, ScenePressurePolicy, ScenePressureProseEffect, ScenePressureUrgency,
     ScenePressureVisibility, append_scene_pressure_audit, append_scene_pressure_event_plan,
     compile_scene_pressure_packet, load_active_scene_pressures, merge_consequence_scene_pressures,
-    prepare_scene_pressure_event_plan, rebuild_active_scene_pressures,
+    merge_social_exchange_scene_pressures, prepare_scene_pressure_event_plan,
+    rebuild_active_scene_pressures,
+};
+pub use social_exchange::{
+    AskStatus, CONVERSATION_LEVERAGE_SCHEMA_VERSION, ConversationLeverage,
+    ConversationLeverageKind, ConversationLeverageMutation, DIALOGUE_STANCE_FILENAME,
+    DialogueStance, DialogueStanceKind, EphemeralSocialNote, SOCIAL_COMMITMENT_SCHEMA_VERSION,
+    SOCIAL_EXCHANGE_EVENT_SCHEMA_VERSION, SOCIAL_EXCHANGE_EVENTS_FILENAME,
+    SOCIAL_EXCHANGE_PACKET_SCHEMA_VERSION, SOCIAL_EXCHANGE_PROPOSAL_SCHEMA_VERSION,
+    SOCIAL_EXCHANGE_STANCE_SCHEMA_VERSION, SocialCommitment, SocialCommitmentKind,
+    SocialCommitmentMutation, SocialCommitmentStatus, SocialDueWindow, SocialExchangeActKind,
+    SocialExchangeClosure, SocialExchangeEventPlan, SocialExchangeEventRecord,
+    SocialExchangeMemory, SocialExchangeMutation, SocialExchangePacket, SocialExchangePolicy,
+    SocialExchangeProposal, SocialIntensity, UNRESOLVED_SOCIAL_ASK_SCHEMA_VERSION,
+    UnresolvedAskMutation, UnresolvedSocialAsk, append_social_exchange_event_plan,
+    audit_social_exchange_contract, load_social_exchange_state, prepare_social_exchange_event_plan,
+    rebuild_social_exchange,
 };
 pub use start::{
     StartWorldOptions, StartedWorld, render_started_world_report, start_world,

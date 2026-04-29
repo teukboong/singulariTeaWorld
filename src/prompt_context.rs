@@ -14,6 +14,7 @@ use crate::scene_director::{
     merge_scene_director_history,
 };
 use crate::scene_pressure::ScenePressurePacket;
+use crate::social_exchange::{SOCIAL_EXCHANGE_PACKET_SCHEMA_VERSION, SocialExchangePacket};
 use crate::turn_context::{TurnContextPacket, assemble_turn_context_packet};
 use crate::world_process_clock::{WorldProcessClockPacket, compile_world_process_clock_packet};
 use anyhow::{Context, Result, bail};
@@ -51,6 +52,7 @@ pub struct PromptVisibleContext {
     pub world_process_clock: Value,
     pub active_scene_director: Value,
     pub active_consequence_spine: Value,
+    pub active_social_exchange: Value,
     pub narrative_style_state: Value,
     pub active_character_text_design: Value,
     pub active_change_ledger: Value,
@@ -189,6 +191,7 @@ pub fn assemble_prompt_context_packet(
         active_actor_agency: &prompt_memory.active_actor_agency,
         active_world_process_clock: &prompt_memory.active_world_process_clock,
         active_player_intent_trace: &prompt_memory.active_player_intent_trace,
+        active_social_exchange: &prompt_memory.active_social_exchange,
         recent_scene_window: required_path(memory, "/recent_scene_window")?,
         body_resource: &body_resource,
         location_graph: &location_graph,
@@ -245,6 +248,7 @@ struct PromptMemoryValues {
     active_plot_threads: Value,
     active_scene_director: Option<SceneDirectorPacket>,
     active_consequence_spine: Value,
+    active_social_exchange: Value,
     active_change_ledger: Value,
     active_pattern_debt: Value,
     active_belief_graph: Value,
@@ -279,6 +283,22 @@ fn load_prompt_memory_values(memory: &Value, active_memory: &Value) -> Result<Pr
                     "pressure_links": [],
                     "required_followups": [],
                     "compiler_policy": ConsequenceSpinePacket::default().compiler_policy
+                })
+            }),
+        active_social_exchange: memory
+            .pointer("/active_social_exchange")
+            .cloned()
+            .unwrap_or_else(|| {
+                serde_json::json!({
+                    "schema_version": SOCIAL_EXCHANGE_PACKET_SCHEMA_VERSION,
+                    "world_id": "",
+                    "turn_id": "",
+                    "active_stances": [],
+                    "active_commitments": [],
+                    "unresolved_asks": [],
+                    "recent_exchanges": [],
+                    "leverage": [],
+                    "compiler_policy": SocialExchangePacket::default().compiler_policy
                 })
             }),
         active_change_ledger: required_path(memory, "/active_change_ledger")?.clone(),
@@ -324,6 +344,7 @@ struct CompileDerivedContextSource<'a> {
     active_actor_agency: &'a Value,
     active_world_process_clock: &'a Value,
     active_player_intent_trace: &'a Value,
+    active_social_exchange: &'a Value,
     recent_scene_window: &'a Value,
     body_resource: &'a BodyResourcePacket,
     location_graph: &'a LocationGraphPacket,
@@ -364,6 +385,7 @@ fn compile_derived_context_packets(
             active_actor_agency: Some(source.active_actor_agency),
             active_world_process_clock: Some(&world_process_clock_value),
             active_player_intent_trace: Some(source.active_player_intent_trace),
+            active_social_exchange: Some(source.active_social_exchange),
             recent_scene_window: Some(source.recent_scene_window),
         }),
         source.active_scene_director,
@@ -435,6 +457,7 @@ fn compile_visible_context(source: VisibleContextSource<'_>) -> Result<PromptVis
         world_process_clock: serde_json::to_value(&source.world_process_clock.visible_processes)?,
         active_scene_director: serde_json::to_value(source.scene_director)?,
         active_consequence_spine: source.prompt_memory.active_consequence_spine,
+        active_social_exchange: source.prompt_memory.active_social_exchange,
         active_character_text_design: capsule_covered_prompt_projection(
             "active_character_text_design",
             "character_text_design",

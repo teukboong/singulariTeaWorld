@@ -10,6 +10,7 @@ use crate::plot_thread::PLOT_THREADS_FILENAME;
 use crate::relationship_graph::RELATIONSHIP_GRAPH_FILENAME;
 use crate::scene_director::SCENE_DIRECTOR_FILENAME;
 use crate::scene_pressure::ACTIVE_SCENE_PRESSURES_FILENAME;
+use crate::social_exchange::DIALOGUE_STANCE_FILENAME;
 use crate::store::{
     CANON_EVENTS_FILENAME, ENTITIES_FILENAME, HIDDEN_STATE_FILENAME, LATEST_SNAPSHOT_FILENAME,
     PLAYER_KNOWLEDGE_FILENAME, WORLD_FILENAME, read_json,
@@ -396,6 +397,16 @@ const DOC_PROJECTION_FILES: &[DocProjectionFile] = &[
         summary_fields: &[
             ("active", "active consequences"),
             ("recently_paid_off", "recently paid off"),
+        ],
+    },
+    DocProjectionFile {
+        title: "Social Exchange",
+        filename: DIALOGUE_STANCE_FILENAME,
+        summary_fields: &[
+            ("active_stances", "active stances"),
+            ("active_commitments", "active commitments"),
+            ("unresolved_asks", "unresolved asks"),
+            ("leverage", "conversation leverage"),
         ],
     },
     DocProjectionFile {

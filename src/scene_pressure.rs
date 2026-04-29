@@ -9,6 +9,9 @@ use crate::agent_bridge::{AgentPrivateAdjudicationContext, PendingAgentChoice};
 use crate::consequence_spine::{ActiveConsequence, ConsequenceKind, ConsequenceSpinePacket};
 use crate::extra_memory::ExtraMemoryPacket;
 use crate::models::{FREEFORM_CHOICE_SLOT, GUIDE_CHOICE_SLOT, TurnSnapshot};
+use crate::social_exchange::{
+    DialogueStance, DialogueStanceKind, SocialExchangePacket, SocialIntensity, UnresolvedSocialAsk,
+};
 use crate::store::{append_jsonl, read_json, write_json};
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
@@ -343,6 +346,143 @@ pub fn merge_consequence_scene_pressures(
             .clone_into(&mut packet.compiler_policy.source);
     }
     packet
+}
+
+#[must_use]
+pub fn merge_social_exchange_scene_pressures(
+    mut packet: ScenePressurePacket,
+    social_exchange: &SocialExchangePacket,
+) -> ScenePressurePacket {
+    let mut existing = packet
+        .visible_active
+        .iter()
+        .map(|pressure| pressure.pressure_id.clone())
+        .collect::<BTreeSet<_>>();
+    for stance in &social_exchange.active_stances {
+        if packet.visible_active.len() >= packet.compiler_policy.visible_budget {
+            break;
+        }
+        if !stance_creates_pressure(stance) {
+            continue;
+        }
+        let pressure = pressure_from_stance(stance);
+        if existing.insert(pressure.pressure_id.clone()) {
+            packet.visible_active.push(pressure);
+        }
+    }
+    for ask in &social_exchange.unresolved_asks {
+        if packet.visible_active.len() >= packet.compiler_policy.visible_budget {
+            break;
+        }
+        let pressure = pressure_from_unresolved_ask(ask);
+        if existing.insert(pressure.pressure_id.clone()) {
+            packet.visible_active.push(pressure);
+        }
+    }
+    if !social_exchange.active_stances.is_empty() || !social_exchange.unresolved_asks.is_empty() {
+        "materialized_from_pending_turn_scene_pressure_consequences_and_social_exchange_v1"
+            .clone_into(&mut packet.compiler_policy.source);
+    }
+    packet
+}
+
+fn stance_creates_pressure(stance: &DialogueStance) -> bool {
+    matches!(
+        stance.intensity,
+        SocialIntensity::Medium | SocialIntensity::High | SocialIntensity::Crisis
+    ) && matches!(
+        stance.stance,
+        DialogueStanceKind::WaryTesting
+            | DialogueStanceKind::Evasive
+            | DialogueStanceKind::Threatening
+            | DialogueStanceKind::Bargaining
+            | DialogueStanceKind::Indebted
+            | DialogueStanceKind::Pressuring
+            | DialogueStanceKind::Withholding
+    )
+}
+
+fn pressure_from_stance(stance: &DialogueStance) -> ScenePressure {
+    ScenePressure {
+        schema_version: SCENE_PRESSURE_SCHEMA_VERSION.to_owned(),
+        pressure_id: format!("pressure:social_stance:{}", stance.stance_id),
+        kind: ScenePressureKind::SocialPermission,
+        visibility: ScenePressureVisibility::PlayerVisible,
+        intensity: pressure_intensity_from_social(stance.intensity),
+        urgency: pressure_urgency_from_social(stance.intensity),
+        source_refs: stance.source_refs.clone(),
+        observable_signals: vec![stance.player_visible_signal.clone()],
+        choice_affordances: social_choice_affordances(stance.stance),
+        prose_effect: ScenePressureProseEffect {
+            paragraph_pressure: "social_exchange".to_owned(),
+            sensory_focus: vec!["거리".to_owned(), "대사".to_owned()],
+            dialogue_style: dialogue_style_from_stance(stance.stance),
+        },
+    }
+}
+
+fn pressure_from_unresolved_ask(ask: &UnresolvedSocialAsk) -> ScenePressure {
+    ScenePressure {
+        schema_version: SCENE_PRESSURE_SCHEMA_VERSION.to_owned(),
+        pressure_id: format!("pressure:unresolved_ask:{}", ask.ask_id),
+        kind: ScenePressureKind::Knowledge,
+        visibility: ScenePressureVisibility::PlayerVisible,
+        intensity: 3,
+        urgency: ScenePressureUrgency::Soon,
+        source_refs: ask.source_refs.clone(),
+        observable_signals: vec![ask.last_response.clone()],
+        choice_affordances: ask.allowed_next_moves.clone(),
+        prose_effect: ScenePressureProseEffect {
+            paragraph_pressure: "unresolved_question".to_owned(),
+            sensory_focus: vec!["침묵".to_owned(), "시선".to_owned()],
+            dialogue_style: "avoid_repeat_without_new_leverage".to_owned(),
+        },
+    }
+}
+
+const fn pressure_intensity_from_social(intensity: SocialIntensity) -> u8 {
+    match intensity {
+        SocialIntensity::Trace => 1,
+        SocialIntensity::Low => 2,
+        SocialIntensity::Medium => 3,
+        SocialIntensity::High => 4,
+        SocialIntensity::Crisis => 5,
+    }
+}
+
+const fn pressure_urgency_from_social(intensity: SocialIntensity) -> ScenePressureUrgency {
+    match intensity {
+        SocialIntensity::Trace | SocialIntensity::Low => ScenePressureUrgency::Ambient,
+        SocialIntensity::Medium => ScenePressureUrgency::Soon,
+        SocialIntensity::High => ScenePressureUrgency::Immediate,
+        SocialIntensity::Crisis => ScenePressureUrgency::Crisis,
+    }
+}
+
+fn social_choice_affordances(stance: DialogueStanceKind) -> Vec<String> {
+    match stance {
+        DialogueStanceKind::WaryTesting => vec!["신원, 근거, 의도를 분명히 밝힌다.".to_owned()],
+        DialogueStanceKind::Evasive | DialogueStanceKind::Withholding => {
+            vec!["새 근거를 제시하거나 질문의 각도를 바꾼다.".to_owned()]
+        }
+        DialogueStanceKind::Threatening | DialogueStanceKind::Pressuring => {
+            vec!["압박에 맞서거나 한발 물러서 조건을 바꾼다.".to_owned()]
+        }
+        DialogueStanceKind::Bargaining => vec!["대가, 조건, 양보안을 조정한다.".to_owned()],
+        DialogueStanceKind::Indebted => vec!["남은 빚이나 호의를 구체적으로 건드린다.".to_owned()],
+        _ => vec!["현재 대화 거리와 태도에 맞춰 말한다.".to_owned()],
+    }
+}
+
+fn dialogue_style_from_stance(stance: DialogueStanceKind) -> String {
+    match stance {
+        DialogueStanceKind::WaryTesting => "testing".to_owned(),
+        DialogueStanceKind::Evasive | DialogueStanceKind::Withholding => "evasive".to_owned(),
+        DialogueStanceKind::Threatening | DialogueStanceKind::Pressuring => "pressuring".to_owned(),
+        DialogueStanceKind::Bargaining => "bargaining".to_owned(),
+        DialogueStanceKind::Indebted => "debt-aware".to_owned(),
+        _ => "socially-aware".to_owned(),
+    }
 }
 
 fn pressure_from_consequence(consequence: &ActiveConsequence) -> ScenePressure {
@@ -875,6 +1015,49 @@ mod tests {
         assert_eq!(
             merged.visible_active[0].urgency,
             ScenePressureUrgency::Immediate
+        );
+    }
+
+    #[test]
+    fn active_social_exchange_returns_as_visible_scene_pressure() {
+        let merged = merge_social_exchange_scene_pressures(
+            ScenePressurePacket {
+                world_id: "stw_pressure".to_owned(),
+                turn_id: "turn_0004".to_owned(),
+                ..ScenePressurePacket::default()
+            },
+            &crate::social_exchange::SocialExchangePacket {
+                world_id: "stw_pressure".to_owned(),
+                turn_id: "turn_0004".to_owned(),
+                active_stances: vec![crate::social_exchange::DialogueStance {
+                    schema_version: crate::social_exchange::SOCIAL_EXCHANGE_STANCE_SCHEMA_VERSION
+                        .to_owned(),
+                    stance_id: "stance:char:guard->player".to_owned(),
+                    actor_ref: "char:guard".to_owned(),
+                    target_ref: "player".to_owned(),
+                    stance: DialogueStanceKind::Withholding,
+                    intensity: SocialIntensity::High,
+                    summary: "문지기가 답을 미룬다.".to_owned(),
+                    player_visible_signal: "신원 확인 전에는 답하지 않는다.".to_owned(),
+                    source_refs: vec!["visible_scene.text_blocks[0]".to_owned()],
+                    relationship_refs: Vec::new(),
+                    consequence_refs: Vec::new(),
+                    opened_turn_id: "turn_0003".to_owned(),
+                    last_changed_turn_id: "turn_0004".to_owned(),
+                }],
+                ..crate::social_exchange::SocialExchangePacket::default()
+            },
+        );
+
+        assert_eq!(merged.visible_active.len(), 1);
+        assert_eq!(
+            merged.visible_active[0].kind,
+            ScenePressureKind::SocialPermission
+        );
+        assert!(
+            merged.visible_active[0]
+                .pressure_id
+                .starts_with("pressure:social_stance:")
         );
     }
 
