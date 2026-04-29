@@ -120,10 +120,11 @@ same image-generation message; local path notes are not treated as a substitute
 for attachment. These lanes also run in separate browser sessions, not by
 switching tabs in one worker: text defaults to CDP port `9238`, turn CG image
 defaults to `9239`, and reference-asset image defaults to `9240`, with separate
-profile roots under `~/.hesperides/singulari-world/webgpt/`. For a
-WebGPT/WebGPT world, `host-worker` prewarms all three lane sessions before
-dispatch so the three-way split is visible and port/profile collisions fail
-early. The worker can
+profile roots under `~/.hesperides/singulari-world/webgpt/`. Long-running
+diagnostic `host-worker` processes prewarm all three lane sessions once so the
+three-way split is visible and port/profile collisions fail early. Browser
+play wakes `host-worker --once`, which skips blocking prewarm and dispatches
+directly to the active text/image lane. The worker can
 claim one turn-CG job and one reference-asset job in the same tick, so design
 asset generation no longer blocks scene CG. New worlds created from the VN
 launcher write a locked `agent_bridge/backend_selection.json`; the valid

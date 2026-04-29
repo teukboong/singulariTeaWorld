@@ -134,10 +134,11 @@ images in that same ChatGPT conversation as visual continuity references.
 WebGPT text and image lanes must run as separate browser sessions, not as one
 window that switches tools. Text defaults to CDP port `9238`, turn CG image
 defaults to `9239`, and reference/design image defaults to `9240`; the profile
-dirs are separate under `~/.hesperides/singulari-world/webgpt/`. For a
-WebGPT/WebGPT world, `host-worker` prewarms all three lane sessions before
-dispatch. Starting with a shared port or shared profile is a contract
-violation.
+dirs are separate under `~/.hesperides/singulari-world/webgpt/`. Long-running
+diagnostic `host-worker` processes prewarm all three lane sessions once before
+dispatch; browser-triggered `host-worker --once` dispatches directly so player
+input is not delayed by repeated health probes. Starting with a shared port or
+shared profile is a contract violation.
 The VN launcher also writes a locked `agent_bridge/backend_selection.json` on
 world creation. The only valid text/visual backend is WebGPT. Old local
 `codex-app-server` selections are legacy data and must not start Codex App
@@ -363,8 +364,10 @@ for ChatGPT image generation and closes visual jobs with the saved extracted
 PNG. The built-in WebGPT lanes must use separate browser sessions: text
 defaults to CDP port `9238`, turn CG image defaults to `9239`, reference/design
 image defaults to `9240`, and each lane has its own profile dir under
-`~/.hesperides/singulari-world/webgpt/`. `host-worker` prewarms all three lane
-sessions for WebGPT/WebGPT worlds before dispatch.
+`~/.hesperides/singulari-world/webgpt/`. Long-running `host-worker` processes
+prewarm all three lane sessions for WebGPT/WebGPT worlds before dispatch;
+browser-triggered `host-worker --once` skips blocking prewarm and lets the
+actual text/image call attach to its lane directly.
 Worlds created by the VN launcher write a locked
 `agent_bridge/backend_selection.json`. That file records WebGPT/WebGPT and keeps
 old backend flags from reintroducing a second engine. The default WebGPT cadence

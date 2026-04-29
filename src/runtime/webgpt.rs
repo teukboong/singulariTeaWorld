@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use singulari_world::{
     AgentCommitTurnOptions, AgentTurnResponse, CompilePromptContextPacketOptions,
@@ -206,7 +206,12 @@ pub(super) struct WebGptDispatchRecord {
     pub(super) result_path: Option<String>,
     pub(super) stdout_path: String,
     pub(super) stderr_path: String,
+    pub(super) prompt_bytes: u64,
+    pub(super) prompt_context_bytes: u64,
     pub(super) dispatched_at: String,
+    pub(super) mcp_completed_at: String,
+    pub(super) mcp_duration_ms: i64,
+    pub(super) total_duration_ms: i64,
     pub(super) exit_code: Option<i32>,
     pub(super) committed_turn_id: Option<String>,
     pub(super) render_packet_path: Option<String>,
@@ -238,19 +243,8 @@ pub(super) fn dispatch_pending_agent_turn_via_webgpt(
     let result_path = dispatch_dir.join(format!("{}-webgpt-result.json", pending.turn_id));
     let stdout_path = dispatch_dir.join(format!("{}-webgpt-stdout.log", pending.turn_id));
     let stderr_path = dispatch_dir.join(format!("{}-webgpt-stderr.log", pending.turn_id));
-    let prompt_context = compile_prompt_context_packet(&CompilePromptContextPacketOptions {
-        store_root,
-        pending,
-        engine_session_kind: "webgpt_project_session",
-    })?;
-    fs::write(
-        &prompt_context_path,
-        serde_json::to_vec_pretty(&prompt_context)?,
-    )
-    .with_context(|| format!("failed to write {}", prompt_context_path.display()))?;
-    let prompt = build_webgpt_turn_prompt(&prompt_context)?;
-    fs::write(&prompt_path, prompt.as_bytes())
-        .with_context(|| format!("failed to write {}", prompt_path.display()))?;
+    let prompt_artifacts =
+        write_webgpt_prompt_artifacts(store_root, pending, &prompt_context_path, &prompt_path)?;
     let dispatcher = resolve_webgpt_dispatcher(store_root, pending, options)?;
 
     let paths = WebGptTurnPaths {
@@ -263,7 +257,15 @@ pub(super) fn dispatch_pending_agent_turn_via_webgpt(
         stdout_path: stdout_path.as_path(),
         stderr_path: stderr_path.as_path(),
     };
-    let claim = webgpt_dispatch_claim(pending, &dispatcher, paths);
+    let dispatched_at = Utc::now();
+    let claim = webgpt_dispatch_claim(
+        pending,
+        &dispatcher,
+        paths,
+        dispatched_at,
+        prompt_artifacts.prompt_bytes,
+        prompt_artifacts.prompt_context_bytes,
+    );
     if !write_dispatch_claim(record_path.as_path(), &claim)? {
         return Ok(WebGptDispatchOutcome::AlreadyDispatched(
             record_path.display().to_string(),
@@ -279,6 +281,7 @@ pub(super) fn dispatch_pending_agent_turn_via_webgpt(
     )?;
 
     let dispatch_result = dispatcher.run(paths)?;
+    let mcp_completed_at = Utc::now();
     if let Some(raw_conversation_id) = dispatch_result.raw_conversation_id.as_deref() {
         save_webgpt_conversation_binding(
             store_root,
@@ -302,6 +305,12 @@ pub(super) fn dispatch_pending_agent_turn_via_webgpt(
         record_path.as_path(),
         dispatch_result,
         commit_result,
+        WebGptDispatchTiming {
+            dispatched_at,
+            mcp_completed_at,
+            prompt_bytes: prompt_artifacts.prompt_bytes,
+            prompt_context_bytes: prompt_artifacts.prompt_context_bytes,
+        },
     );
     fs::write(&record_path, serde_json::to_vec_pretty(&record)?)
         .with_context(|| format!("failed to update {}", record_path.display()))?;
@@ -314,6 +323,36 @@ pub(super) fn dispatch_pending_agent_turn_via_webgpt(
         record.error.clone(),
     )?;
     Ok(WebGptDispatchOutcome::Started(Box::new(record)))
+}
+
+struct WebGptPromptArtifacts {
+    prompt_bytes: u64,
+    prompt_context_bytes: u64,
+}
+
+fn write_webgpt_prompt_artifacts(
+    store_root: Option<&Path>,
+    pending: &singulari_world::PendingAgentTurn,
+    prompt_context_path: &Path,
+    prompt_path: &Path,
+) -> Result<WebGptPromptArtifacts> {
+    let prompt_context = compile_prompt_context_packet(&CompilePromptContextPacketOptions {
+        store_root,
+        pending,
+        engine_session_kind: "webgpt_project_session",
+    })?;
+    let prompt_context_raw = serde_json::to_vec_pretty(&prompt_context)?;
+    let prompt_context_bytes = prompt_context_raw.len() as u64;
+    fs::write(prompt_context_path, prompt_context_raw)
+        .with_context(|| format!("failed to write {}", prompt_context_path.display()))?;
+    let prompt = build_webgpt_turn_prompt(&prompt_context)?;
+    let prompt_bytes = prompt.len() as u64;
+    fs::write(prompt_path, prompt.as_bytes())
+        .with_context(|| format!("failed to write {}", prompt_path.display()))?;
+    Ok(WebGptPromptArtifacts {
+        prompt_bytes,
+        prompt_context_bytes,
+    })
 }
 
 fn write_webgpt_text_job(
@@ -343,7 +382,9 @@ fn webgpt_dispatch_record(
     record_path: &Path,
     dispatch_result: WebGptDispatchResult,
     commit_result: WebGptCommitResult,
+    timing: WebGptDispatchTiming,
 ) -> WebGptDispatchRecord {
+    let completed_at = Utc::now();
     WebGptDispatchRecord {
         schema_version: "singulari.webgpt_dispatch_record.v1",
         status: commit_result.status,
@@ -366,7 +407,12 @@ fn webgpt_dispatch_record(
         result_path: Some(paths.result_path.display().to_string()),
         stdout_path: paths.stdout_path.display().to_string(),
         stderr_path: paths.stderr_path.display().to_string(),
-        dispatched_at: Utc::now().to_rfc3339(),
+        prompt_bytes: timing.prompt_bytes,
+        prompt_context_bytes: timing.prompt_context_bytes,
+        dispatched_at: timing.dispatched_at.to_rfc3339(),
+        mcp_completed_at: timing.mcp_completed_at.to_rfc3339(),
+        mcp_duration_ms: duration_ms(timing.dispatched_at, timing.mcp_completed_at),
+        total_duration_ms: duration_ms(timing.dispatched_at, completed_at),
         exit_code: dispatch_result.exit_code,
         committed_turn_id: commit_result
             .committed
@@ -381,8 +427,20 @@ fn webgpt_dispatch_record(
             .as_ref()
             .map(|value| value.commit_record_path.clone()),
         error: dispatch_result.error.or(commit_result.error),
-        completed_at: Utc::now().to_rfc3339(),
+        completed_at: completed_at.to_rfc3339(),
     }
+}
+
+#[derive(Clone, Copy)]
+struct WebGptDispatchTiming {
+    dispatched_at: DateTime<Utc>,
+    mcp_completed_at: DateTime<Utc>,
+    prompt_bytes: u64,
+    prompt_context_bytes: u64,
+}
+
+fn duration_ms(start: DateTime<Utc>, end: DateTime<Utc>) -> i64 {
+    end.signed_duration_since(start).num_milliseconds().max(0)
 }
 
 fn text_job_status_from_record(record: &WebGptDispatchRecord) -> WorldJobStatus {
@@ -407,6 +465,9 @@ fn webgpt_dispatch_claim(
     pending: &singulari_world::PendingAgentTurn,
     dispatcher: &WebGptDispatcher,
     paths: WebGptTurnPaths<'_>,
+    dispatched_at: DateTime<Utc>,
+    prompt_bytes: u64,
+    prompt_context_bytes: u64,
 ) -> serde_json::Value {
     serde_json::json!({
         "schema_version": "singulari.webgpt_dispatch_record.v1",
@@ -425,7 +486,9 @@ fn webgpt_dispatch_claim(
         "result_path": paths.result_path.display().to_string(),
         "stdout_path": paths.stdout_path.display().to_string(),
         "stderr_path": paths.stderr_path.display().to_string(),
-        "dispatched_at": Utc::now().to_rfc3339(),
+        "prompt_bytes": prompt_bytes,
+        "prompt_context_bytes": prompt_context_bytes,
+        "dispatched_at": dispatched_at.to_rfc3339(),
     })
 }
 
@@ -1871,8 +1934,8 @@ premise:
             "prompt_context.prompt_policy.omitted_debug_sections",
             "prompt_context.budget_report",
             "웹 검색, 외부 사이트 탐색, repo 탐색, 소스 파일 읽기를 하지 마라.",
-            "\"schema_version\": \"singulari.prompt_context_packet.v1\"",
-            "\"schema_version\": \"singulari.prompt_context_budget_report.v1\"",
+            "\"schema_version\":\"singulari.prompt_context_packet.v1\"",
+            "\"schema_version\":\"singulari.prompt_context_budget_report.v1\"",
             "\"visible_context\"",
             "\"adjudication_context\"",
             "\"selected_memory_items\"",
@@ -1910,7 +1973,7 @@ premise:
             "\"active_location_graph\"",
             "\"active_character_text_design\"",
             "\"source_of_truth_policy\"",
-            "\"conflict_rule\": \"revival_packet_wins\"",
+            "\"conflict_rule\":\"revival_packet_wins\"",
             "AgentTurnResponse 스키마:",
             "\"schema_version\": \"singulari.agent_turn_response.v1\"",
             "{\"slot\":6,\"tag\":\"자유서술\"",

@@ -214,6 +214,9 @@ fn prewarm_effective_webgpt_lanes_once(
     if !include_text && !include_visual {
         return Ok(());
     }
+    if options.once {
+        return Ok(());
+    }
     if !emitted.insert("webgpt-lane-prewarm".to_owned()) {
         return Ok(());
     }
@@ -508,10 +511,14 @@ fn webgpt_dispatch_started_event(
         "pid": record.pid,
         "record_path": record.record_path,
         "prompt_path": record.prompt_path,
+        "prompt_bytes": record.prompt_bytes,
+        "prompt_context_bytes": record.prompt_context_bytes,
         "response_path": record.response_path,
         "result_path": record.result_path,
         "stdout_path": record.stdout_path,
         "stderr_path": record.stderr_path,
+        "mcp_duration_ms": record.mcp_duration_ms,
+        "total_duration_ms": record.total_duration_ms,
         "committed_turn_id": record.committed_turn_id,
         "consumer": HOST_WORKER_CONSUMER,
     })

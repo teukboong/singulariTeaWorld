@@ -119,9 +119,10 @@ selection.
 
 ## Optional Prewarm
 
-For a WebGPT/WebGPT world, `host-worker` prewarms all three dedicated browser
-sessions before dispatching work, so operators should see one text lane, one
-turn-CG image lane, and one reference/design image lane:
+For a WebGPT/WebGPT world, long-running diagnostic `host-worker` processes
+prewarm all three dedicated browser sessions once before dispatching work, so
+operators should see one text lane, one turn-CG image lane, and one
+reference/design image lane:
 
 ```text
 9238 -> text-profile
@@ -129,8 +130,10 @@ turn-CG image lane, and one reference/design image lane:
 9240 -> reference-image-profile
 ```
 
-To prewarm or manually solve a login/challenge before play, start the lane
-sessions directly:
+Browser play wakes `host-worker --once`; that path skips blocking prewarm and
+dispatches directly to the active lane so player input is not delayed by
+repeated health probes. To prewarm or manually solve a login/challenge before
+play, start the lane sessions directly:
 
 ```bash
 WEBGPT_MCP_CDP_PORT=9238 \

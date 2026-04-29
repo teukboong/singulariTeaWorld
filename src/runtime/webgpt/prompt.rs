@@ -168,7 +168,7 @@ pub(super) fn build_webgpt_turn_prompt(prompt_context: &PromptContextPacket) -> 
     let output_contract =
         serde_json::from_value::<AgentOutputContract>(prompt_context.output_contract.clone())
             .context("webgpt prompt context output_contract was not an AgentOutputContract")?;
-    let prompt_context_packet = serde_json::to_string_pretty(prompt_context)
+    let prompt_context_packet = serde_json::to_string(prompt_context)
         .context("failed to serialize webgpt prompt context packet")?;
     let narrative_budget = &output_contract.narrative_budget;
     Ok(format!(
