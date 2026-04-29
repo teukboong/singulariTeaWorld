@@ -694,3 +694,49 @@ fn emit_host_event(event: &serde_json::Value) -> Result<()> {
     stdout.flush()?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::webgpt::{
+        DEFAULT_WEBGPT_IMAGE_CDP_PORT, DEFAULT_WEBGPT_REFERENCE_IMAGE_CDP_PORT,
+        DEFAULT_WEBGPT_TEXT_CDP_PORT,
+    };
+
+    #[test]
+    fn one_shot_host_worker_skips_blocking_webgpt_prewarm() -> anyhow::Result<()> {
+        let mut emitted = HashSet::new();
+        let options = HostWorkerOptions {
+            interval_ms: 750,
+            once: true,
+            text_backend: HostWorkerTextBackend::Webgpt,
+            visual_backend: HostWorkerVisualBackend::Webgpt,
+            webgpt_turn_command: None,
+            webgpt_mcp_wrapper: Some("/definitely/missing/webgpt-mcp.sh".into()),
+            webgpt_model: None,
+            webgpt_reasoning_level: None,
+            webgpt_text_profile_dir: Some("/tmp/singulari-webgpt-test-text".into()),
+            webgpt_image_profile_dir: Some("/tmp/singulari-webgpt-test-image".into()),
+            webgpt_reference_image_profile_dir: Some(
+                "/tmp/singulari-webgpt-test-reference-image".into(),
+            ),
+            webgpt_text_cdp_port: DEFAULT_WEBGPT_TEXT_CDP_PORT,
+            webgpt_image_cdp_port: DEFAULT_WEBGPT_IMAGE_CDP_PORT,
+            webgpt_reference_image_cdp_port: DEFAULT_WEBGPT_REFERENCE_IMAGE_CDP_PORT,
+            webgpt_timeout_secs: 900,
+        };
+
+        prewarm_effective_webgpt_lanes_once(
+            &mut emitted,
+            HostWorkerTextBackend::Webgpt,
+            HostWorkerVisualBackend::Webgpt,
+            &options,
+        )?;
+
+        assert!(
+            emitted.is_empty(),
+            "one-shot worker should dispatch directly without prewarm bookkeeping"
+        );
+        Ok(())
+    }
+}
