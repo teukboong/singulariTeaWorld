@@ -1,12 +1,24 @@
+#![allow(clippy::missing_errors_doc)]
+
 use crate::agent_bridge::AgentPrivateAdjudicationContext;
 use crate::scene_pressure::{
-    ScenePressure, ScenePressureKind, ScenePressurePacket, ScenePressureUrgency,
+    ScenePressure, ScenePressureEventPlan, ScenePressureKind, ScenePressurePacket,
+    ScenePressureUrgency,
 };
+use crate::store::{append_jsonl, read_json, write_json};
+use anyhow::Result;
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 pub const WORLD_PROCESS_CLOCK_PACKET_SCHEMA_VERSION: &str =
     "singulari.world_process_clock_packet.v1";
 pub const WORLD_PROCESS_SCHEMA_VERSION: &str = "singulari.world_process.v1";
+pub const WORLD_PROCESS_EVENT_SCHEMA_VERSION: &str = "singulari.world_process_event.v1";
+pub const WORLD_PROCESSES_FILENAME: &str = "world_processes.json";
+pub const WORLD_PROCESS_EVENTS_FILENAME: &str = "world_process_events.jsonl";
+
+const PERSISTED_PROCESS_BUDGET: usize = 12;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorldProcessClockPacket {
@@ -18,6 +30,19 @@ pub struct WorldProcessClockPacket {
     #[serde(default)]
     pub adjudication_only_processes: Vec<WorldProcess>,
     pub compiler_policy: WorldProcessClockPolicy,
+}
+
+impl Default for WorldProcessClockPacket {
+    fn default() -> Self {
+        Self {
+            schema_version: WORLD_PROCESS_CLOCK_PACKET_SCHEMA_VERSION.to_owned(),
+            world_id: String::new(),
+            turn_id: String::new(),
+            visible_processes: Vec::new(),
+            adjudication_only_processes: Vec::new(),
+            compiler_policy: WorldProcessClockPolicy::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -55,6 +80,30 @@ pub struct WorldProcessClockPolicy {
     pub use_rules: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorldProcessEventPlan {
+    pub world_id: String,
+    pub turn_id: String,
+    #[serde(default)]
+    pub records: Vec<WorldProcessEventRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorldProcessEventRecord {
+    pub schema_version: String,
+    pub world_id: String,
+    pub turn_id: String,
+    pub event_id: String,
+    pub process_id: String,
+    pub visibility: WorldProcessVisibility,
+    pub tempo: WorldProcessTempo,
+    pub summary: String,
+    pub next_tick_contract: String,
+    #[serde(default)]
+    pub source_refs: Vec<String>,
+    pub recorded_at: String,
+}
+
 impl Default for WorldProcessClockPolicy {
     fn default() -> Self {
         Self {
@@ -65,6 +114,113 @@ impl Default for WorldProcessClockPolicy {
                 "A process tick can change pressure, opportunity, cost, or timing; it must not invent unrelated events.".to_owned(),
             ],
         }
+    }
+}
+
+#[must_use]
+pub fn prepare_world_process_event_plan(
+    clock: &WorldProcessClockPacket,
+    scene_pressure_event_plan: &ScenePressureEventPlan,
+) -> WorldProcessEventPlan {
+    let recorded_at = Utc::now().to_rfc3339();
+    let records = scene_pressure_event_plan
+        .records
+        .iter()
+        .enumerate()
+        .map(|(index, event)| WorldProcessEventRecord {
+            schema_version: WORLD_PROCESS_EVENT_SCHEMA_VERSION.to_owned(),
+            world_id: clock.world_id.clone(),
+            turn_id: scene_pressure_event_plan.turn_id.clone(),
+            event_id: format!("world_process_event:{}:{index:02}", scene_pressure_event_plan.turn_id),
+            process_id: format!("process:pressure:{}", event.pressure_id),
+            visibility: WorldProcessVisibility::PlayerVisible,
+            tempo: tempo_from_urgency(event.urgency_after),
+            summary: event.summary.clone(),
+            next_tick_contract:
+                "Process should tick only when player action, time passage, or pressure evidence touches it.".to_owned(),
+            source_refs: event.evidence_refs.clone(),
+            recorded_at: recorded_at.clone(),
+        })
+        .collect();
+    WorldProcessEventPlan {
+        world_id: clock.world_id.clone(),
+        turn_id: scene_pressure_event_plan.turn_id.clone(),
+        records,
+    }
+}
+
+pub fn append_world_process_event_plan(
+    world_dir: &Path,
+    plan: &WorldProcessEventPlan,
+) -> Result<()> {
+    for record in &plan.records {
+        append_jsonl(&world_dir.join(WORLD_PROCESS_EVENTS_FILENAME), record)?;
+    }
+    Ok(())
+}
+
+pub fn rebuild_world_process_clock(
+    world_dir: &Path,
+    base_packet: &WorldProcessClockPacket,
+) -> Result<WorldProcessClockPacket> {
+    let mut visible_processes = base_packet.visible_processes.clone();
+    visible_processes.extend(
+        load_world_process_event_records(world_dir)?
+            .into_iter()
+            .filter(|record| record.visibility == WorldProcessVisibility::PlayerVisible)
+            .rev()
+            .take(PERSISTED_PROCESS_BUDGET)
+            .map(world_process_from_event),
+    );
+    visible_processes.truncate(PERSISTED_PROCESS_BUDGET);
+    let packet = WorldProcessClockPacket {
+        schema_version: WORLD_PROCESS_CLOCK_PACKET_SCHEMA_VERSION.to_owned(),
+        world_id: base_packet.world_id.clone(),
+        turn_id: base_packet.turn_id.clone(),
+        visible_processes,
+        adjudication_only_processes: base_packet.adjudication_only_processes.clone(),
+        compiler_policy: WorldProcessClockPolicy {
+            source: "materialized_from_world_process_events_v1".to_owned(),
+            ..WorldProcessClockPolicy::default()
+        },
+    };
+    write_json(&world_dir.join(WORLD_PROCESSES_FILENAME), &packet)?;
+    Ok(packet)
+}
+
+pub fn load_world_process_clock_state(
+    world_dir: &Path,
+    base_packet: WorldProcessClockPacket,
+) -> Result<WorldProcessClockPacket> {
+    let path = world_dir.join(WORLD_PROCESSES_FILENAME);
+    if path.is_file() {
+        return read_json(&path);
+    }
+    Ok(base_packet)
+}
+
+fn load_world_process_event_records(world_dir: &Path) -> Result<Vec<WorldProcessEventRecord>> {
+    let path = world_dir.join(WORLD_PROCESS_EVENTS_FILENAME);
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    let raw = std::fs::read_to_string(&path)?;
+    raw.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(serde_json::from_str::<WorldProcessEventRecord>)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn world_process_from_event(record: WorldProcessEventRecord) -> WorldProcess {
+    WorldProcess {
+        schema_version: WORLD_PROCESS_SCHEMA_VERSION.to_owned(),
+        process_id: record.process_id,
+        visibility: record.visibility,
+        tempo: record.tempo,
+        summary: record.summary,
+        next_tick_contract: record.next_tick_contract,
+        source_refs: record.source_refs,
     }
 }
 

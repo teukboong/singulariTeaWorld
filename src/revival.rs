@@ -173,6 +173,12 @@ pub fn build_agent_revival_packet(options: &AgentRevivalCompileOptions<'_>) -> R
             "active_body_resource_state": pending.visible_context.active_body_resource_state,
             "active_location_graph": pending.visible_context.active_location_graph,
             "active_character_text_design": pending.visible_context.active_character_text_design,
+            "active_change_ledger": pending.visible_context.active_change_ledger,
+            "active_pattern_debt": pending.visible_context.active_pattern_debt,
+            "active_belief_graph": pending.visible_context.active_belief_graph,
+            "active_world_process_clock": pending.visible_context.active_world_process_clock,
+            "active_player_intent_trace": pending.visible_context.active_player_intent_trace,
+            "active_narrative_style_state": pending.visible_context.active_narrative_style_state,
             "active_memory_revival": {
                 "player_visible_archive_view": archive_view,
                 "query_recall": {

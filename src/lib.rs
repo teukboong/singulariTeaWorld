@@ -4,6 +4,7 @@ pub mod agent_bridge;
 pub mod backend_selection;
 pub mod belief_graph;
 pub mod body_resource;
+pub mod change_ledger;
 pub mod character_text_design;
 pub mod chat;
 pub mod codex_view;
@@ -16,9 +17,12 @@ pub mod memory_revival;
 pub mod memory_revival_policy;
 pub mod models;
 pub mod narrative_style_state;
+pub mod pattern_debt;
+pub mod player_intent;
 pub mod plot_thread;
 pub mod projection_health;
 pub mod prompt_context;
+pub mod prompt_context_budget;
 pub mod relationship_graph;
 pub mod render;
 pub mod response_context;
@@ -63,8 +67,11 @@ pub use backend_selection::{
     load_world_backend_selection, save_world_backend_selection,
 };
 pub use belief_graph::{
+    BELIEF_EVENT_SCHEMA_VERSION, BELIEF_EVENTS_FILENAME, BELIEF_GRAPH_FILENAME,
     BELIEF_GRAPH_PACKET_SCHEMA_VERSION, BELIEF_NODE_SCHEMA_VERSION, BeliefConfidence,
-    BeliefGraphPacket, BeliefGraphPolicy, BeliefHolder, BeliefNode, compile_belief_graph_packet,
+    BeliefEventPlan, BeliefEventRecord, BeliefGraphPacket, BeliefGraphPolicy, BeliefHolder,
+    BeliefNode, append_belief_event_plan, compile_belief_graph_packet, load_belief_graph_state,
+    prepare_belief_event_plan, rebuild_belief_graph,
 };
 pub use body_resource::{
     BODY_CONSTRAINT_SCHEMA_VERSION, BODY_RESOURCE_EVENT_SCHEMA_VERSION,
@@ -74,6 +81,12 @@ pub use body_resource::{
     BodyResourceVisibility, RESOURCE_ITEM_SCHEMA_VERSION, ResourceItem, ResourceKind,
     append_body_resource_event_plan, compile_body_resource_packet, load_body_resource_state,
     prepare_body_resource_event_plan, rebuild_body_resource_state,
+};
+pub use change_ledger::{
+    CHANGE_EVENT_SCHEMA_VERSION, CHANGE_EVENTS_FILENAME, CHANGE_LEDGER_FILENAME,
+    CHANGE_LEDGER_SCHEMA_VERSION, ChangeAxis, ChangeEventPlan, ChangeEventPlanInput,
+    ChangeEventRecord, ChangeLedgerPacket, ChangeLedgerPolicy, append_change_event_plan,
+    load_change_ledger_state, prepare_change_event_plan, rebuild_change_ledger,
 };
 pub use character_text_design::{
     CHARACTER_TEXT_DESIGN_EVENT_SCHEMA_VERSION, CHARACTER_TEXT_DESIGN_EVENTS_FILENAME,
@@ -145,8 +158,24 @@ pub use models::{
     WorldSeed, default_freeform_choice, default_turn_choices, normalize_turn_choices,
 };
 pub use narrative_style_state::{
-    NARRATIVE_STYLE_STATE_SCHEMA_VERSION, NarrativeStylePolicy, NarrativeStyleState, StyleVector,
-    compile_narrative_style_state,
+    NARRATIVE_STYLE_EVENT_SCHEMA_VERSION, NARRATIVE_STYLE_EVENTS_FILENAME,
+    NARRATIVE_STYLE_STATE_FILENAME, NARRATIVE_STYLE_STATE_SCHEMA_VERSION, NarrativeStyleEventPlan,
+    NarrativeStyleEventRecord, NarrativeStylePolicy, NarrativeStyleState, StyleVector,
+    append_narrative_style_event_plan, compile_narrative_style_state, load_narrative_style_state,
+    prepare_narrative_style_event_plan, rebuild_narrative_style_state,
+};
+pub use pattern_debt::{
+    PATTERN_DEBT_EVENT_SCHEMA_VERSION, PATTERN_DEBT_EVENTS_FILENAME, PATTERN_DEBT_FILENAME,
+    PATTERN_DEBT_PACKET_SCHEMA_VERSION, PatternDebtEventPlan, PatternDebtPacket, PatternDebtPolicy,
+    PatternDebtRecord, PatternSurface, append_pattern_debt_event_plan, load_pattern_debt_state,
+    prepare_pattern_debt_event_plan, rebuild_pattern_debt,
+};
+pub use player_intent::{
+    PLAYER_INTENT_EVENT_SCHEMA_VERSION, PLAYER_INTENT_EVENTS_FILENAME,
+    PLAYER_INTENT_TRACE_FILENAME, PLAYER_INTENT_TRACE_SCHEMA_VERSION, PlayerIntentEventPlan,
+    PlayerIntentEventRecord, PlayerIntentPolicy, PlayerIntentTracePacket,
+    append_player_intent_event_plan, load_player_intent_trace_state,
+    prepare_player_intent_event_plan, rebuild_player_intent_trace,
 };
 pub use plot_thread::{
     PLOT_THREAD_AUDIT_FILENAME, PLOT_THREAD_AUDIT_SCHEMA_VERSION, PLOT_THREAD_EVENT_SCHEMA_VERSION,
@@ -165,6 +194,12 @@ pub use prompt_context::{
     PROMPT_CONTEXT_PACKET_SCHEMA_VERSION, PromptAdjudicationContext, PromptContextPacket,
     PromptContextPolicy, PromptVisibleContext, assemble_prompt_context_packet,
     extract_prompt_context_from_prompt,
+};
+pub use prompt_context_budget::{
+    PROMPT_CONTEXT_BUDGET_REPORT_SCHEMA_VERSION, PromptContextBudgetBucket,
+    PromptContextBudgetExclusion, PromptContextBudgetInclusion, PromptContextBudgetPolicy,
+    PromptContextBudgetReport, PromptContextExclusionReason, PromptContextInclusionReason,
+    compile_prompt_context_budget_report,
 };
 pub use relationship_graph::{
     RELATIONSHIP_EDGE_SCHEMA_VERSION, RELATIONSHIP_GRAPH_EVENT_SCHEMA_VERSION,
@@ -276,7 +311,10 @@ pub use world_lore::{
     load_world_lore_update_records, prepare_world_lore_update_plan, rebuild_world_lore,
 };
 pub use world_process_clock::{
-    WORLD_PROCESS_CLOCK_PACKET_SCHEMA_VERSION, WORLD_PROCESS_SCHEMA_VERSION, WorldProcess,
-    WorldProcessClockPacket, WorldProcessClockPolicy, WorldProcessTempo, WorldProcessVisibility,
-    compile_world_process_clock_packet,
+    WORLD_PROCESS_CLOCK_PACKET_SCHEMA_VERSION, WORLD_PROCESS_EVENT_SCHEMA_VERSION,
+    WORLD_PROCESS_EVENTS_FILENAME, WORLD_PROCESS_SCHEMA_VERSION, WORLD_PROCESSES_FILENAME,
+    WorldProcess, WorldProcessClockPacket, WorldProcessClockPolicy, WorldProcessEventPlan,
+    WorldProcessEventRecord, WorldProcessTempo, WorldProcessVisibility,
+    append_world_process_event_plan, compile_world_process_clock_packet,
+    load_world_process_clock_state, prepare_world_process_event_plan, rebuild_world_process_clock,
 };

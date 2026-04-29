@@ -36,6 +36,11 @@ impl Default for TurnContextAssemblyPolicy {
                 "memory_revival.active_body_resource_state".to_owned(),
                 "memory_revival.active_location_graph".to_owned(),
                 "memory_revival.active_character_text_design".to_owned(),
+                "memory_revival.active_change_ledger".to_owned(),
+                "memory_revival.active_pattern_debt".to_owned(),
+                "memory_revival.active_belief_graph".to_owned(),
+                "memory_revival.active_world_process_clock".to_owned(),
+                "memory_revival.active_player_intent_trace".to_owned(),
                 "memory_revival.active_memory_revival.active_relationship_graph".to_owned(),
                 "memory_revival.active_memory_revival.active_world_lore".to_owned(),
                 "memory_revival.active_memory_revival.visible_prompt_revival".to_owned(),
@@ -74,12 +79,18 @@ mod tests {
     use crate::agent_bridge::{
         AgentOutputContract, AgentPrivateAdjudicationContext, AgentVisibleContext,
     };
+    use crate::belief_graph::BeliefGraphPacket;
     use crate::body_resource::BodyResourcePacket;
+    use crate::change_ledger::ChangeLedgerPacket;
     use crate::character_text_design::CharacterTextDesignPacket;
     use crate::extra_memory::ExtraMemoryPacket;
     use crate::location_graph::LocationGraphPacket;
+    use crate::narrative_style_state::NarrativeStyleState;
+    use crate::pattern_debt::PatternDebtPacket;
+    use crate::player_intent::PlayerIntentTracePacket;
     use crate::plot_thread::PlotThreadPacket;
     use crate::scene_pressure::ScenePressurePacket;
+    use crate::world_process_clock::WorldProcessClockPacket;
 
     #[test]
     fn turn_context_marks_hidden_pressure_as_adjudication_only() {
@@ -101,6 +112,12 @@ mod tests {
                 active_body_resource_state: BodyResourcePacket::default(),
                 active_location_graph: LocationGraphPacket::default(),
                 active_character_text_design: CharacterTextDesignPacket::default(),
+                active_change_ledger: ChangeLedgerPacket::default(),
+                active_pattern_debt: PatternDebtPacket::default(),
+                active_belief_graph: BeliefGraphPacket::default(),
+                active_world_process_clock: WorldProcessClockPacket::default(),
+                active_player_intent_trace: PlayerIntentTracePacket::default(),
+                active_narrative_style_state: NarrativeStyleState::default(),
             },
             private_adjudication_context: AgentPrivateAdjudicationContext {
                 hidden_timers: Vec::new(),

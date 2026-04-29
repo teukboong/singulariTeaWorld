@@ -1,8 +1,20 @@
+#![allow(clippy::missing_errors_doc)]
+
+use crate::agent_bridge::AgentTurnResponse;
+use crate::store::{append_jsonl, read_json, write_json};
+use anyhow::Result;
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::path::Path;
 
 pub const BELIEF_GRAPH_PACKET_SCHEMA_VERSION: &str = "singulari.belief_graph_packet.v1";
 pub const BELIEF_NODE_SCHEMA_VERSION: &str = "singulari.belief_node.v1";
+pub const BELIEF_EVENT_SCHEMA_VERSION: &str = "singulari.belief_event.v1";
+pub const BELIEF_GRAPH_FILENAME: &str = "belief_graph.json";
+pub const BELIEF_EVENTS_FILENAME: &str = "belief_events.jsonl";
+
+const PERSISTED_BELIEF_BUDGET: usize = 16;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BeliefGraphPacket {
@@ -14,6 +26,19 @@ pub struct BeliefGraphPacket {
     #[serde(default)]
     pub narrator_knowledge_limits: Vec<String>,
     pub compiler_policy: BeliefGraphPolicy,
+}
+
+impl Default for BeliefGraphPacket {
+    fn default() -> Self {
+        Self {
+            schema_version: BELIEF_GRAPH_PACKET_SCHEMA_VERSION.to_owned(),
+            world_id: String::new(),
+            turn_id: String::new(),
+            protagonist_visible_beliefs: Vec::new(),
+            narrator_knowledge_limits: Vec::new(),
+            compiler_policy: BeliefGraphPolicy::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -47,6 +72,28 @@ pub struct BeliefGraphPolicy {
     pub source: String,
     #[serde(default)]
     pub use_rules: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BeliefEventPlan {
+    pub world_id: String,
+    pub turn_id: String,
+    #[serde(default)]
+    pub records: Vec<BeliefEventRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BeliefEventRecord {
+    pub schema_version: String,
+    pub world_id: String,
+    pub turn_id: String,
+    pub event_id: String,
+    pub holder: BeliefHolder,
+    pub confidence: BeliefConfidence,
+    pub statement: String,
+    #[serde(default)]
+    pub source_refs: Vec<String>,
+    pub recorded_at: String,
 }
 
 impl Default for BeliefGraphPolicy {
@@ -90,6 +137,146 @@ pub fn compile_belief_graph_packet(
             "불확실한 사실은 몸의 반응, 관찰 가능한 단서, 타인의 말투로만 드러낸다.".to_owned(),
         ],
         compiler_policy: BeliefGraphPolicy::default(),
+    }
+}
+
+#[must_use]
+pub fn prepare_belief_event_plan(
+    world_id: &str,
+    turn_id: &str,
+    response: &AgentTurnResponse,
+) -> BeliefEventPlan {
+    let recorded_at = Utc::now().to_rfc3339();
+    let mut records = Vec::new();
+    if let Some(canon_event) = &response.canon_event
+        && canon_event.visibility == "player_visible"
+    {
+        records.push(belief_event(BeliefEventSeed {
+            world_id,
+            turn_id,
+            index: records.len(),
+            holder: BeliefHolder::PlayerVisibleNarrator,
+            confidence: BeliefConfidence::Observed,
+            statement: canon_event.summary.trim(),
+            source_refs: vec![format!("canon_event:{turn_id}")],
+            recorded_at: recorded_at.as_str(),
+        }));
+    }
+    for constraint in response
+        .adjudication
+        .iter()
+        .flat_map(|adjudication| adjudication.visible_constraints.iter())
+    {
+        records.push(belief_event(BeliefEventSeed {
+            world_id,
+            turn_id,
+            index: records.len(),
+            holder: BeliefHolder::Protagonist,
+            confidence: BeliefConfidence::Inferred,
+            statement: constraint.trim(),
+            source_refs: vec![format!("adjudication:{turn_id}")],
+            recorded_at: recorded_at.as_str(),
+        }));
+    }
+    BeliefEventPlan {
+        world_id: world_id.to_owned(),
+        turn_id: turn_id.to_owned(),
+        records,
+    }
+}
+
+pub fn append_belief_event_plan(world_dir: &Path, plan: &BeliefEventPlan) -> Result<()> {
+    for record in &plan.records {
+        append_jsonl(&world_dir.join(BELIEF_EVENTS_FILENAME), record)?;
+    }
+    Ok(())
+}
+
+pub fn rebuild_belief_graph(
+    world_dir: &Path,
+    base_packet: &BeliefGraphPacket,
+) -> Result<BeliefGraphPacket> {
+    let mut protagonist_visible_beliefs = base_packet.protagonist_visible_beliefs.clone();
+    protagonist_visible_beliefs.extend(
+        load_belief_event_records(world_dir)?
+            .into_iter()
+            .rev()
+            .take(PERSISTED_BELIEF_BUDGET)
+            .map(belief_node_from_event),
+    );
+    protagonist_visible_beliefs.truncate(PERSISTED_BELIEF_BUDGET);
+    let packet = BeliefGraphPacket {
+        schema_version: BELIEF_GRAPH_PACKET_SCHEMA_VERSION.to_owned(),
+        world_id: base_packet.world_id.clone(),
+        turn_id: base_packet.turn_id.clone(),
+        protagonist_visible_beliefs,
+        narrator_knowledge_limits: base_packet.narrator_knowledge_limits.clone(),
+        compiler_policy: BeliefGraphPolicy {
+            source: "materialized_from_belief_events_v1".to_owned(),
+            ..BeliefGraphPolicy::default()
+        },
+    };
+    write_json(&world_dir.join(BELIEF_GRAPH_FILENAME), &packet)?;
+    Ok(packet)
+}
+
+pub fn load_belief_graph_state(
+    world_dir: &Path,
+    base_packet: BeliefGraphPacket,
+) -> Result<BeliefGraphPacket> {
+    let path = world_dir.join(BELIEF_GRAPH_FILENAME);
+    if path.is_file() {
+        return read_json(&path);
+    }
+    Ok(base_packet)
+}
+
+fn load_belief_event_records(world_dir: &Path) -> Result<Vec<BeliefEventRecord>> {
+    let path = world_dir.join(BELIEF_EVENTS_FILENAME);
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    let raw = std::fs::read_to_string(&path)?;
+    raw.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(serde_json::from_str::<BeliefEventRecord>)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+struct BeliefEventSeed<'a> {
+    world_id: &'a str,
+    turn_id: &'a str,
+    index: usize,
+    holder: BeliefHolder,
+    confidence: BeliefConfidence,
+    statement: &'a str,
+    source_refs: Vec<String>,
+    recorded_at: &'a str,
+}
+
+fn belief_event(seed: BeliefEventSeed<'_>) -> BeliefEventRecord {
+    BeliefEventRecord {
+        schema_version: BELIEF_EVENT_SCHEMA_VERSION.to_owned(),
+        world_id: seed.world_id.to_owned(),
+        turn_id: seed.turn_id.to_owned(),
+        event_id: format!("belief_event:{}:{:02}", seed.turn_id, seed.index),
+        holder: seed.holder,
+        confidence: seed.confidence,
+        statement: seed.statement.to_owned(),
+        source_refs: seed.source_refs,
+        recorded_at: seed.recorded_at.to_owned(),
+    }
+}
+
+fn belief_node_from_event(record: BeliefEventRecord) -> BeliefNode {
+    BeliefNode {
+        schema_version: BELIEF_NODE_SCHEMA_VERSION.to_owned(),
+        belief_id: format!("belief:event:{}", record.event_id),
+        holder: record.holder,
+        confidence: record.confidence,
+        statement: record.statement,
+        source_refs: record.source_refs,
     }
 }
 

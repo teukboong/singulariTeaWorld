@@ -1,12 +1,15 @@
-use crate::affordance_graph::compile_affordance_graph_packet;
+use crate::affordance_graph::{AffordanceGraphPacket, compile_affordance_graph_packet};
 use crate::agent_bridge::AgentOutputContract;
-use crate::belief_graph::compile_belief_graph_packet;
+use crate::belief_graph::{BeliefGraphPacket, compile_belief_graph_packet};
 use crate::body_resource::BodyResourcePacket;
 use crate::location_graph::LocationGraphPacket;
-use crate::narrative_style_state::compile_narrative_style_state;
+use crate::prompt_context_budget::{
+    PromptContextBudgetReport, PromptContextBudgetReportSource,
+    compile_prompt_context_budget_report,
+};
 use crate::scene_pressure::ScenePressurePacket;
 use crate::turn_context::TurnContextPacket;
-use crate::world_process_clock::compile_world_process_clock_packet;
+use crate::world_process_clock::{WorldProcessClockPacket, compile_world_process_clock_packet};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -25,6 +28,7 @@ pub struct PromptContextPacket {
     pub adjudication_context: PromptAdjudicationContext,
     pub source_of_truth_policy: Value,
     pub prompt_policy: PromptContextPolicy,
+    pub budget_report: PromptContextBudgetReport,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -40,6 +44,11 @@ pub struct PromptVisibleContext {
     pub world_process_clock: Value,
     pub narrative_style_state: Value,
     pub active_character_text_design: Value,
+    pub active_change_ledger: Value,
+    pub active_pattern_debt: Value,
+    pub active_belief_graph: Value,
+    pub active_world_process_clock: Value,
+    pub active_player_intent_trace: Value,
     pub selected_memory_items: Value,
 }
 
@@ -126,33 +135,60 @@ pub fn assemble_prompt_context_packet(
         "/output_contract",
         "output_contract",
     )?;
-    let affordance_graph = compile_affordance_graph_packet(
-        turn_context.world_id.as_str(),
-        turn_context.turn_id.as_str(),
-        &scene_pressure,
-        &body_resource,
-        &location_graph,
-    );
     let known_facts = required_path(memory, "/known_facts")?.clone();
+    let active_change_ledger = required_path(memory, "/active_change_ledger")?.clone();
+    let active_pattern_debt = required_path(memory, "/active_pattern_debt")?.clone();
+    let active_belief_graph = required_path(memory, "/active_belief_graph")?.clone();
+    let active_world_process_clock = required_path(memory, "/active_world_process_clock")?.clone();
+    let active_player_intent_trace = required_path(memory, "/active_player_intent_trace")?.clone();
+    let active_narrative_style_state =
+        required_path(memory, "/active_narrative_style_state")?.clone();
     let selected_memory_items =
         required_path(active_memory, "/visible_prompt_revival/items")?.clone();
-    let belief_graph = compile_belief_graph_packet(
-        turn_context.world_id.as_str(),
-        turn_context.turn_id.as_str(),
-        &known_facts,
-        &selected_memory_items,
-    );
-    let world_process_clock = compile_world_process_clock_packet(
-        turn_context.world_id.as_str(),
-        turn_context.turn_id.as_str(),
-        &scene_pressure,
-        &private_context,
-    );
-    let narrative_style_state = compile_narrative_style_state(
-        turn_context.world_id.as_str(),
-        turn_context.turn_id.as_str(),
-        &output_contract,
-    );
+    let derived = compile_derived_context_packets(CompileDerivedContextSource {
+        turn_context,
+        known_facts: &known_facts,
+        selected_memory_items: &selected_memory_items,
+        scene_pressure: &scene_pressure,
+        body_resource: &body_resource,
+        location_graph: &location_graph,
+        private_context: &private_context,
+    });
+    let prompt_policy = PromptContextPolicy::default();
+    let budget_report = compile_prompt_budget_report(CompilePromptBudgetSource {
+        turn_context,
+        selected_memory_items: &selected_memory_items,
+        affordance_graph: &derived.affordance_graph,
+        belief_graph: &derived.belief_graph,
+        world_process_clock: &derived.world_process_clock,
+        active_change_ledger: &active_change_ledger,
+        active_pattern_debt: &active_pattern_debt,
+        prompt_policy: &prompt_policy,
+    })?;
+
+    let visible_context = compile_visible_context(VisibleContextSource {
+        memory,
+        known_facts,
+        active_change_ledger,
+        active_pattern_debt,
+        active_belief_graph,
+        active_world_process_clock,
+        active_player_intent_trace,
+        active_narrative_style_state,
+        selected_memory_items,
+        scene_pressure: &scene_pressure,
+        body_resource: &body_resource,
+        location_graph: &location_graph,
+        affordance_graph: &derived.affordance_graph,
+        belief_graph: &derived.belief_graph,
+        world_process_clock: &derived.world_process_clock,
+    })?;
+    let adjudication_context = compile_adjudication_context(AdjudicationContextSource {
+        memory,
+        active_memory,
+        private_context: &private_context,
+        world_process_clock: &derived.world_process_clock,
+    })?;
 
     Ok(PromptContextPacket {
         schema_version: PROMPT_CONTEXT_PACKET_SCHEMA_VERSION.to_owned(),
@@ -161,40 +197,156 @@ pub fn assemble_prompt_context_packet(
         current_turn: required_path(source, "/current_turn")?.clone(),
         opening_randomizer: required_path(source, "/opening_randomizer")?.clone(),
         output_contract: serde_json::to_value(&output_contract)?,
-        visible_context: PromptVisibleContext {
-            recent_scene_window: required_path(memory, "/recent_scene_window")?.clone(),
-            known_facts,
-            active_scene_pressure: serde_json::to_value(&scene_pressure.visible_active)?,
-            active_plot_threads: required_path(memory, "/active_plot_threads/active_visible")?
-                .clone(),
-            active_body_resource_state: serde_json::to_value(&body_resource)?,
-            active_location_graph: serde_json::to_value(&location_graph)?,
-            affordance_graph: serde_json::to_value(&affordance_graph)?,
-            belief_graph: serde_json::to_value(&belief_graph)?,
-            world_process_clock: serde_json::to_value(&world_process_clock.visible_processes)?,
-            narrative_style_state: serde_json::to_value(&narrative_style_state)?,
-            active_character_text_design: required_path(memory, "/active_character_text_design")?
-                .clone(),
-            selected_memory_items,
-        },
-        adjudication_context: PromptAdjudicationContext {
-            private_adjudication_context: serde_json::to_value(&private_context)?,
-            hidden_scene_pressure: required_path(
-                memory,
-                "/active_scene_pressure/hidden_adjudication_only",
-            )?
-            .clone(),
-            hidden_world_process_clock: serde_json::to_value(
-                &world_process_clock.adjudication_only_processes,
-            )?,
-            selected_adjudication_items: required_path(
-                active_memory,
-                "/adjudication_only_revival/items",
-            )?
-            .clone(),
-        },
+        visible_context,
+        adjudication_context,
         source_of_truth_policy: required_path(source, "/source_of_truth_policy")?.clone(),
-        prompt_policy: PromptContextPolicy::default(),
+        prompt_policy,
+        budget_report,
+    })
+}
+
+struct DerivedContextPackets {
+    affordance_graph: AffordanceGraphPacket,
+    belief_graph: BeliefGraphPacket,
+    world_process_clock: WorldProcessClockPacket,
+}
+
+#[derive(Clone, Copy)]
+struct CompileDerivedContextSource<'a> {
+    turn_context: &'a TurnContextPacket,
+    known_facts: &'a Value,
+    selected_memory_items: &'a Value,
+    scene_pressure: &'a ScenePressurePacket,
+    body_resource: &'a BodyResourcePacket,
+    location_graph: &'a LocationGraphPacket,
+    private_context: &'a crate::agent_bridge::AgentPrivateAdjudicationContext,
+}
+
+fn compile_derived_context_packets(
+    source: CompileDerivedContextSource<'_>,
+) -> DerivedContextPackets {
+    DerivedContextPackets {
+        affordance_graph: compile_affordance_graph_packet(
+            source.turn_context.world_id.as_str(),
+            source.turn_context.turn_id.as_str(),
+            source.scene_pressure,
+            source.body_resource,
+            source.location_graph,
+        ),
+        belief_graph: compile_belief_graph_packet(
+            source.turn_context.world_id.as_str(),
+            source.turn_context.turn_id.as_str(),
+            source.known_facts,
+            source.selected_memory_items,
+        ),
+        world_process_clock: compile_world_process_clock_packet(
+            source.turn_context.world_id.as_str(),
+            source.turn_context.turn_id.as_str(),
+            source.scene_pressure,
+            source.private_context,
+        ),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CompilePromptBudgetSource<'a> {
+    turn_context: &'a TurnContextPacket,
+    selected_memory_items: &'a Value,
+    affordance_graph: &'a AffordanceGraphPacket,
+    belief_graph: &'a BeliefGraphPacket,
+    world_process_clock: &'a WorldProcessClockPacket,
+    active_change_ledger: &'a Value,
+    active_pattern_debt: &'a Value,
+    prompt_policy: &'a PromptContextPolicy,
+}
+
+fn compile_prompt_budget_report(
+    source: CompilePromptBudgetSource<'_>,
+) -> Result<PromptContextBudgetReport> {
+    compile_prompt_context_budget_report(PromptContextBudgetReportSource {
+        world_id: source.turn_context.world_id.as_str(),
+        turn_id: source.turn_context.turn_id.as_str(),
+        selected_memory_items: source.selected_memory_items,
+        affordance_graph: source.affordance_graph,
+        belief_graph: source.belief_graph,
+        world_process_clock: source.world_process_clock,
+        active_change_ledger: source.active_change_ledger,
+        active_pattern_debt: source.active_pattern_debt,
+        omitted_debug_sections: &source.prompt_policy.omitted_debug_sections,
+    })
+}
+
+struct VisibleContextSource<'a> {
+    memory: &'a Value,
+    known_facts: Value,
+    active_change_ledger: Value,
+    active_pattern_debt: Value,
+    active_belief_graph: Value,
+    active_world_process_clock: Value,
+    active_player_intent_trace: Value,
+    active_narrative_style_state: Value,
+    selected_memory_items: Value,
+    scene_pressure: &'a ScenePressurePacket,
+    body_resource: &'a BodyResourcePacket,
+    location_graph: &'a LocationGraphPacket,
+    affordance_graph: &'a AffordanceGraphPacket,
+    belief_graph: &'a BeliefGraphPacket,
+    world_process_clock: &'a WorldProcessClockPacket,
+}
+
+fn compile_visible_context(source: VisibleContextSource<'_>) -> Result<PromptVisibleContext> {
+    Ok(PromptVisibleContext {
+        recent_scene_window: required_path(source.memory, "/recent_scene_window")?.clone(),
+        known_facts: source.known_facts,
+        active_scene_pressure: serde_json::to_value(&source.scene_pressure.visible_active)?,
+        active_plot_threads: required_path(source.memory, "/active_plot_threads/active_visible")?
+            .clone(),
+        active_body_resource_state: serde_json::to_value(source.body_resource)?,
+        active_location_graph: serde_json::to_value(source.location_graph)?,
+        affordance_graph: serde_json::to_value(source.affordance_graph)?,
+        belief_graph: serde_json::to_value(source.belief_graph)?,
+        world_process_clock: serde_json::to_value(&source.world_process_clock.visible_processes)?,
+        active_character_text_design: required_path(
+            source.memory,
+            "/active_character_text_design",
+        )?
+        .clone(),
+        active_change_ledger: source.active_change_ledger,
+        active_pattern_debt: source.active_pattern_debt,
+        active_belief_graph: source.active_belief_graph,
+        active_world_process_clock: source.active_world_process_clock,
+        active_player_intent_trace: source.active_player_intent_trace,
+        narrative_style_state: source.active_narrative_style_state,
+        selected_memory_items: source.selected_memory_items,
+    })
+}
+
+#[derive(Clone, Copy)]
+struct AdjudicationContextSource<'a> {
+    memory: &'a Value,
+    active_memory: &'a Value,
+    private_context: &'a crate::agent_bridge::AgentPrivateAdjudicationContext,
+    world_process_clock: &'a WorldProcessClockPacket,
+}
+
+fn compile_adjudication_context(
+    source: AdjudicationContextSource<'_>,
+) -> Result<PromptAdjudicationContext> {
+    Ok(PromptAdjudicationContext {
+        private_adjudication_context: serde_json::to_value(source.private_context)?,
+        hidden_scene_pressure: required_path(
+            source.memory,
+            "/active_scene_pressure/hidden_adjudication_only",
+        )?
+        .clone(),
+        hidden_world_process_clock: serde_json::to_value(
+            &source.world_process_clock.adjudication_only_processes,
+        )?,
+        selected_adjudication_items: required_path(
+            source.active_memory,
+            "/adjudication_only_revival/items",
+        )?
+        .clone(),
     })
 }
 
@@ -323,6 +475,12 @@ mod tests {
                         "compiler_policy": {"source": "test", "nearby_location_budget": 3, "use_rules": []}
                     },
                     "active_character_text_design": {"active_designs": []},
+                    "active_change_ledger": {"active_changes": []},
+                    "active_pattern_debt": {"active_patterns": []},
+                    "active_belief_graph": {"protagonist_visible_beliefs": []},
+                    "active_world_process_clock": {"visible_processes": [], "adjudication_only_processes": []},
+                    "active_player_intent_trace": {"active_intents": []},
+                    "active_narrative_style_state": {"active_style_events": []},
                     "active_memory_revival": {
                         "player_visible_archive_view": {
                             "entries": [{"summary": "debug archive must stay out of prompt context"}]
@@ -390,6 +548,29 @@ mod tests {
         assert!(!visible.contains("secret timer"));
         assert!(adjudication.contains("secret:selected"));
         assert!(adjudication.contains("secret timer"));
+        Ok(())
+    }
+
+    #[test]
+    fn prompt_context_reports_budget_reasons_for_included_and_excluded_sections()
+    -> anyhow::Result<()> {
+        let context = assemble_prompt_context_packet(&sample_turn_context())?;
+        let report = &context.budget_report;
+
+        assert_eq!(
+            report.schema_version,
+            crate::prompt_context_budget::PROMPT_CONTEXT_BUDGET_REPORT_SCHEMA_VERSION
+        );
+        assert_eq!(report.budgets["selected_memory_items"].used, 1);
+        assert!(report.included.iter().any(|entry| {
+            entry.section == "visible_context.selected_memory_items"
+                && entry.source_id == "rel:current"
+        }));
+        assert!(report.excluded.iter().any(|entry| {
+            entry
+                .section
+                .ends_with("active_memory_revival.active_relationship_graph")
+        }));
         Ok(())
     }
 }

@@ -3829,9 +3829,15 @@ fn build_webgpt_turn_prompt(
 - prompt_context.visible_context.world_process_clock는 보이는 세계 진행 압력이다. 다음 턴으로 넘기면 악화, 완화, 전환, 해소 중 하나가 일어날 수 있음을 문단 압력과 선택지 비용에 반영해라.
 - prompt_context.visible_context.narrative_style_state는 서사 문체와 문단 박자 계약이다. 소재나 설정을 만들지 말고 밀도, 문장 압력, 대사 호흡, 번역체 방지에만 적용해라.
 - prompt_context.visible_context.active_character_text_design은 캐릭터별 화법/어미/어투/제스처/습관/drift 계약이다. 전역 문체와 섞지 말고, 인물이 말하거나 행동할 때만 자연스럽게 반영해라.
+- prompt_context.visible_context.active_change_ledger는 플레이어 행동으로 변한 세계/관계/압력의 요약 장부다. 오래된 원시 사건보다 active_changes의 before/after/cause_turns를 우선해서 현재 장면의 여파로 반영해라.
+- prompt_context.visible_context.active_pattern_debt는 반복 방지 압력이다. canon 사실로 쓰지 말고 replacement_pressure를 선택지 모양, 장면 박자, 문단 마감의 변화로만 반영해라.
+- prompt_context.visible_context.active_belief_graph는 장기 누적된 믿음/오해/추론 경계다. 세계의 객관 진실이 아니라 holder/confidence가 붙은 인식 상태로만 써라.
+- prompt_context.visible_context.active_world_process_clock는 장기 진행 압력이다. 매 턴 자동 진행하지 말고 player action, time passage, pressure evidence가 닿을 때만 결과에 반영해라.
+- prompt_context.visible_context.active_player_intent_trace는 최근 플레이어 행동 모양이다. 플레이어 성격으로 고정하지 말고 다음 선택지 affordance를 미세 조정하는 scene-scoped 압력으로만 써라.
 - prompt_context.visible_context.selected_memory_items는 이번 턴에 물리적으로 선택된 장기기억이다. 각 item의 reason/evidence_refs/source_id를 따라 필요한 항목만 쓰고, selected_memory_items 전체를 다시 요약하지 마라.
 - prompt_context.adjudication_context는 판정 전용이다. hidden_world_process_clock를 포함해 visible_scene, next_choices, canon_event, image prompt에 복사하지 마라.
 - prompt_context.prompt_policy.omitted_debug_sections는 의도적으로 프롬프트에서 뺀 debug/source 섹션이다. 비어 있는 사실을 임의로 복원하지 마라.
+- prompt_context.budget_report는 이번 프롬프트에 포함/제외된 장기맥락의 감사표다. included에 없는 source를 기억으로 취급하지 말고, excluded는 필요하면 다음 턴 compiler가 다시 선별할 수 있는 후보일 뿐 현재 사실로 쓰지 마라.
 - 세계의 사실/상태/source of truth는 아래 prompt context packet과 world store다. 웹 채팅 UI나 이전 MCP tool 결과를 source of truth로 쓰지 마라.
 - conversation/project context가 compact 되었거나 prompt context packet과 충돌하면 prompt context packet을 우선한다.
 - 웹 검색, 외부 사이트 탐색, repo 탐색, 소스 파일 읽기를 하지 마라. 필요한 스키마와 revival packet은 이 프롬프트 안에 있다.
@@ -4445,13 +4451,25 @@ premise:
             "prompt_context.visible_context.belief_graph는 주인공과 player-visible narrator가 확정적으로 아는 것의 경계다.",
             "prompt_context.visible_context.world_process_clock는 보이는 세계 진행 압력이다.",
             "prompt_context.visible_context.narrative_style_state는 서사 문체와 문단 박자 계약이다.",
+            "prompt_context.visible_context.active_change_ledger는 플레이어 행동으로 변한 세계/관계/압력의 요약 장부다.",
+            "prompt_context.visible_context.active_pattern_debt는 반복 방지 압력이다.",
+            "prompt_context.visible_context.active_belief_graph는 장기 누적된 믿음/오해/추론 경계다.",
+            "prompt_context.visible_context.active_world_process_clock는 장기 진행 압력이다.",
+            "prompt_context.visible_context.active_player_intent_trace는 최근 플레이어 행동 모양이다.",
             "prompt_context.adjudication_context는 판정 전용이다.",
             "prompt_context.prompt_policy.omitted_debug_sections",
+            "prompt_context.budget_report",
             "웹 검색, 외부 사이트 탐색, repo 탐색, 소스 파일 읽기를 하지 마라.",
             "\"schema_version\": \"singulari.prompt_context_packet.v1\"",
+            "\"schema_version\": \"singulari.prompt_context_budget_report.v1\"",
             "\"visible_context\"",
             "\"adjudication_context\"",
             "\"selected_memory_items\"",
+            "\"active_change_ledger\"",
+            "\"active_pattern_debt\"",
+            "\"active_belief_graph\"",
+            "\"active_world_process_clock\"",
+            "\"active_player_intent_trace\"",
             "\"affordance_graph\"",
             "\"ordinary_choice_slots\"",
             "\"forbidden_shortcuts\"",

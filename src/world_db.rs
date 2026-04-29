@@ -1,4 +1,6 @@
+use crate::belief_graph::BELIEF_GRAPH_FILENAME;
 use crate::body_resource::BODY_RESOURCE_STATE_FILENAME;
+use crate::change_ledger::CHANGE_LEDGER_FILENAME;
 use crate::character_text_design::{CHARACTER_TEXT_DESIGN_FILENAME, CharacterTextDesignPacket};
 use crate::location_graph::LOCATION_GRAPH_FILENAME;
 use crate::models::{
@@ -7,6 +9,9 @@ use crate::models::{
     StructuredEntityUpdates, TurnLogEntry, TurnSnapshot, WorldRecord,
     redact_guide_choice_public_hints,
 };
+use crate::narrative_style_state::NARRATIVE_STYLE_STATE_FILENAME;
+use crate::pattern_debt::PATTERN_DEBT_FILENAME;
+use crate::player_intent::PLAYER_INTENT_TRACE_FILENAME;
 use crate::plot_thread::PLOT_THREADS_FILENAME;
 use crate::relationship_graph::{RELATIONSHIP_GRAPH_FILENAME, RelationshipGraphPacket};
 use crate::scene_pressure::ACTIVE_SCENE_PRESSURES_FILENAME;
@@ -20,6 +25,7 @@ use crate::store::{
 };
 use crate::visual_asset_graph::VISUAL_ASSET_GRAPH_FILENAME;
 use crate::world_lore::{WORLD_LORE_FILENAME, WorldLorePacket};
+use crate::world_process_clock::WORLD_PROCESSES_FILENAME;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -84,9 +90,56 @@ pub struct ChapterSummaryRecord {
     pub chapter_index: u32,
     pub title: String,
     pub summary: String,
+    pub v2: ChapterSummaryV2,
     pub source_turn_start: String,
     pub source_turn_end: String,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChapterSummaryV2 {
+    pub schema_version: String,
+    pub summary_id: String,
+    pub source_turn_start: String,
+    pub source_turn_end: String,
+    #[serde(default)]
+    pub facts: Vec<String>,
+    #[serde(default)]
+    pub open_ambiguities: Vec<String>,
+    #[serde(default)]
+    pub state_changes: Vec<String>,
+    #[serde(default)]
+    pub relationship_changes: Vec<String>,
+    #[serde(default)]
+    pub belief_changes: Vec<String>,
+    #[serde(default)]
+    pub process_changes: Vec<String>,
+    #[serde(default)]
+    pub retired_for_now: Vec<String>,
+    #[serde(default)]
+    pub revival_triggers: Vec<String>,
+    #[serde(default)]
+    pub summary_bias_risks: Vec<String>,
+}
+
+impl Default for ChapterSummaryV2 {
+    fn default() -> Self {
+        Self {
+            schema_version: "singulari.chapter_summary_v2.v1".to_owned(),
+            summary_id: String::new(),
+            source_turn_start: String::new(),
+            source_turn_end: String::new(),
+            facts: Vec::new(),
+            open_ambiguities: Vec::new(),
+            state_changes: Vec::new(),
+            relationship_changes: Vec::new(),
+            belief_changes: Vec::new(),
+            process_changes: Vec::new(),
+            retired_for_now: Vec::new(),
+            revival_triggers: Vec::new(),
+            summary_bias_risks: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -522,7 +575,7 @@ pub fn latest_chapter_summaries(
     let conn = open_readonly_world_db(&world_db_path(world_dir))?;
     let mut stmt = conn
         .prepare(
-            "SELECT summary_id, chapter_index, title, summary, source_turn_start, source_turn_end, created_at
+            "SELECT summary_id, chapter_index, title, summary, raw_json, source_turn_start, source_turn_end, created_at
              FROM chapter_summaries
              WHERE world_id = ?1
              ORDER BY chapter_index DESC
@@ -531,14 +584,20 @@ pub fn latest_chapter_summaries(
         .context("world.db latest chapter summaries prepare failed")?;
     let rows = stmt
         .query_map(params![world_id, limit_to_i64(limit)], |row| {
+            let raw_json: String = row.get(4)?;
+            let mut v2 = serde_json::from_str::<ChapterSummaryV2>(&raw_json).unwrap_or_default();
+            v2.summary_id = row.get(0)?;
+            v2.source_turn_start = row.get(5)?;
+            v2.source_turn_end = row.get(6)?;
             Ok(ChapterSummaryRecord {
-                summary_id: row.get(0)?,
+                summary_id: v2.summary_id.clone(),
                 chapter_index: row.get(1)?,
                 title: row.get(2)?,
                 summary: redact_guide_choice_public_hints(&row.get::<_, String>(3)?),
-                source_turn_start: row.get(4)?,
-                source_turn_end: row.get(5)?,
-                created_at: row.get(6)?,
+                v2,
+                source_turn_start: row.get(5)?,
+                source_turn_end: row.get(6)?,
+                created_at: row.get(7)?,
             })
         })
         .context("world.db latest chapter summaries query failed")?;
@@ -987,6 +1046,7 @@ const WORLD_DB_SCHEMA_SQL: &str = r"
             chapter_index INTEGER NOT NULL,
             title TEXT NOT NULL,
             summary TEXT NOT NULL,
+            raw_json TEXT NOT NULL DEFAULT '{}',
             source_turn_start TEXT NOT NULL,
             source_turn_end TEXT NOT NULL,
             created_at TEXT NOT NULL
@@ -1026,11 +1086,37 @@ const WORLD_DB_SCHEMA_SQL: &str = r"
 fn migrate_world_db(conn: &Connection) -> Result<()> {
     conn.execute_batch(WORLD_DB_SCHEMA_SQL)
         .context("world.db migration failed")?;
+    ensure_chapter_summary_raw_json_column(conn)?;
     conn.execute(
         "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema_version', ?1)",
         params![WORLD_DB_SCHEMA_VERSION],
     )
     .context("world.db schema version upsert failed")?;
+    Ok(())
+}
+
+fn ensure_chapter_summary_raw_json_column(conn: &Connection) -> Result<()> {
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(chapter_summaries)")
+        .context("world.db chapter_summaries table_info prepare failed")?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .context("world.db chapter_summaries table_info query failed")?;
+    let mut has_raw_json = false;
+    for row in rows {
+        if row.context("world.db chapter_summaries table_info row failed")? == "raw_json" {
+            has_raw_json = true;
+            break;
+        }
+    }
+    if has_raw_json {
+        return Ok(());
+    }
+    conn.execute(
+        "ALTER TABLE chapter_summaries ADD COLUMN raw_json TEXT NOT NULL DEFAULT '{}'",
+        [],
+    )
+    .context("world.db chapter_summaries raw_json migration failed")?;
     Ok(())
 }
 
@@ -1067,12 +1153,14 @@ fn create_chapter_summary_for_open_events(
         "Chapter {chapter_index}: {} -> {}",
         first_event.turn_id, last_event.turn_id
     );
-    let summary = deterministic_chapter_summary(&events);
+    let v2 = deterministic_chapter_summary_v2(&summary_id, &events);
+    let summary = render_chapter_summary_v2(&v2);
     let record = ChapterSummaryRecord {
         summary_id,
         chapter_index,
         title,
         summary,
+        v2,
         source_turn_start: first_event.turn_id.clone(),
         source_turn_end: last_event.turn_id.clone(),
         created_at: created_at.to_owned(),
@@ -1158,14 +1246,23 @@ fn next_chapter_index(conn: &Connection, world_id: &str) -> Result<u32> {
     u32::try_from(value).context("world.db next chapter index out of range")
 }
 
-fn deterministic_chapter_summary(events: &[CanonEventRow]) -> String {
+fn deterministic_chapter_summary_v2(
+    summary_id: &str,
+    events: &[CanonEventRow],
+) -> ChapterSummaryV2 {
     let Some(first_event) = events.first() else {
-        return "No events.".to_owned();
+        return ChapterSummaryV2 {
+            summary_id: summary_id.to_owned(),
+            ..ChapterSummaryV2::default()
+        };
     };
     let Some(last_event) = events.last() else {
-        return "No events.".to_owned();
+        return ChapterSummaryV2 {
+            summary_id: summary_id.to_owned(),
+            ..ChapterSummaryV2::default()
+        };
     };
-    let beats = events
+    let facts = events
         .iter()
         .take(8)
         .map(|event| {
@@ -1176,18 +1273,55 @@ fn deterministic_chapter_summary(events: &[CanonEventRow]) -> String {
                 redact_guide_choice_public_hints(&event.summary)
             )
         })
-        .collect::<Vec<_>>()
-        .join(" / ");
-    let suffix = if events.len() > 8 {
-        format!(" / ... and {} more events", events.len() - 8)
+        .collect::<Vec<_>>();
+    let open_ambiguities = events
+        .iter()
+        .filter(|event| event.kind.contains("question") || event.summary.contains('?'))
+        .map(|event| redact_guide_choice_public_hints(&event.summary))
+        .collect::<Vec<_>>();
+    let revival_triggers = events
+        .iter()
+        .rev()
+        .take(4)
+        .map(|event| format!("{}:{}", event.kind, event.turn_id))
+        .collect::<Vec<_>>();
+    let summary_bias_risks = vec![
+        "This summary is a compression hint, not an authority over omitted events.".to_owned(),
+        "retired_for_now means inactive in the current prompt, not deleted canon.".to_owned(),
+    ];
+    ChapterSummaryV2 {
+        schema_version: ChapterSummaryV2::default().schema_version,
+        summary_id: summary_id.to_owned(),
+        source_turn_start: first_event.turn_id.clone(),
+        source_turn_end: last_event.turn_id.clone(),
+        facts,
+        open_ambiguities,
+        state_changes: Vec::new(),
+        relationship_changes: Vec::new(),
+        belief_changes: Vec::new(),
+        process_changes: Vec::new(),
+        retired_for_now: Vec::new(),
+        revival_triggers,
+        summary_bias_risks,
+    }
+}
+
+fn render_chapter_summary_v2(v2: &ChapterSummaryV2) -> String {
+    let fact_summary = if v2.facts.is_empty() {
+        "facts: none".to_owned()
     } else {
-        String::new()
+        format!("facts: {}", v2.facts.join(" / "))
+    };
+    let ambiguity_summary = if v2.open_ambiguities.is_empty() {
+        "ambiguities: none".to_owned()
+    } else {
+        format!("ambiguities: {}", v2.open_ambiguities.join(" / "))
     };
     format!(
-        "{} to {}: {} events. Key beats: {beats}{suffix}",
-        first_event.turn_id,
-        last_event.turn_id,
-        events.len()
+        "{} to {}. {fact_summary}. {ambiguity_summary}. revival_triggers: {}",
+        v2.source_turn_start,
+        v2.source_turn_end,
+        v2.revival_triggers.join(", ")
     )
 }
 
@@ -1199,9 +1333,9 @@ fn insert_chapter_summary(
     conn.execute(
         r"
         INSERT OR IGNORE INTO chapter_summaries(
-            summary_id, world_id, chapter_index, title, summary,
+            summary_id, world_id, chapter_index, title, summary, raw_json,
             source_turn_start, source_turn_end, created_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
         ",
         params![
             record.summary_id,
@@ -1209,6 +1343,7 @@ fn insert_chapter_summary(
             record.chapter_index,
             record.title,
             record.summary,
+            to_json(&record.v2)?,
             record.source_turn_start,
             record.source_turn_end,
             record.created_at,
@@ -1923,6 +2058,18 @@ fn summarize_materialized_projection(kind: &str, value: &serde_json::Value) -> S
         "world_lore" => summarize_count_fields(value, &[("entries", "entries")]),
         "relationship_graph" => summarize_count_fields(value, &[("active_edges", "edges")]),
         "character_text_design" => summarize_count_fields(value, &[("active_designs", "designs")]),
+        "change_ledger" => summarize_count_fields(value, &[("active_changes", "changes")]),
+        "pattern_debt" => summarize_count_fields(value, &[("active_patterns", "patterns")]),
+        "belief_graph" => {
+            summarize_count_fields(value, &[("protagonist_visible_beliefs", "beliefs")])
+        }
+        "world_process_clock" => {
+            summarize_count_fields(value, &[("visible_processes", "visible_processes")])
+        }
+        "player_intent_trace" => summarize_count_fields(value, &[("active_intents", "intents")]),
+        "narrative_style_state" => {
+            summarize_count_fields(value, &[("active_style_events", "style_events")])
+        }
         _ => "projection available".to_owned(),
     }
 }
@@ -2588,6 +2735,42 @@ const MATERIALIZED_PROJECTION_FILES: &[MaterializedProjectionFile] = &[
         kind: "character_text_design",
         title: "인물 텍스트 디자인",
         filename: CHARACTER_TEXT_DESIGN_FILENAME,
+    },
+    MaterializedProjectionFile {
+        id: "change_ledger",
+        kind: "change_ledger",
+        title: "변화 장부",
+        filename: CHANGE_LEDGER_FILENAME,
+    },
+    MaterializedProjectionFile {
+        id: "pattern_debt",
+        kind: "pattern_debt",
+        title: "반복 부채",
+        filename: PATTERN_DEBT_FILENAME,
+    },
+    MaterializedProjectionFile {
+        id: "belief_graph",
+        kind: "belief_graph",
+        title: "믿음 그래프",
+        filename: BELIEF_GRAPH_FILENAME,
+    },
+    MaterializedProjectionFile {
+        id: "world_process_clock",
+        kind: "world_process_clock",
+        title: "세계 진행 시계",
+        filename: WORLD_PROCESSES_FILENAME,
+    },
+    MaterializedProjectionFile {
+        id: "player_intent_trace",
+        kind: "player_intent_trace",
+        title: "플레이어 의도 흔적",
+        filename: PLAYER_INTENT_TRACE_FILENAME,
+    },
+    MaterializedProjectionFile {
+        id: "narrative_style_state",
+        kind: "narrative_style_state",
+        title: "서사 문체 상태",
+        filename: NARRATIVE_STYLE_STATE_FILENAME,
     },
 ];
 

@@ -1,7 +1,18 @@
-use crate::agent_bridge::AgentOutputContract;
+#![allow(clippy::missing_errors_doc)]
+
+use crate::agent_bridge::{AgentOutputContract, AgentTurnResponse};
+use crate::store::{append_jsonl, read_json, write_json};
+use anyhow::Result;
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 pub const NARRATIVE_STYLE_STATE_SCHEMA_VERSION: &str = "singulari.narrative_style_state.v1";
+pub const NARRATIVE_STYLE_EVENT_SCHEMA_VERSION: &str = "singulari.narrative_style_event.v1";
+pub const NARRATIVE_STYLE_STATE_FILENAME: &str = "narrative_style_state.json";
+pub const NARRATIVE_STYLE_EVENTS_FILENAME: &str = "narrative_style_events.jsonl";
+
+const ACTIVE_STYLE_EVENT_BUDGET: usize = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NarrativeStyleState {
@@ -18,10 +29,31 @@ pub struct NarrativeStyleState {
     pub anti_translation_rules: Vec<String>,
     #[serde(default)]
     pub prohibited_seed_leakage: Vec<String>,
+    #[serde(default)]
+    pub active_style_events: Vec<NarrativeStyleEventRecord>,
     pub compiler_policy: NarrativeStylePolicy,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+impl Default for NarrativeStyleState {
+    fn default() -> Self {
+        Self {
+            schema_version: NARRATIVE_STYLE_STATE_SCHEMA_VERSION.to_owned(),
+            world_id: String::new(),
+            turn_id: String::new(),
+            narrative_level: 1,
+            density_contract: String::new(),
+            paragraph_grammar: Vec::new(),
+            dialogue_contract: String::new(),
+            style_vector: StyleVector::default(),
+            anti_translation_rules: Vec::new(),
+            prohibited_seed_leakage: Vec::new(),
+            active_style_events: Vec::new(),
+            compiler_policy: NarrativeStylePolicy::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StyleVector {
     pub sentence_pressure: String,
     pub exposition_directness: String,
@@ -36,6 +68,7 @@ pub struct StyleVector {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NarrativeStylePolicy {
     pub source: String,
+    pub active_style_event_budget: usize,
     #[serde(default)]
     pub use_rules: Vec<String>,
 }
@@ -44,13 +77,38 @@ impl Default for NarrativeStylePolicy {
     fn default() -> Self {
         Self {
             source: "compiled_from_output_contract_and_seedless_style_contract_v1".to_owned(),
+            active_style_event_budget: ACTIVE_STYLE_EVENT_BUDGET,
             use_rules: vec![
                 "Narrative style controls rhythm, density, paragraph shape, and Korean prose quality only.".to_owned(),
                 "Style state must not create facts, genre devices, character backstory, symbols, or plot events.".to_owned(),
                 "Character speech design remains separate from global narration style.".to_owned(),
+                "Style events must come from accepted prose evidence or explicit user feedback."
+                    .to_owned(),
             ],
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NarrativeStyleEventPlan {
+    pub world_id: String,
+    pub turn_id: String,
+    #[serde(default)]
+    pub records: Vec<NarrativeStyleEventRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NarrativeStyleEventRecord {
+    pub schema_version: String,
+    pub world_id: String,
+    pub turn_id: String,
+    pub event_id: String,
+    pub evidence_ref: String,
+    pub observed_quality: String,
+    pub correction_pressure: String,
+    #[serde(default)]
+    pub prohibited_content_sources: Vec<String>,
+    pub recorded_at: String,
 }
 
 #[must_use]
@@ -91,8 +149,146 @@ pub fn compile_narrative_style_state(
             "스타일 참조를 content source로 해석하지 않는다.".to_owned(),
             "유명 작품명, 작가명, 예시 문장, 장르 관습에서 소재를 빌려오지 않는다.".to_owned(),
         ],
+        active_style_events: Vec::new(),
         compiler_policy: NarrativeStylePolicy::default(),
     }
+}
+
+#[must_use]
+pub fn prepare_narrative_style_event_plan(
+    world_id: &str,
+    turn_id: &str,
+    response: &AgentTurnResponse,
+) -> NarrativeStyleEventPlan {
+    let mut records = Vec::new();
+    let recorded_at = Utc::now().to_rfc3339();
+    for (index, note) in response.visible_scene.tone_notes.iter().enumerate() {
+        let trimmed = note.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        records.push(style_event_record(
+            world_id,
+            turn_id,
+            records.len(),
+            format!("visible_scene.tone_notes[{index}]"),
+            trimmed.to_owned(),
+            "다음 턴의 문단 박자와 한국어 질감에만 반영한다.".to_owned(),
+            recorded_at.as_str(),
+        ));
+    }
+    if let Some(correction) = prose_correction_pressure(&response.visible_scene.text_blocks) {
+        records.push(style_event_record(
+            world_id,
+            turn_id,
+            records.len(),
+            "visible_scene.text_blocks".to_owned(),
+            "accepted_prose_surface".to_owned(),
+            correction,
+            recorded_at.as_str(),
+        ));
+    }
+    NarrativeStyleEventPlan {
+        world_id: world_id.to_owned(),
+        turn_id: turn_id.to_owned(),
+        records,
+    }
+}
+
+pub fn append_narrative_style_event_plan(
+    world_dir: &Path,
+    plan: &NarrativeStyleEventPlan,
+) -> Result<()> {
+    for record in &plan.records {
+        append_jsonl(&world_dir.join(NARRATIVE_STYLE_EVENTS_FILENAME), record)?;
+    }
+    Ok(())
+}
+
+pub fn rebuild_narrative_style_state(
+    world_dir: &Path,
+    base_state: &NarrativeStyleState,
+) -> Result<NarrativeStyleState> {
+    let mut active_style_events = load_narrative_style_event_records(world_dir)?;
+    active_style_events.reverse();
+    active_style_events.truncate(ACTIVE_STYLE_EVENT_BUDGET);
+    active_style_events.reverse();
+    let state = NarrativeStyleState {
+        active_style_events,
+        ..base_state.clone()
+    };
+    write_json(&world_dir.join(NARRATIVE_STYLE_STATE_FILENAME), &state)?;
+    Ok(state)
+}
+
+pub fn load_narrative_style_state(
+    world_dir: &Path,
+    base_state: NarrativeStyleState,
+) -> Result<NarrativeStyleState> {
+    let path = world_dir.join(NARRATIVE_STYLE_STATE_FILENAME);
+    if path.is_file() {
+        return read_json(&path);
+    }
+    Ok(base_state)
+}
+
+fn load_narrative_style_event_records(world_dir: &Path) -> Result<Vec<NarrativeStyleEventRecord>> {
+    let path = world_dir.join(NARRATIVE_STYLE_EVENTS_FILENAME);
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    let raw = std::fs::read_to_string(&path)?;
+    raw.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(serde_json::from_str::<NarrativeStyleEventRecord>)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn style_event_record(
+    world_id: &str,
+    turn_id: &str,
+    index: usize,
+    evidence_ref: String,
+    observed_quality: String,
+    correction_pressure: String,
+    recorded_at: &str,
+) -> NarrativeStyleEventRecord {
+    NarrativeStyleEventRecord {
+        schema_version: NARRATIVE_STYLE_EVENT_SCHEMA_VERSION.to_owned(),
+        world_id: world_id.to_owned(),
+        turn_id: turn_id.to_owned(),
+        event_id: format!("narrative_style_event:{turn_id}:{index:02}"),
+        evidence_ref,
+        observed_quality,
+        correction_pressure,
+        prohibited_content_sources: vec![
+            "no new people".to_owned(),
+            "no new places".to_owned(),
+            "no new objects".to_owned(),
+            "no new symbols".to_owned(),
+            "no genre-device borrowing".to_owned(),
+        ],
+        recorded_at: recorded_at.to_owned(),
+    }
+}
+
+fn prose_correction_pressure(text_blocks: &[String]) -> Option<String> {
+    let joined = text_blocks.join("\n");
+    let translationese_hits = ["해당", "진행", "수행", "위치", "존재"]
+        .into_iter()
+        .filter(|needle| joined.contains(needle))
+        .count();
+    let long_sentence_count = joined
+        .split(['.', '!', '?', '다', '요'])
+        .filter(|sentence| sentence.chars().count() > 90)
+        .count();
+    if translationese_hits == 0 && long_sentence_count == 0 {
+        return None;
+    }
+    Some(format!(
+        "번역체 히트 {translationese_hits}개, 긴 문장 {long_sentence_count}개. 다음 턴은 감각-반응-판단 단위로 쪼개고 보고서체 어휘를 줄인다."
+    ))
 }
 
 fn density_contract(output_contract: &AgentOutputContract) -> String {
@@ -153,5 +349,57 @@ mod tests {
                 .iter()
                 .any(|rule| rule.contains("content source"))
         );
+    }
+
+    #[test]
+    fn materializes_style_events_without_content_seed() -> anyhow::Result<()> {
+        use crate::agent_bridge::AGENT_TURN_RESPONSE_SCHEMA_VERSION;
+        use crate::models::{NARRATIVE_SCENE_SCHEMA_VERSION, NarrativeScene};
+
+        let temp = tempfile::tempdir()?;
+        let response = AgentTurnResponse {
+            schema_version: AGENT_TURN_RESPONSE_SCHEMA_VERSION.to_owned(),
+            world_id: "stw_style_events".to_owned(),
+            turn_id: "turn_0002".to_owned(),
+            visible_scene: NarrativeScene {
+                schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
+                speaker: None,
+                text_blocks: vec![
+                    "해당 위치에 존재하는 긴 문장이 계속 이어지며 진행된다".to_owned(),
+                ],
+                tone_notes: vec!["대사를 짧게 끊었다".to_owned()],
+            },
+            adjudication: None,
+            canon_event: None,
+            entity_updates: Vec::new(),
+            relationship_updates: Vec::new(),
+            plot_thread_events: Vec::new(),
+            scene_pressure_events: Vec::new(),
+            world_lore_updates: Vec::new(),
+            character_text_design_updates: Vec::new(),
+            body_resource_events: Vec::new(),
+            location_events: Vec::new(),
+            extra_contacts: Vec::new(),
+            hidden_state_delta: Vec::new(),
+            next_choices: Vec::new(),
+        };
+        let plan = prepare_narrative_style_event_plan("stw_style_events", "turn_0002", &response);
+        append_narrative_style_event_plan(temp.path(), &plan)?;
+        let state = rebuild_narrative_style_state(
+            temp.path(),
+            &NarrativeStyleState {
+                world_id: "stw_style_events".to_owned(),
+                turn_id: "turn_0002".to_owned(),
+                ..NarrativeStyleState::default()
+            },
+        )?;
+
+        assert!(!state.active_style_events.is_empty());
+        assert!(
+            state.active_style_events[0]
+                .prohibited_content_sources
+                .contains(&"no new places".to_owned())
+        );
+        Ok(())
     }
 }

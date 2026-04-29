@@ -1,7 +1,15 @@
+use crate::belief_graph::{
+    BeliefGraphPacket, append_belief_event_plan, load_belief_graph_state,
+    prepare_belief_event_plan, rebuild_belief_graph,
+};
 use crate::body_resource::{
     BodyResourceEvent, BodyResourcePacket, append_body_resource_event_plan,
     compile_body_resource_packet, load_body_resource_state, prepare_body_resource_event_plan,
     rebuild_body_resource_state,
+};
+use crate::change_ledger::{
+    ChangeEventPlanInput, ChangeLedgerPacket, append_change_event_plan, load_change_ledger_state,
+    prepare_change_event_plan, rebuild_change_ledger,
 };
 use crate::character_text_design::{
     CharacterTextDesignPacket, append_character_text_design_event_plan,
@@ -20,6 +28,18 @@ use crate::models::{
     AdjudicationGate, CharacterVoiceAnchor, FREEFORM_CHOICE_SLOT, GUIDE_CHOICE_SLOT, HiddenState,
     NARRATIVE_SCENE_SCHEMA_VERSION, NarrativeScene, TurnChoice, TurnSnapshot,
     default_freeform_choice, default_turn_choices, is_guide_choice_tag, normalize_turn_choices,
+};
+use crate::narrative_style_state::{
+    NarrativeStyleState, append_narrative_style_event_plan, compile_narrative_style_state,
+    load_narrative_style_state, prepare_narrative_style_event_plan, rebuild_narrative_style_state,
+};
+use crate::pattern_debt::{
+    PatternDebtPacket, append_pattern_debt_event_plan, load_pattern_debt_state,
+    prepare_pattern_debt_event_plan, rebuild_pattern_debt,
+};
+use crate::player_intent::{
+    PlayerIntentTracePacket, append_player_intent_event_plan, load_player_intent_trace_state,
+    prepare_player_intent_event_plan, rebuild_player_intent_trace,
 };
 use crate::plot_thread::{
     PlotThreadEvent, PlotThreadPacket, append_plot_thread_audit, append_plot_thread_event_plan,
@@ -50,6 +70,10 @@ use crate::vn::{BuildVnPacketOptions, VnPacket, build_vn_packet};
 use crate::world_lore::{
     WorldLorePacket, append_world_lore_update_plan, prepare_world_lore_update_plan,
     rebuild_world_lore,
+};
+use crate::world_process_clock::{
+    WorldProcessClockPacket, append_world_process_event_plan, load_world_process_clock_state,
+    prepare_world_process_event_plan, rebuild_world_process_clock,
 };
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
@@ -130,6 +154,18 @@ pub struct AgentVisibleContext {
     pub active_location_graph: LocationGraphPacket,
     #[serde(default)]
     pub active_character_text_design: CharacterTextDesignPacket,
+    #[serde(default)]
+    pub active_change_ledger: ChangeLedgerPacket,
+    #[serde(default)]
+    pub active_pattern_debt: PatternDebtPacket,
+    #[serde(default)]
+    pub active_belief_graph: BeliefGraphPacket,
+    #[serde(default)]
+    pub active_world_process_clock: WorldProcessClockPacket,
+    #[serde(default)]
+    pub active_player_intent_trace: PlayerIntentTracePacket,
+    #[serde(default)]
+    pub active_narrative_style_state: NarrativeStyleState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -337,15 +373,23 @@ pub fn enqueue_agent_turn(options: &AgentSubmitTurnOptions) -> Result<PendingAge
     let pending_ref = pending_path.display().to_string();
     let pending_choice = selected_choice(player_input, &snapshot);
     let private_adjudication_context = private_context(&hidden_state);
-    let visible_context = visible_context(
-        &files,
-        &snapshot,
-        &entities,
-        &current_packet,
-        pending_choice.as_ref(),
-        &private_adjudication_context,
+    let output_contract = AgentOutputContract {
+        language: "ko".to_owned(),
+        must_return_json: true,
+        hidden_truth_must_not_appear_in_visible_text: true,
+        narrative_level: normalize_narrative_level(options.narrative_level),
+        narrative_budget: narrative_budget_for_level(options.narrative_level),
+    };
+    let visible_context = visible_context(&VisibleContextInput {
+        files: &files,
+        snapshot: &snapshot,
+        entities: &entities,
+        current_packet: &current_packet,
+        selected_choice: pending_choice.as_ref(),
+        private_context: &private_adjudication_context,
         player_input,
-    )?;
+        output_contract: &output_contract,
+    })?;
     append_scene_pressure_audit(files.dir.as_path(), &visible_context.active_scene_pressure)?;
     append_plot_thread_audit(files.dir.as_path(), &visible_context.active_plot_threads)?;
     let pending = PendingAgentTurn {
@@ -357,13 +401,7 @@ pub fn enqueue_agent_turn(options: &AgentSubmitTurnOptions) -> Result<PendingAge
         selected_choice: pending_choice,
         visible_context,
         private_adjudication_context,
-        output_contract: AgentOutputContract {
-            language: "ko".to_owned(),
-            must_return_json: true,
-            hidden_truth_must_not_appear_in_visible_text: true,
-            narrative_level: normalize_narrative_level(options.narrative_level),
-            narrative_budget: narrative_budget_for_level(options.narrative_level),
-        },
+        output_contract,
         pending_ref,
         created_at: Utc::now().to_rfc3339(),
     };
@@ -509,6 +547,42 @@ pub fn commit_agent_turn(options: &AgentCommitTurnOptions) -> Result<CommittedAg
         pending.turn_id.as_str(),
         &response.location_events,
     )?;
+    let change_event_plan = prepare_change_event_plan(ChangeEventPlanInput {
+        world_id: options.world_id.as_str(),
+        turn_id: pending.turn_id.as_str(),
+        relationship_graph_events: &relationship_graph_event_plan,
+        world_lore_updates: &world_lore_update_plan,
+        character_text_design_events: &character_text_design_event_plan,
+        plot_thread_events: &plot_thread_event_plan,
+        scene_pressure_events: &scene_pressure_event_plan,
+    })?;
+    let pattern_debt_event_plan = prepare_pattern_debt_event_plan(
+        files.dir.as_path(),
+        options.world_id.as_str(),
+        pending.turn_id.as_str(),
+        &response,
+    )?;
+    let belief_event_plan = prepare_belief_event_plan(
+        options.world_id.as_str(),
+        pending.turn_id.as_str(),
+        &response,
+    );
+    let world_process_event_plan = prepare_world_process_event_plan(
+        &pending.visible_context.active_world_process_clock,
+        &scene_pressure_event_plan,
+    );
+    let player_intent_event_plan = prepare_player_intent_event_plan(
+        options.world_id.as_str(),
+        pending.turn_id.as_str(),
+        pending.player_input.as_str(),
+        pending.selected_choice.as_ref(),
+        &response,
+    );
+    let narrative_style_event_plan = prepare_narrative_style_event_plan(
+        options.world_id.as_str(),
+        pending.turn_id.as_str(),
+        &response,
+    );
     let extra_memory_projection = compile_extra_memory_projection(
         files.dir.as_path(),
         options.world_id.as_str(),
@@ -619,6 +693,106 @@ pub fn commit_agent_turn(options: &AgentCommitTurnOptions) -> Result<CommittedAg
             rebuild_character_text_design(
                 files.dir.as_path(),
                 &pending.visible_context.active_character_text_design,
+            )?;
+            Ok(())
+        },
+    )?;
+    commit_post_advance_materialization(
+        &files,
+        options.world_id.as_str(),
+        pending.turn_id.as_str(),
+        "change_ledger",
+        || {
+            append_change_event_plan(files.dir.as_path(), &change_event_plan)?;
+            rebuild_change_ledger(
+                files.dir.as_path(),
+                &ChangeLedgerPacket {
+                    world_id: options.world_id.clone(),
+                    turn_id: pending.turn_id.clone(),
+                    ..ChangeLedgerPacket::default()
+                },
+            )?;
+            Ok(())
+        },
+    )?;
+    commit_post_advance_materialization(
+        &files,
+        options.world_id.as_str(),
+        pending.turn_id.as_str(),
+        "belief_graph",
+        || {
+            append_belief_event_plan(files.dir.as_path(), &belief_event_plan)?;
+            rebuild_belief_graph(
+                files.dir.as_path(),
+                &BeliefGraphPacket {
+                    world_id: options.world_id.clone(),
+                    turn_id: pending.turn_id.clone(),
+                    ..BeliefGraphPacket::default()
+                },
+            )?;
+            Ok(())
+        },
+    )?;
+    commit_post_advance_materialization(
+        &files,
+        options.world_id.as_str(),
+        pending.turn_id.as_str(),
+        "world_process_clock",
+        || {
+            append_world_process_event_plan(files.dir.as_path(), &world_process_event_plan)?;
+            rebuild_world_process_clock(
+                files.dir.as_path(),
+                &pending.visible_context.active_world_process_clock,
+            )?;
+            Ok(())
+        },
+    )?;
+    commit_post_advance_materialization(
+        &files,
+        options.world_id.as_str(),
+        pending.turn_id.as_str(),
+        "player_intent_trace",
+        || {
+            append_player_intent_event_plan(files.dir.as_path(), &player_intent_event_plan)?;
+            rebuild_player_intent_trace(
+                files.dir.as_path(),
+                &PlayerIntentTracePacket {
+                    world_id: options.world_id.clone(),
+                    turn_id: pending.turn_id.clone(),
+                    ..PlayerIntentTracePacket::default()
+                },
+            )?;
+            Ok(())
+        },
+    )?;
+    commit_post_advance_materialization(
+        &files,
+        options.world_id.as_str(),
+        pending.turn_id.as_str(),
+        "narrative_style_state",
+        || {
+            append_narrative_style_event_plan(files.dir.as_path(), &narrative_style_event_plan)?;
+            rebuild_narrative_style_state(
+                files.dir.as_path(),
+                &pending.visible_context.active_narrative_style_state,
+            )?;
+            Ok(())
+        },
+    )?;
+    commit_post_advance_materialization(
+        &files,
+        options.world_id.as_str(),
+        pending.turn_id.as_str(),
+        "pattern_debt",
+        || {
+            append_pattern_debt_event_plan(files.dir.as_path(), &pattern_debt_event_plan)?;
+            rebuild_pattern_debt(
+                files.dir.as_path(),
+                &PatternDebtPacket {
+                    world_id: options.world_id.clone(),
+                    turn_id: pending.turn_id.clone(),
+                    ..PatternDebtPacket::default()
+                },
             )?;
             Ok(())
         },
@@ -992,29 +1166,44 @@ fn inline_freeform_choice(input: &str, choices: &[TurnChoice]) -> Option<TurnCho
         .or_else(|| Some(default_freeform_choice()))
 }
 
-fn visible_context(
-    files: &WorldFilePaths,
-    snapshot: &TurnSnapshot,
-    entities: &crate::models::EntityRecords,
-    current_packet: &VnPacket,
-    selected_choice: Option<&PendingAgentChoice>,
-    private_context: &AgentPrivateAdjudicationContext,
-    player_input: &str,
-) -> Result<AgentVisibleContext> {
+struct VisibleContextInput<'a> {
+    files: &'a WorldFilePaths,
+    snapshot: &'a TurnSnapshot,
+    entities: &'a crate::models::EntityRecords,
+    current_packet: &'a VnPacket,
+    selected_choice: Option<&'a PendingAgentChoice>,
+    private_context: &'a AgentPrivateAdjudicationContext,
+    player_input: &'a str,
+    output_contract: &'a AgentOutputContract,
+}
+
+struct ActiveProjectionContext {
+    change_ledger: ChangeLedgerPacket,
+    pattern_debt: PatternDebtPacket,
+    belief_graph: BeliefGraphPacket,
+    world_process_clock: WorldProcessClockPacket,
+    player_intent_trace: PlayerIntentTracePacket,
+    narrative_style_state: NarrativeStyleState,
+}
+
+fn visible_context(input: &VisibleContextInput<'_>) -> Result<AgentVisibleContext> {
+    let files = input.files;
+    let snapshot = input.snapshot;
+    let next_turn_id = next_turn_id(snapshot.turn_id.as_str())?;
     let extra_memory = retrieve_extra_memory_packet(
         files.dir.as_path(),
-        current_packet.world_id.as_str(),
+        input.current_packet.world_id.as_str(),
         snapshot,
-        player_input,
+        input.player_input,
     )?;
     let active_scene_pressure = load_active_scene_pressures(
         files.dir.as_path(),
         compile_scene_pressure_packet(
             snapshot,
-            selected_choice,
+            input.selected_choice,
             &extra_memory,
-            private_context,
-            player_input,
+            input.private_context,
+            input.player_input,
         )?,
     )?;
     let active_plot_threads =
@@ -1023,18 +1212,20 @@ fn visible_context(
         load_body_resource_state(files.dir.as_path(), compile_body_resource_packet(snapshot))?;
     let active_location_graph = load_location_graph_state(
         files.dir.as_path(),
-        compile_location_graph_packet(snapshot, entities),
+        compile_location_graph_packet(snapshot, input.entities),
     )?;
     let context_projection = load_agent_context_projection(files.dir.as_path())?;
     let active_character_text_design = load_character_text_design_state(
         files.dir.as_path(),
-        compile_character_text_design_with_projection(entities, &context_projection),
+        compile_character_text_design_with_projection(input.entities, &context_projection),
     )?;
+    let active_projections = load_active_projection_context(input, next_turn_id.as_str())?;
     Ok(AgentVisibleContext {
         location: snapshot.protagonist_state.location.clone(),
-        recent_scene: current_packet.scene.text_blocks.clone(),
+        recent_scene: input.current_packet.scene.text_blocks.clone(),
         known_facts: known_facts(snapshot),
-        voice_anchors: entities
+        voice_anchors: input
+            .entities
             .characters
             .iter()
             .filter(|character| !character.voice_anchor.is_empty())
@@ -1050,6 +1241,65 @@ fn visible_context(
         active_body_resource_state,
         active_location_graph,
         active_character_text_design,
+        active_change_ledger: active_projections.change_ledger,
+        active_pattern_debt: active_projections.pattern_debt,
+        active_belief_graph: active_projections.belief_graph,
+        active_world_process_clock: active_projections.world_process_clock,
+        active_player_intent_trace: active_projections.player_intent_trace,
+        active_narrative_style_state: active_projections.narrative_style_state,
+    })
+}
+
+fn load_active_projection_context(
+    input: &VisibleContextInput<'_>,
+    turn_id: &str,
+) -> Result<ActiveProjectionContext> {
+    let world_id = input.current_packet.world_id.as_str();
+    Ok(ActiveProjectionContext {
+        change_ledger: load_change_ledger_state(
+            input.files.dir.as_path(),
+            ChangeLedgerPacket {
+                world_id: world_id.to_owned(),
+                turn_id: turn_id.to_owned(),
+                ..ChangeLedgerPacket::default()
+            },
+        )?,
+        pattern_debt: load_pattern_debt_state(
+            input.files.dir.as_path(),
+            PatternDebtPacket {
+                world_id: world_id.to_owned(),
+                turn_id: turn_id.to_owned(),
+                ..PatternDebtPacket::default()
+            },
+        )?,
+        belief_graph: load_belief_graph_state(
+            input.files.dir.as_path(),
+            BeliefGraphPacket {
+                world_id: world_id.to_owned(),
+                turn_id: turn_id.to_owned(),
+                ..BeliefGraphPacket::default()
+            },
+        )?,
+        world_process_clock: load_world_process_clock_state(
+            input.files.dir.as_path(),
+            WorldProcessClockPacket {
+                world_id: world_id.to_owned(),
+                turn_id: turn_id.to_owned(),
+                ..WorldProcessClockPacket::default()
+            },
+        )?,
+        player_intent_trace: load_player_intent_trace_state(
+            input.files.dir.as_path(),
+            PlayerIntentTracePacket {
+                world_id: world_id.to_owned(),
+                turn_id: turn_id.to_owned(),
+                ..PlayerIntentTracePacket::default()
+            },
+        )?,
+        narrative_style_state: load_narrative_style_state(
+            input.files.dir.as_path(),
+            compile_narrative_style_state(world_id, turn_id, input.output_contract),
+        )?,
     })
 }
 
