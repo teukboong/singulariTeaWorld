@@ -10,6 +10,7 @@ pub mod extra_memory;
 pub mod host_supervisor;
 pub mod job_ledger;
 pub mod location_graph;
+pub mod memory_revival;
 pub mod memory_revival_policy;
 pub mod models;
 pub mod plot_thread;
@@ -105,6 +106,13 @@ pub use location_graph::{
     LocationGraphPolicy, LocationKnowledgeState, LocationNode, append_location_event_plan,
     compile_location_graph_packet, load_location_graph_state, prepare_location_event_plan,
     rebuild_location_graph,
+};
+pub use memory_revival::{
+    MEMORY_REVIVAL_EVENT_SCHEMA_VERSION, MEMORY_REVIVAL_EVENTS_FILENAME,
+    MEMORY_REVIVAL_ITEM_SCHEMA_VERSION, MemoryRevivalCompileInput, MemoryRevivalEvent,
+    MemoryRevivalEvidenceRef, MemoryRevivalItem, MemoryRevivalReason, MemoryRevivalRejectReason,
+    MemoryRevivalSelection, MemoryRevivalSourceKind, compile_memory_revival_selection,
+    load_memory_revival_events,
 };
 pub use memory_revival_policy::{MEMORY_REVIVAL_POLICY_SCHEMA_VERSION, MemoryRevivalPolicy};
 pub use models::{

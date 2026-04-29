@@ -3827,6 +3827,8 @@ fn build_webgpt_turn_prompt(
 - source_revival.memory_revival.active_character_text_design은 캐릭터별 화법/어미/어투/제스처/습관/drift 계약이다. 전역 문체와 섞지 말고, 인물이 말하거나 행동할 때만 자연스럽게 반영해라.
 - source_revival.memory_revival.active_memory_revival.active_relationship_graph는 최근 관계 업데이트를 edge로 정규화한 표면이다. stance는 대사 거리감과 협조/거절/의심을 조절하지만, 본문에서 관계도를 해설하지 마라.
 - source_revival.memory_revival.active_memory_revival.active_world_lore는 player-visible world fact를 lore entry로 정규화한 표면이다. 세계 규칙/언어/법칙 제약으로만 쓰고, seed/canon에 없는 종교·제국·마법체계·역사를 새로 만들지 마라.
+- source_revival.memory_revival.active_memory_revival.visible_prompt_revival.items는 이번 턴에 선택된 장기기억이다. 각 item의 reason/evidence_refs/source_id를 따라 필요한 항목만 쓰고, selected_items 전체를 다시 요약하지 마라.
+- source_revival.memory_revival.active_memory_revival.adjudication_only_revival.items는 판정 전용이다. visible_scene, next_choices, canon_event, image prompt에 복사하지 마라.
 - turn_context_packet.assembly_policy.adjudication_only_sections에 있는 섹션은 판정 전용이다. visible_scene, canon_event, choices, image prompt, player projection에 복사하지 마라.
 - 세계의 사실/상태/source of truth는 아래 turn context packet과 world store다. 웹 채팅 UI나 이전 MCP tool 결과를 source of truth로 쓰지 마라.
 - conversation/project context가 compact 되었거나 turn context packet과 충돌하면 turn context packet을 우선한다.

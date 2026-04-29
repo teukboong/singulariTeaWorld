@@ -1,5 +1,6 @@
 use crate::agent_bridge::PendingAgentTurn;
 use crate::codex_view::{BuildCodexViewOptions, build_codex_view};
+use crate::memory_revival::{MemoryRevivalCompileInput, compile_memory_revival_selection};
 use crate::memory_revival_policy::MemoryRevivalPolicy;
 use crate::relationship_graph::{
     compile_relationship_graph_from_projection, load_relationship_graph_state,
@@ -119,6 +120,30 @@ pub fn build_agent_revival_packet(options: &AgentRevivalCompileOptions<'_>) -> R
         .take(policy.update_limit)
         .cloned()
         .collect::<Vec<_>>();
+    let selected_memory_revival = compile_memory_revival_selection(&MemoryRevivalCompileInput {
+        world_dir: files.dir.as_path(),
+        world_id: pending.world_id.as_str(),
+        turn_id: pending.turn_id.as_str(),
+        backend: options.engine_session_kind,
+        player_input: pending.player_input.as_str(),
+        current_location_id: pending.visible_context.location.as_str(),
+        active_world_lore: &active_world_lore,
+        active_relationship_graph: &active_relationship_graph,
+        active_character_text_design: &pending.visible_context.active_character_text_design,
+        extra_memory: &pending.visible_context.extra_memory,
+    })?;
+    let visible_revival_items = selected_memory_revival
+        .selected_items
+        .iter()
+        .filter(|item| item.visibility == "player_visible")
+        .cloned()
+        .collect::<Vec<_>>();
+    let adjudication_only_revival_items = selected_memory_revival
+        .selected_items
+        .iter()
+        .filter(|item| item.visibility != "player_visible")
+        .cloned()
+        .collect::<Vec<_>>();
 
     Ok(serde_json::json!({
         "schema_version": AGENT_REVIVAL_PACKET_SCHEMA_VERSION,
@@ -158,6 +183,16 @@ pub fn build_agent_revival_packet(options: &AgentRevivalCompileOptions<'_>) -> R
                 "recent_relationship_updates": relationship_updates,
                 "active_relationship_graph": active_relationship_graph,
                 "active_world_lore": active_world_lore,
+                "selected_items": selected_memory_revival.selected_items,
+                "visible_prompt_revival": {
+                    "visibility": "player_visible",
+                    "items": visible_revival_items
+                },
+                "adjudication_only_revival": {
+                    "visibility": "adjudication_only",
+                    "items": adjudication_only_revival_items
+                },
+                "revival_event": selected_memory_revival.event,
                 "recent_agent_context_events": recent_context_events,
                 "agent_context_projection": context_projection
             }

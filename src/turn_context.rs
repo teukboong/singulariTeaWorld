@@ -38,10 +38,12 @@ impl Default for TurnContextAssemblyPolicy {
                 "memory_revival.active_character_text_design".to_owned(),
                 "memory_revival.active_memory_revival.active_relationship_graph".to_owned(),
                 "memory_revival.active_memory_revival.active_world_lore".to_owned(),
+                "memory_revival.active_memory_revival.visible_prompt_revival".to_owned(),
             ],
             adjudication_only_sections: vec![
                 "private_adjudication_context".to_owned(),
                 "memory_revival.active_scene_pressure.hidden_adjudication_only".to_owned(),
+                "memory_revival.active_memory_revival.adjudication_only_revival".to_owned(),
             ],
             use_rules: vec![
                 "Source revival remains the source packet; turn context assembly only labels visibility and prompt-use boundaries.".to_owned(),

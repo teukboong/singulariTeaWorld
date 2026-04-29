@@ -1,5 +1,5 @@
 use crate::body_resource::BODY_RESOURCE_STATE_FILENAME;
-use crate::character_text_design::CHARACTER_TEXT_DESIGN_FILENAME;
+use crate::character_text_design::{CHARACTER_TEXT_DESIGN_FILENAME, CharacterTextDesignPacket};
 use crate::location_graph::LOCATION_GRAPH_FILENAME;
 use crate::models::{
     ANCHOR_CHARACTER_ID, CanonEvent, CharacterRecord, EntityRecords, EntityUpdateRecord,
@@ -8,7 +8,7 @@ use crate::models::{
     redact_guide_choice_public_hints,
 };
 use crate::plot_thread::PLOT_THREADS_FILENAME;
-use crate::relationship_graph::RELATIONSHIP_GRAPH_FILENAME;
+use crate::relationship_graph::{RELATIONSHIP_GRAPH_FILENAME, RelationshipGraphPacket};
 use crate::scene_pressure::ACTIVE_SCENE_PRESSURES_FILENAME;
 use crate::sqlite::{
     Connection, OpenFlags, OptionalExtension, SQLITE_BUSY_TIMEOUT_MS, SqliteConnectionOptions,
@@ -19,7 +19,7 @@ use crate::store::{
     LATEST_SNAPSHOT_FILENAME, PLAYER_KNOWLEDGE_FILENAME, WORLD_FILENAME, read_json,
 };
 use crate::visual_asset_graph::VISUAL_ASSET_GRAPH_FILENAME;
-use crate::world_lore::WORLD_LORE_FILENAME;
+use crate::world_lore::{WORLD_LORE_FILENAME, WorldLorePacket};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -910,6 +910,45 @@ const WORLD_DB_SCHEMA_SQL: &str = r"
             PRIMARY KEY (world_id, projection_id)
         );
 
+        CREATE TABLE IF NOT EXISTS world_lore_entries (
+            world_id TEXT NOT NULL,
+            lore_id TEXT NOT NULL,
+            domain TEXT NOT NULL,
+            name TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            visibility TEXT NOT NULL,
+            confidence TEXT NOT NULL,
+            authority TEXT NOT NULL,
+            raw_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (world_id, lore_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS relationship_edges (
+            world_id TEXT NOT NULL,
+            edge_id TEXT NOT NULL,
+            source_entity_id TEXT NOT NULL,
+            target_entity_id TEXT NOT NULL,
+            stance TEXT NOT NULL,
+            visibility TEXT NOT NULL,
+            visible_summary TEXT NOT NULL,
+            raw_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (world_id, edge_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS character_text_designs (
+            world_id TEXT NOT NULL,
+            entity_id TEXT NOT NULL,
+            visible_name TEXT NOT NULL,
+            role TEXT NOT NULL,
+            visibility TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            raw_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (world_id, entity_id)
+        );
+
         CREATE TABLE IF NOT EXISTS player_knowledge (
             world_id TEXT PRIMARY KEY,
             raw_json TEXT NOT NULL,
@@ -972,6 +1011,12 @@ const WORLD_DB_SCHEMA_SQL: &str = r"
             ON relationship_updates(world_id, turn_id);
         CREATE INDEX IF NOT EXISTS idx_materialized_projections_world_kind
             ON materialized_projections(world_id, projection_kind);
+        CREATE INDEX IF NOT EXISTS idx_world_lore_entries_world_domain
+            ON world_lore_entries(world_id, domain);
+        CREATE INDEX IF NOT EXISTS idx_relationship_edges_world_source
+            ON relationship_edges(world_id, source_entity_id);
+        CREATE INDEX IF NOT EXISTS idx_character_text_designs_world_role
+            ON character_text_designs(world_id, role);
         CREATE INDEX IF NOT EXISTS idx_state_changes_world_turn
             ON state_changes(world_id, turn_id);
         CREATE INDEX IF NOT EXISTS idx_world_facts_world_category
@@ -1698,8 +1743,159 @@ fn upsert_materialized_projection_files(
                 projection.id
             )
         })?;
+        upsert_typed_memory_projection(conn, projection.kind, world_id, &value, updated_at)?;
     }
     Ok(())
+}
+
+fn upsert_typed_memory_projection(
+    conn: &Connection,
+    kind: &str,
+    world_id: &str,
+    value: &serde_json::Value,
+    updated_at: &str,
+) -> Result<()> {
+    match kind {
+        "world_lore" => upsert_world_lore_entries(conn, world_id, value, updated_at),
+        "relationship_graph" => upsert_relationship_edges(conn, world_id, value, updated_at),
+        "character_text_design" => upsert_character_text_designs(conn, world_id, value, updated_at),
+        _ => Ok(()),
+    }
+}
+
+fn upsert_world_lore_entries(
+    conn: &Connection,
+    world_id: &str,
+    value: &serde_json::Value,
+    updated_at: &str,
+) -> Result<()> {
+    let packet: WorldLorePacket = serde_json::from_value(value.clone())
+        .context("world.db world_lore materialized projection parse failed")?;
+    conn.execute(
+        "DELETE FROM world_lore_entries WHERE world_id = ?1",
+        params![world_id],
+    )
+    .context("world.db world_lore_entries clear failed")?;
+    for entry in packet.entries {
+        let raw_json = to_json(&entry)?;
+        conn.execute(
+            r"
+            INSERT OR REPLACE INTO world_lore_entries(
+                world_id, lore_id, domain, name, summary, visibility,
+                confidence, authority, raw_json, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            ",
+            params![
+                world_id,
+                entry.lore_id,
+                format!("{:?}", entry.domain),
+                entry.name,
+                entry.summary,
+                entry.visibility,
+                entry.confidence,
+                entry.authority,
+                raw_json,
+                updated_at,
+            ],
+        )
+        .context("world.db world_lore_entry upsert failed")?;
+    }
+    Ok(())
+}
+
+fn upsert_relationship_edges(
+    conn: &Connection,
+    world_id: &str,
+    value: &serde_json::Value,
+    updated_at: &str,
+) -> Result<()> {
+    let packet: RelationshipGraphPacket = serde_json::from_value(value.clone())
+        .context("world.db relationship_graph materialized projection parse failed")?;
+    conn.execute(
+        "DELETE FROM relationship_edges WHERE world_id = ?1",
+        params![world_id],
+    )
+    .context("world.db relationship_edges clear failed")?;
+    for edge in packet.active_edges {
+        let raw_json = to_json(&edge)?;
+        conn.execute(
+            r"
+            INSERT OR REPLACE INTO relationship_edges(
+                world_id, edge_id, source_entity_id, target_entity_id, stance,
+                visibility, visible_summary, raw_json, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            ",
+            params![
+                world_id,
+                edge.edge_id,
+                edge.source_entity_id,
+                edge.target_entity_id,
+                edge.stance,
+                edge.visibility,
+                edge.visible_summary,
+                raw_json,
+                updated_at,
+            ],
+        )
+        .context("world.db relationship_edge upsert failed")?;
+    }
+    Ok(())
+}
+
+fn upsert_character_text_designs(
+    conn: &Connection,
+    world_id: &str,
+    value: &serde_json::Value,
+    updated_at: &str,
+) -> Result<()> {
+    let packet: CharacterTextDesignPacket = serde_json::from_value(value.clone())
+        .context("world.db character_text_design materialized projection parse failed")?;
+    conn.execute(
+        "DELETE FROM character_text_designs WHERE world_id = ?1",
+        params![world_id],
+    )
+    .context("world.db character_text_designs clear failed")?;
+    for design in packet.active_designs {
+        let summary = character_text_design_summary(&design);
+        let raw_json = to_json(&design)?;
+        conn.execute(
+            r"
+            INSERT OR REPLACE INTO character_text_designs(
+                world_id, entity_id, visible_name, role, visibility, summary,
+                raw_json, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            ",
+            params![
+                world_id,
+                design.entity_id,
+                design.visible_name,
+                design.role,
+                design.visibility,
+                summary,
+                raw_json,
+                updated_at,
+            ],
+        )
+        .context("world.db character_text_design upsert failed")?;
+    }
+    Ok(())
+}
+
+fn character_text_design_summary(
+    design: &crate::character_text_design::CharacterTextDesign,
+) -> String {
+    [
+        design.speech.join(", "),
+        design.endings.join(", "),
+        design.tone.join(", "),
+        design.gestures.join(", "),
+        design.habits.join(", "),
+        design.drift.join(", "),
+    ]
+    .into_iter()
+    .filter(|part| !part.trim().is_empty())
+    .collect::<Vec<_>>()
+    .join(" | ")
 }
 
 fn summarize_materialized_projection(kind: &str, value: &serde_json::Value) -> String {
@@ -1761,6 +1957,9 @@ fn rebuild_world_search_index_for_conn(conn: &Connection, world_id: &str) -> Res
     index_entity_updates(conn, world_id)?;
     index_relationship_updates(conn, world_id)?;
     index_materialized_projections(conn, world_id)?;
+    index_world_lore_entries(conn, world_id)?;
+    index_relationship_edges(conn, world_id)?;
+    index_character_text_designs(conn, world_id)?;
     Ok(())
 }
 
@@ -2003,6 +2202,109 @@ fn index_materialized_projections(conn: &Connection, world_id: &str) -> Result<(
     Ok(())
 }
 
+fn index_world_lore_entries(conn: &Connection, world_id: &str) -> Result<()> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT lore_id, domain, name, summary
+             FROM world_lore_entries
+             WHERE world_id = ?1 AND visibility = ?2",
+        )
+        .context("world.db search index world_lore_entries prepare failed")?;
+    let rows = stmt
+        .query_map(params![world_id, PLAYER_VISIBLE], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .context("world.db search index world_lore_entries query failed")?;
+    for row in rows {
+        let (lore_id, domain, name, summary) =
+            row.context("world.db search index world_lore_entry row failed")?;
+        insert_search_document(
+            conn,
+            world_id,
+            "world_lore_entries",
+            lore_id.as_str(),
+            format!("{domain} {name}").as_str(),
+            summary.as_str(),
+            PLAYER_VISIBLE,
+        )?;
+    }
+    Ok(())
+}
+
+fn index_relationship_edges(conn: &Connection, world_id: &str) -> Result<()> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT edge_id, source_entity_id, target_entity_id, stance, visible_summary
+             FROM relationship_edges
+             WHERE world_id = ?1 AND visibility = ?2",
+        )
+        .context("world.db search index relationship_edges prepare failed")?;
+    let rows = stmt
+        .query_map(params![world_id, PLAYER_VISIBLE], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })
+        .context("world.db search index relationship_edges query failed")?;
+    for row in rows {
+        let (edge_id, source_id, target_id, stance, summary) =
+            row.context("world.db search index relationship_edge row failed")?;
+        insert_search_document(
+            conn,
+            world_id,
+            "relationship_edges",
+            edge_id.as_str(),
+            format!("{source_id} {target_id} {stance}").as_str(),
+            summary.as_str(),
+            PLAYER_VISIBLE,
+        )?;
+    }
+    Ok(())
+}
+
+fn index_character_text_designs(conn: &Connection, world_id: &str) -> Result<()> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT entity_id, visible_name, role, summary
+             FROM character_text_designs
+             WHERE world_id = ?1 AND visibility = ?2",
+        )
+        .context("world.db search index character_text_designs prepare failed")?;
+    let rows = stmt
+        .query_map(params![world_id, PLAYER_VISIBLE], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .context("world.db search index character_text_designs query failed")?;
+    for row in rows {
+        let (entity_id, visible_name, role, summary) =
+            row.context("world.db search index character_text_design row failed")?;
+        insert_search_document(
+            conn,
+            world_id,
+            "character_text_designs",
+            entity_id.as_str(),
+            format!("{visible_name} {role}").as_str(),
+            summary.as_str(),
+            PLAYER_VISIBLE,
+        )?;
+    }
+    Ok(())
+}
+
 fn insert_search_document(
     conn: &Connection,
     world_id: &str,
@@ -2201,6 +2503,9 @@ const WORLD_SCOPED_TABLES: &[&str] = &[
     "entity_updates",
     "relationship_updates",
     "materialized_projections",
+    "world_lore_entries",
+    "relationship_edges",
+    "character_text_designs",
     "snapshots",
     "chapter_summaries",
     "world_search_fts",
@@ -2213,6 +2518,9 @@ const WORLD_REPAIR_CLEAR_TABLES: &[&str] = &[
     "snapshots",
     "relationship_updates",
     "materialized_projections",
+    "world_lore_entries",
+    "relationship_edges",
+    "character_text_designs",
     "entity_updates",
     "character_memories",
     "state_changes",
@@ -2287,10 +2595,14 @@ const MATERIALIZED_PROJECTION_FILES: &[MaterializedProjectionFile] = &[
 mod tests {
     use super::{
         force_chapter_summary, latest_chapter_summaries, repair_world_db, search_world_db,
-        validate_world_db, world_db_stats,
+        sync_world_db_materialized_projections, validate_world_db, world_db_stats,
     };
     use crate::store::{InitWorldOptions, init_world};
     use crate::turn::{AdvanceTurnOptions, advance_turn};
+    use crate::world_lore::{
+        WORLD_LORE_ENTRY_SCHEMA_VERSION, WORLD_LORE_FILENAME, WorldLoreDomain, WorldLoreEntry,
+        WorldLorePacket,
+    };
     use tempfile::tempdir;
 
     #[test]
@@ -2384,6 +2696,67 @@ premise:
         })?;
         let hits = search_world_db(&initialized.world_dir, "stw_search_test", "판단 위임", 10)?;
         assert!(!hits.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn search_indexes_typed_blueprint_projection_entries() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let seed_path = temp.path().join("seed.yaml");
+        let store = temp.path().join("store");
+        std::fs::write(
+            &seed_path,
+            r#"
+schema_version: singulari.world_seed.v1
+world_id: stw_blueprint_search
+title: "블루프린트 검색 세계"
+premise:
+  genre: "중세 판타지"
+  protagonist: "문서 보관자"
+"#,
+        )?;
+        let initialized = init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store),
+            session_id: None,
+        })?;
+        crate::store::write_json(
+            &initialized.world_dir.join(WORLD_LORE_FILENAME),
+            &WorldLorePacket {
+                world_id: "stw_blueprint_search".to_owned(),
+                turn_id: "turn_0001".to_owned(),
+                entries: vec![WorldLoreEntry {
+                    schema_version: WORLD_LORE_ENTRY_SCHEMA_VERSION.to_owned(),
+                    lore_id: "lore:customs:gate_tax".to_owned(),
+                    domain: WorldLoreDomain::Customs,
+                    name: "gate tax".to_owned(),
+                    summary: "gate tax requires a stamped token".to_owned(),
+                    visibility: "player_visible".to_owned(),
+                    confidence: "confirmed".to_owned(),
+                    authority: "world_lore_updates".to_owned(),
+                    source_refs: vec!["world_lore_update:turn_0001:00".to_owned()],
+                    mechanical_axis: vec!["social_permission".to_owned()],
+                }],
+                ..WorldLorePacket::default()
+            },
+        )?;
+        sync_world_db_materialized_projections(
+            &initialized.world_dir,
+            "stw_blueprint_search",
+            "2026-04-29T00:00:00Z",
+        )?;
+
+        let hits = search_world_db(
+            &initialized.world_dir,
+            "stw_blueprint_search",
+            "stamped token",
+            10,
+        )?;
+
+        assert!(
+            hits.iter()
+                .any(|hit| hit.source_table == "world_lore_entries")
+        );
         Ok(())
     }
 

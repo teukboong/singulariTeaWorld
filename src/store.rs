@@ -2,6 +2,7 @@ use crate::character_text_design::{
     CHARACTER_TEXT_DESIGN_EVENTS_FILENAME, CHARACTER_TEXT_DESIGN_FILENAME,
     compile_character_text_design_packet,
 };
+use crate::memory_revival::MEMORY_REVIVAL_EVENTS_FILENAME;
 use crate::models::{
     ANCHOR_CHARACTER_INVARIANT, CanonEvent, DashboardSummary, EntityRecords, HiddenState,
     NARRATIVE_SCENE_SCHEMA_VERSION, NarrativeScene, PlayerKnowledge, RENDER_PACKET_SCHEMA_VERSION,
@@ -221,6 +222,12 @@ fn initialize_blueprint_event_logs(world_dir: &Path) -> Result<()> {
         format!(
             "failed to write {}",
             world_dir.join(WORLD_LORE_UPDATES_FILENAME).display()
+        )
+    })?;
+    fs::write(world_dir.join(MEMORY_REVIVAL_EVENTS_FILENAME), "").with_context(|| {
+        format!(
+            "failed to write {}",
+            world_dir.join(MEMORY_REVIVAL_EVENTS_FILENAME).display()
         )
     })?;
     Ok(())
