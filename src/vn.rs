@@ -1072,19 +1072,30 @@ fn human_body_status(body: &[String]) -> String {
 }
 
 fn human_mind_status(mind: &[String]) -> String {
-    let visible = mind
-        .iter()
-        .filter_map(|entry| match entry.as_str() {
-            "pre-event baseline" => Some("첫 행동 전 상태를 유지하는 중".to_owned()),
-            "선택한 방향으로 몸이 움직이기 시작한다" => {
-                Some("방금 고른 행동의 단서를 정리하는 중".to_owned())
-            }
-            value if value.trim().is_empty() => None,
-            value if value.contains('_') || value.contains("event") => None,
-            value => Some(value.to_owned()),
-        })
-        .collect::<Vec<_>>();
+    let mut visible = Vec::new();
+    for entry in mind {
+        let Some(value) = player_visible_mind_entry(entry) else {
+            continue;
+        };
+        if !visible.contains(&value) {
+            visible.push(value);
+        }
+    }
+    visible.truncate(2);
     list_or(&visible, "현재 단서를 정리하는 중")
+}
+
+fn player_visible_mind_entry(entry: &str) -> Option<String> {
+    match entry.trim() {
+        "" => None,
+        "pre-event baseline" => Some("첫 행동 전 상태를 유지하는 중".to_owned()),
+        "선택한 방향으로 몸이 움직이기 시작한다" | "선택한 행동이 접수됐다" => {
+            Some("최근 선택을 따라 단서를 정리하는 중".to_owned())
+        }
+        "위임 선택이 접수됐다" => Some("흐름을 맡긴 여파를 살피는 중".to_owned()),
+        value if value.contains('_') || value.contains("event") => None,
+        value => Some(value.to_owned()),
+    }
 }
 
 fn need_value(value: Option<&str>) -> String {
@@ -1402,6 +1413,21 @@ mod tests {
     use crate::store::{InitWorldOptions, init_world};
     use crate::turn::{AdvanceTurnOptions, advance_turn};
     use tempfile::tempdir;
+
+    #[test]
+    fn protagonist_mind_status_dedupes_repeated_action_receipts() {
+        let status = super::human_mind_status(&[
+            "선택한 행동이 접수됐다".to_owned(),
+            "선택한 행동이 접수됐다".to_owned(),
+            "위임 선택이 접수됐다".to_owned(),
+            "event_opening_prelude".to_owned(),
+        ]);
+
+        assert_eq!(
+            status,
+            "최근 선택을 따라 단서를 정리하는 중 / 흐름을 맡긴 여파를 살피는 중"
+        );
+    }
 
     #[test]
     #[allow(
