@@ -6,9 +6,9 @@ use singulari_world::{
     ACTIVE_WORLD_FILENAME, AdvanceTurnOptions, AgentCommitTurnOptions, AgentRevivalCompileOptions,
     AgentSubmitTurnOptions, AgentTurnResponse, ApplyCharacterAnchorOptions, InitWorldOptions,
     RenderPacketLoadOptions, ValidationStatus, WorldTextBackend, WorldVisualBackend, advance_turn,
-    apply_character_anchor, assemble_turn_context_packet, build_agent_revival_packet,
-    build_codex_view, build_resume_pack, commit_agent_turn, enqueue_agent_turn,
-    force_chapter_summary, init_world, load_active_world, load_latest_snapshot,
+    apply_character_anchor, assemble_prompt_context_packet, assemble_turn_context_packet,
+    build_agent_revival_packet, build_codex_view, build_resume_pack, commit_agent_turn,
+    enqueue_agent_turn, force_chapter_summary, init_world, load_active_world, load_latest_snapshot,
     load_pending_agent_turn, load_render_packet, load_world_backend_selection, load_world_record,
     recent_entity_updates, recent_relationship_updates, refresh_world_docs,
     render_advanced_turn_report, render_chat_route, render_codex_view_section_markdown,
@@ -3667,7 +3667,7 @@ const AGENT_TURN_RESPONSE_SCHEMA_GUIDE: &str = r#"AgentTurnResponse 스키마:
   ],
   "plot_thread_events": [
     {
-      "thread_id": "source_revival.memory_revival.active_plot_threads.active_visible 중 이번 턴에서 실제로 변한 thread_id",
+      "thread_id": "prompt_context.visible_context.active_plot_threads 중 이번 턴에서 실제로 변한 thread_id",
       "change": "advanced",
       "status_after": "active",
       "urgency_after": "soon",
@@ -3677,7 +3677,7 @@ const AGENT_TURN_RESPONSE_SCHEMA_GUIDE: &str = r#"AgentTurnResponse 스키마:
   ],
   "scene_pressure_events": [
     {
-      "pressure_id": "source_revival.memory_revival.active_scene_pressure.visible_active 중 이번 턴에서 실제로 변한 pressure_id",
+      "pressure_id": "prompt_context.visible_context.active_scene_pressure 중 이번 턴에서 실제로 변한 pressure_id",
       "change": "increased",
       "intensity_after": 3,
       "urgency_after": "soon",
@@ -3749,7 +3749,7 @@ const AGENT_TURN_RESPONSE_SCHEMA_GUIDE: &str = r#"AgentTurnResponse 스키마:
 - slot 1,2,3,4,5의 tag/intent는 템플릿 문구가 아니라 이번 visible_scene에서 바로 이어지는 구체 선택지여야 한다.
 - next_choices 안에는 label/preview/choices 필드를 쓰지 않는다. 오직 slot/tag/intent만 쓴다.
 - plot_thread_events는 이번 턴에서 실제로 진행/복잡화/차단/해결/실패/퇴장한 active_visible thread만 적는다. 변화가 없으면 빈 배열이다.
-- plot_thread_events.thread_id는 source_revival.memory_revival.active_plot_threads.active_visible에 있는 thread_id만 쓴다. 새 thread를 임의로 만들거나 hidden/dormant 상태로 바꾸지 않는다.
+- plot_thread_events.thread_id는 prompt_context.visible_context.active_plot_threads에 있는 thread_id만 쓴다. 새 thread를 임의로 만들거나 hidden/dormant 상태로 바꾸지 않는다.
 - scene_pressure_events는 이번 턴에서 실제로 강해지거나 약해진 visible_active pressure만 적는다. hidden_adjudication_only pressure_id는 절대 쓰지 않는다.
 - entity_updates/relationship_updates/world_lore_updates/character_text_design_updates는 전부 typed schema다. 변화가 없으면 빈 배열이며, 임의 key/value JSON을 넣지 않는다.
 - body_resource_events/location_events도 typed schema다. 장면에 실제 증거가 없으면 빈 배열로 둔다.
@@ -3759,7 +3759,7 @@ const AGENT_TURN_RESPONSE_SCHEMA_GUIDE: &str = r#"AgentTurnResponse 스키마:
 - 단순 배경 군중은 extra_contacts에 넣지 않는다. 한 번 스쳐간 인물은 memory_action "trace", 다시 떠올릴 이유가 분명하면 "remember"를 쓴다."#;
 
 const SEEDLESS_PROSE_CONTRACT: &str = r"- 이 계약은 seedless style contract다. 여기 있는 문체/작법 규칙은 소재, 사건, 인물, 장소, 장르 장치, 과거사, 상징을 새로 만들 권한이 없다.
-- scene_fact_boundaries: 오직 revival packet의 player-visible facts, current player_input, visible canon, active memory revival에서 허용된 사실만 쓴다. style contract, schema examples, previous WebGPT phrasing, UI labels는 장면 사실이 아니다.
+- scene_fact_boundaries: 오직 prompt context packet의 player-visible facts, current player_input, visible canon, selected memory items에서 허용된 사실만 쓴다. style contract, schema examples, previous WebGPT phrasing, UI labels는 장면 사실이 아니다.
 - 캐릭터 voice_anchors는 캐릭터 텍스트 디자인이다. speech는 화법, endings는 어미/말끝, tone은 어투/거리감/어휘, gestures는 반복 제스처, habits는 행동 습관, drift는 변화 방향으로 적용한다.
 - 문체와 서사 작법은 캐릭터에 귀속하지 말고 visible_scene의 전역 서사에만 적용한다. 문단 순서는 장면 압력과 player_input에 맞춰 달라져야 하며, 고정된 전개 템플릿을 반복하지 않는다.
 - paragraph_grammar: 각 문단은 감각 변화, 몸의 반응, 외부 압력, 해석을 유보한 단서, 다음 행동을 압박하는 변화 중 최소 둘을 포함한다.
@@ -3788,8 +3788,9 @@ fn build_webgpt_turn_prompt(
         engine_session_kind: "webgpt_project_session",
     })?;
     let turn_context_packet = assemble_turn_context_packet(pending, source_revival_packet);
-    let turn_context_packet = serde_json::to_string_pretty(&turn_context_packet)
-        .context("failed to serialize webgpt turn context packet")?;
+    let prompt_context_packet = assemble_prompt_context_packet(&turn_context_packet)?;
+    let prompt_context_packet = serde_json::to_string_pretty(&prompt_context_packet)
+        .context("failed to serialize webgpt prompt context packet")?;
     let narrative_budget = &pending.output_contract.narrative_budget;
     Ok(format!(
         r#"Singulari World web frontend에서 pending turn 하나가 들어왔어. 너는 WebGPT narrative engine adapter다.
@@ -3801,14 +3802,14 @@ fn build_webgpt_turn_prompt(
 
 역할:
 - 너는 Singulari World의 trusted narrative agent다.
-- 플레이어에게 다시 묻지 말고, 아래 turn context packet만 보고 바로 서사 턴을 작성한다.
+- 플레이어에게 다시 묻지 말고, 아래 prompt context packet만 보고 바로 서사 턴을 작성한다.
 - hidden/private context는 판정에만 쓰고, visible_scene/canon_event/choice text에는 절대 누출하지 않는다.
 - 출력 서사는 한국어 VN prose다. 대화, 제스처, 말버릇을 살리고, 게임식 수치 계산처럼 보이게 쓰지 않는다.
 {text_design_directive}
-- 출력량은 turn context packet의 source_revival.output_contract.narrative_level과 narrative_budget을 따른다. 레벨 간 차이는 확연해야 한다.
+- 출력량은 prompt context packet의 output_contract.narrative_level과 narrative_budget을 따른다. 레벨 간 차이는 확연해야 한다.
 - 레벨 1은 표준 VN 밀도, 레벨 2는 장면 확장 밀도, 레벨 3은 장편 연재 밀도다. 레벨 2/3에서는 같은 사건도 감각, 행동, 반응, 여운, 압박을 더 길게 쌓는다.
 - player_input이 "세계 개막"이면 그것은 선택지가 아니라 시드에서 첫 서사를 여는 bootstrap turn이다.
-- turn_context_packet.source_revival.opening_randomizer가 있으면 사용자의 시드에 덧붙은 player-visible 개막 seed로 취급한다. 그 안의 location_frame, protagonist_frame, immediate_pressure, first_visible_object, social_weather, opening_question을 첫 장면의 시작 조건으로 반영한다.
+- prompt_context.opening_randomizer가 있으면 사용자의 시드에 덧붙은 player-visible 개막 seed로 취급한다. 그 안의 location_frame, protagonist_frame, immediate_pressure, first_visible_object, social_weather, opening_question을 첫 장면의 시작 조건으로 반영한다.
 - opening_randomizer가 없으면 사용자 시드와 visible facts만으로 시작한다. 이전 conversation 문구나 일반적인 bootstrap 기본값을 재사용하지 마라.
 - opening_randomizer는 반복 수렴을 피하기 위한 시작 조건이지, 시드에 없는 장르 장치·숨은 과거사·고정 인물 설정을 만드는 권한이 아니다.
 - 시드나 visible facts에 명시되지 않은 장르 장치, 과거사, 외부 세계 대비, 게임 인터페이스식 능력 구조를 추론해서 주입하지 마라. 이런 장치는 explicit positive evidence가 있을 때만 쓴다.
@@ -3818,27 +3819,28 @@ fn build_webgpt_turn_prompt(
 - slot 7은 항상 판단 위임이고 preview는 숨긴다: "맡긴다. 세부 내용은 선택 후 드러난다."
 - slot 6은 항상 자유서술이며 inline prose를 요구하는 선택지로 둔다.
 - 이 WebGPT conversation의 이전 turn들은 말맛, 직전 감정선, 장면 리듬을 잇는 working context다.
-- ChatGPT Project의 새 세션이나 기존 conversation history는 세계 상태 저장소가 아니다. 세계 연속성은 turn_context_packet.source_revival로만 복원한다.
-- retrieval_profile은 host-side 상태 복원 예산 메타데이터다. source_revival.memory_revival.active_memory_revival에서 이번 player_input과 직접 이어지는 항목만 장면 압력으로 반영한다.
-- source_revival.memory_revival.active_scene_pressure는 이번 턴 선택지와 문단 박자를 누르는 압력 계약이다. visible_active는 visible_scene/next_choices에 반영하고, hidden_adjudication_only는 판정에만 쓰며 본문/선택지/요약에 누출하지 마라.
-- source_revival.memory_revival.active_plot_threads는 현재 열린 문제와 미해결 질문이다. quest-log처럼 설명하지 말고, 이번 장면이 자연스럽게 건드리는 thread만 선택지와 장면 압력으로 이어라.
-- source_revival.memory_revival.active_body_resource_state는 주인공의 몸 상태와 실제 보유 자원이다. 없는 물건을 선택지 해결책으로 만들지 말고, 몸 제약은 행동/감각/타인 반응에 필요한 만큼만 반영해라.
-- source_revival.memory_revival.active_location_graph는 현재 장소와 알려진 주변 장소다. 이동 선택지는 이 표면의 known/visited 장소 또는 visible_scene에서 정당화된 탐색 행동으로만 열어라.
-- source_revival.memory_revival.active_character_text_design은 캐릭터별 화법/어미/어투/제스처/습관/drift 계약이다. 전역 문체와 섞지 말고, 인물이 말하거나 행동할 때만 자연스럽게 반영해라.
-- source_revival.memory_revival.active_memory_revival.active_relationship_graph는 최근 관계 업데이트를 edge로 정규화한 표면이다. stance는 대사 거리감과 협조/거절/의심을 조절하지만, 본문에서 관계도를 해설하지 마라.
-- source_revival.memory_revival.active_memory_revival.active_world_lore는 player-visible world fact를 lore entry로 정규화한 표면이다. 세계 규칙/언어/법칙 제약으로만 쓰고, seed/canon에 없는 종교·제국·마법체계·역사를 새로 만들지 마라.
-- source_revival.memory_revival.active_memory_revival.visible_prompt_revival.items는 이번 턴에 선택된 장기기억이다. 각 item의 reason/evidence_refs/source_id를 따라 필요한 항목만 쓰고, selected_items 전체를 다시 요약하지 마라.
-- source_revival.memory_revival.active_memory_revival.adjudication_only_revival.items는 판정 전용이다. visible_scene, next_choices, canon_event, image prompt에 복사하지 마라.
-- turn_context_packet.assembly_policy.adjudication_only_sections에 있는 섹션은 판정 전용이다. visible_scene, canon_event, choices, image prompt, player projection에 복사하지 마라.
-- 세계의 사실/상태/source of truth는 아래 turn context packet과 world store다. 웹 채팅 UI나 이전 MCP tool 결과를 source of truth로 쓰지 마라.
-- conversation/project context가 compact 되었거나 turn context packet과 충돌하면 turn context packet을 우선한다.
+- ChatGPT Project의 새 세션이나 기존 conversation history는 세계 상태 저장소가 아니다. 세계 연속성은 prompt_context_packet으로만 복원한다.
+- prompt_context.visible_context.active_scene_pressure는 이번 턴 선택지와 문단 박자를 누르는 압력 계약이다. visible_scene/next_choices에 반영한다.
+- prompt_context.visible_context.active_plot_threads는 현재 열린 문제와 미해결 질문이다. quest-log처럼 설명하지 말고, 이번 장면이 자연스럽게 건드리는 thread만 선택지와 장면 압력으로 이어라.
+- prompt_context.visible_context.active_body_resource_state는 주인공의 몸 상태와 실제 보유 자원이다. 없는 물건을 선택지 해결책으로 만들지 말고, 몸 제약은 행동/감각/타인 반응에 필요한 만큼만 반영해라.
+- prompt_context.visible_context.active_location_graph는 현재 장소와 알려진 주변 장소다. 이동 선택지는 이 표면의 known/visited 장소 또는 visible_scene에서 정당화된 탐색 행동으로만 열어라.
+- prompt_context.visible_context.affordance_graph는 slot 1..5의 행동 허가표다. next_choices 1..5는 각 slot의 affordance_kind/action_contract/source_refs/forbidden_shortcuts를 지켜 장면별 문구로 다시 써라. affordance_id나 source_refs 자체를 선택지에 노출하지 마라.
+- prompt_context.visible_context.belief_graph는 주인공과 player-visible narrator가 확정적으로 아는 것의 경계다. belief node가 없는 원인, 정체, 배후, 과거사, 세계 규칙은 확정 서술하지 말고 단서나 불확실성으로만 남겨라.
+- prompt_context.visible_context.world_process_clock는 보이는 세계 진행 압력이다. 다음 턴으로 넘기면 악화, 완화, 전환, 해소 중 하나가 일어날 수 있음을 문단 압력과 선택지 비용에 반영해라.
+- prompt_context.visible_context.narrative_style_state는 서사 문체와 문단 박자 계약이다. 소재나 설정을 만들지 말고 밀도, 문장 압력, 대사 호흡, 번역체 방지에만 적용해라.
+- prompt_context.visible_context.active_character_text_design은 캐릭터별 화법/어미/어투/제스처/습관/drift 계약이다. 전역 문체와 섞지 말고, 인물이 말하거나 행동할 때만 자연스럽게 반영해라.
+- prompt_context.visible_context.selected_memory_items는 이번 턴에 물리적으로 선택된 장기기억이다. 각 item의 reason/evidence_refs/source_id를 따라 필요한 항목만 쓰고, selected_memory_items 전체를 다시 요약하지 마라.
+- prompt_context.adjudication_context는 판정 전용이다. hidden_world_process_clock를 포함해 visible_scene, next_choices, canon_event, image prompt에 복사하지 마라.
+- prompt_context.prompt_policy.omitted_debug_sections는 의도적으로 프롬프트에서 뺀 debug/source 섹션이다. 비어 있는 사실을 임의로 복원하지 마라.
+- 세계의 사실/상태/source of truth는 아래 prompt context packet과 world store다. 웹 채팅 UI나 이전 MCP tool 결과를 source of truth로 쓰지 마라.
+- conversation/project context가 compact 되었거나 prompt context packet과 충돌하면 prompt context packet을 우선한다.
 - 웹 검색, 외부 사이트 탐색, repo 탐색, 소스 파일 읽기를 하지 마라. 필요한 스키마와 revival packet은 이 프롬프트 안에 있다.
 
 {agent_schema}
 
-turn context packet JSON:
+prompt context packet JSON:
 ```json
-{turn_context_packet}
+{prompt_context_packet}
 ```
 
 출력:
@@ -3853,7 +3855,7 @@ turn context packet JSON:
         major_target_chars = narrative_budget.major_target_chars,
         text_design_directive = SEEDLESS_PROSE_CONTRACT,
         agent_schema = AGENT_TURN_RESPONSE_SCHEMA_GUIDE,
-        turn_context_packet = turn_context_packet,
+        prompt_context_packet = prompt_context_packet,
         world_id = pending.world_id,
         turn_id = pending.turn_id,
     ))
@@ -4413,7 +4415,7 @@ premise:
             "출력 서사는 한국어 VN prose다. 대화, 제스처, 말버릇을 살리고",
             "이 계약은 seedless style contract다.",
             "문체/작법 규칙은 소재, 사건, 인물, 장소, 장르 장치, 과거사, 상징을 새로 만들 권한이 없다.",
-            "scene_fact_boundaries: 오직 revival packet의 player-visible facts",
+            "scene_fact_boundaries: 오직 prompt context packet의 player-visible facts",
             "speech는 화법, endings는 어미/말끝, tone은 어투/거리감/어휘",
             "문체와 서사 작법은 캐릭터에 귀속하지 말고 visible_scene의 전역 서사에만 적용한다.",
             "paragraph_grammar: 각 문단은 감각 변화, 몸의 반응, 외부 압력, 해석을 유보한 단서, 다음 행동을 압박하는 변화 중 최소 둘을 포함한다.",
@@ -4431,30 +4433,38 @@ premise:
             "추상 감정 설명보다 몸, 시선, 호흡, 손, 거리, 소리, 냄새, 온도 같은 관찰 가능한 흔적으로 보여준다.",
             "선택지 의도나 내부 판정을 본문에서 해설하지 않는다.",
             "레벨 1은 표준 VN 밀도, 레벨 2는 장면 확장 밀도, 레벨 3은 장편 연재 밀도다.",
-            "turn_context_packet.source_revival.opening_randomizer가 있으면 사용자의 시드에 덧붙은 player-visible 개막 seed로 취급한다.",
+            "prompt_context.opening_randomizer가 있으면 사용자의 시드에 덧붙은 player-visible 개막 seed로 취급한다.",
             "opening_randomizer가 없으면 사용자 시드와 visible facts만으로 시작한다.",
             "opening_randomizer는 반복 수렴을 피하기 위한 시작 조건이지, 시드에 없는 장르 장치·숨은 과거사·고정 인물 설정을 만드는 권한이 아니다.",
             "시드나 visible facts에 명시되지 않은 장르 장치, 과거사, 외부 세계 대비, 게임 인터페이스식 능력 구조를 추론해서 주입하지 마라.",
             "protagonist가 현재 정보를 모른다는 사실만으로 장면 밖 배경, 과거사, 시대 대비 독백, 정체성 상실 클리셰를 만들지 마라.",
             "이 WebGPT conversation의 이전 turn들은 말맛, 직전 감정선, 장면 리듬을 잇는 working context다.",
-            "conversation/project context가 compact 되었거나 turn context packet과 충돌하면 turn context packet을 우선한다.",
-            "retrieval_profile은 host-side 상태 복원 예산 메타데이터다.",
-            "turn_context_packet.assembly_policy.adjudication_only_sections",
+            "conversation/project context가 compact 되었거나 prompt context packet과 충돌하면 prompt context packet을 우선한다.",
+            "prompt_context.visible_context.selected_memory_items는 이번 턴에 물리적으로 선택된 장기기억이다.",
+            "prompt_context.visible_context.affordance_graph는 slot 1..5의 행동 허가표다.",
+            "prompt_context.visible_context.belief_graph는 주인공과 player-visible narrator가 확정적으로 아는 것의 경계다.",
+            "prompt_context.visible_context.world_process_clock는 보이는 세계 진행 압력이다.",
+            "prompt_context.visible_context.narrative_style_state는 서사 문체와 문단 박자 계약이다.",
+            "prompt_context.adjudication_context는 판정 전용이다.",
+            "prompt_context.prompt_policy.omitted_debug_sections",
             "웹 검색, 외부 사이트 탐색, repo 탐색, 소스 파일 읽기를 하지 마라.",
-            "\"schema_version\": \"singulari.turn_context_packet.v1\"",
-            "\"source_revival\"",
-            "\"schema_version\": \"singulari.agent_revival_packet.v1\"",
-            "\"retrieval_profile\"",
-            "\"profile_name\": \"webgpt_active_memory\"",
-            "\"anti_repetition_rules\"",
-            "\"memory_revival\"",
-            "\"resume_pack\"",
-            "\"active_memory_revival\"",
-            "\"player_visible_archive_view\"",
-            "\"query_recall\"",
-            "\"recent_entity_updates\"",
-            "\"recent_relationship_updates\"",
-            "\"active_relationship_graph\"",
+            "\"schema_version\": \"singulari.prompt_context_packet.v1\"",
+            "\"visible_context\"",
+            "\"adjudication_context\"",
+            "\"selected_memory_items\"",
+            "\"affordance_graph\"",
+            "\"ordinary_choice_slots\"",
+            "\"forbidden_shortcuts\"",
+            "\"belief_graph\"",
+            "\"protagonist_visible_beliefs\"",
+            "\"narrator_knowledge_limits\"",
+            "\"world_process_clock\"",
+            "\"hidden_world_process_clock\"",
+            "\"narrative_style_state\"",
+            "\"anti_translation_rules\"",
+            "\"prohibited_seed_leakage\"",
+            "\"prompt_policy\"",
+            "\"omitted_debug_sections\"",
             "\"active_scene_pressure\"",
             "\"active_plot_threads\"",
             "\"plot_thread_events\"",
@@ -4469,7 +4479,6 @@ premise:
             "\"active_location_graph\"",
             "\"active_character_text_design\"",
             "\"source_of_truth_policy\"",
-            "\"continuity_source\": \"memory_revival.resume_pack + memory_revival.active_memory_revival\"",
             "\"conflict_rule\": \"revival_packet_wins\"",
             "AgentTurnResponse 스키마:",
             "\"schema_version\": \"singulari.agent_turn_response.v1\"",
@@ -4480,6 +4489,30 @@ premise:
             assert!(
                 prompt.contains(required),
                 "webgpt prompt missing realtime contract: {required}"
+            );
+        }
+
+        let prompt_context = serde_json::to_value(
+            singulari_world::extract_prompt_context_from_prompt(&prompt)?,
+        )?;
+        for omitted_path in [
+            "/source_revival",
+            "/retrieval_profile",
+            "/anti_repetition_rules",
+            "/memory_revival",
+            "/resume_pack",
+            "/active_memory_revival",
+            "/visible_context/player_visible_archive_view",
+            "/visible_context/query_recall",
+            "/visible_context/recent_entity_updates",
+            "/visible_context/recent_relationship_updates",
+            "/visible_context/active_relationship_graph",
+            "/visible_context/active_world_lore",
+            "/visible_context/agent_context_projection",
+        ] {
+            assert!(
+                prompt_context.pointer(omitted_path).is_none(),
+                "webgpt prompt context leaked debug/source path: {omitted_path}"
             );
         }
         Ok(())

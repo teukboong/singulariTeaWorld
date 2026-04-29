@@ -1,6 +1,8 @@
 pub mod adjudication;
+pub mod affordance_graph;
 pub mod agent_bridge;
 pub mod backend_selection;
+pub mod belief_graph;
 pub mod body_resource;
 pub mod character_text_design;
 pub mod chat;
@@ -13,8 +15,10 @@ pub mod location_graph;
 pub mod memory_revival;
 pub mod memory_revival_policy;
 pub mod models;
+pub mod narrative_style_state;
 pub mod plot_thread;
 pub mod projection_health;
+pub mod prompt_context;
 pub mod relationship_graph;
 pub mod render;
 pub mod response_context;
@@ -37,8 +41,14 @@ pub mod voice_anchor;
 pub mod world_db;
 pub mod world_docs;
 pub mod world_lore;
+pub mod world_process_clock;
 
 pub use adjudication::{AdjudicationInput, adjudicate_turn};
+pub use affordance_graph::{
+    AFFORDANCE_GRAPH_PACKET_SCHEMA_VERSION, AFFORDANCE_NODE_SCHEMA_VERSION, AffordanceGraphPacket,
+    AffordanceGraphPolicy, AffordanceKind, AffordanceNode, ORDINARY_AFFORDANCE_SLOT_COUNT,
+    compile_affordance_graph_packet,
+};
 pub use agent_bridge::{
     AGENT_COMMIT_RECORD_SCHEMA_VERSION, AGENT_PENDING_TURN_SCHEMA_VERSION,
     AGENT_TURN_RESPONSE_SCHEMA_VERSION, AgentCommitTurnOptions, AgentExtraContact,
@@ -51,6 +61,10 @@ pub use backend_selection::{
     WORLD_BACKEND_SELECTION_FILENAME, WORLD_BACKEND_SELECTION_SCHEMA_VERSION,
     WorldBackendSelection, WorldTextBackend, WorldVisualBackend, backend_selection_path,
     load_world_backend_selection, save_world_backend_selection,
+};
+pub use belief_graph::{
+    BELIEF_GRAPH_PACKET_SCHEMA_VERSION, BELIEF_NODE_SCHEMA_VERSION, BeliefConfidence,
+    BeliefGraphPacket, BeliefGraphPolicy, BeliefHolder, BeliefNode, compile_belief_graph_packet,
 };
 pub use body_resource::{
     BODY_CONSTRAINT_SCHEMA_VERSION, BODY_RESOURCE_EVENT_SCHEMA_VERSION,
@@ -130,6 +144,10 @@ pub use models::{
     TurnChoice, TurnInputKind, TurnLogEntry, TurnSnapshot, VisibleState, WorldPremise, WorldRecord,
     WorldSeed, default_freeform_choice, default_turn_choices, normalize_turn_choices,
 };
+pub use narrative_style_state::{
+    NARRATIVE_STYLE_STATE_SCHEMA_VERSION, NarrativeStylePolicy, NarrativeStyleState, StyleVector,
+    compile_narrative_style_state,
+};
 pub use plot_thread::{
     PLOT_THREAD_AUDIT_FILENAME, PLOT_THREAD_AUDIT_SCHEMA_VERSION, PLOT_THREAD_EVENT_SCHEMA_VERSION,
     PLOT_THREAD_EVENTS_FILENAME, PLOT_THREAD_PACKET_SCHEMA_VERSION, PLOT_THREAD_SCHEMA_VERSION,
@@ -142,6 +160,11 @@ pub use plot_thread::{
 pub use projection_health::{
     PROJECTION_HEALTH_SCHEMA_VERSION, ProjectionComponentHealth, ProjectionHealthReport,
     ProjectionHealthStatus, build_projection_health_report, render_projection_health_report,
+};
+pub use prompt_context::{
+    PROMPT_CONTEXT_PACKET_SCHEMA_VERSION, PromptAdjudicationContext, PromptContextPacket,
+    PromptContextPolicy, PromptVisibleContext, assemble_prompt_context_packet,
+    extract_prompt_context_from_prompt,
 };
 pub use relationship_graph::{
     RELATIONSHIP_EDGE_SCHEMA_VERSION, RELATIONSHIP_GRAPH_EVENT_SCHEMA_VERSION,
@@ -251,4 +274,9 @@ pub use world_lore::{
     append_world_lore_update_plan, build_world_lore_from_updates,
     compile_world_lore_from_projection, compile_world_lore_packet, load_world_lore_state,
     load_world_lore_update_records, prepare_world_lore_update_plan, rebuild_world_lore,
+};
+pub use world_process_clock::{
+    WORLD_PROCESS_CLOCK_PACKET_SCHEMA_VERSION, WORLD_PROCESS_SCHEMA_VERSION, WorldProcess,
+    WorldProcessClockPacket, WorldProcessClockPolicy, WorldProcessTempo, WorldProcessVisibility,
+    compile_world_process_clock_packet,
 };
