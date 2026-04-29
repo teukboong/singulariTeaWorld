@@ -18,8 +18,8 @@ use std::time::Duration;
 use super::webgpt::{
     WebGptDispatchOutcome, WebGptDispatchRecord, WebGptImageDispatchRecord, WebGptImageSessionKind,
     dispatch_pending_agent_turn_via_webgpt, dispatch_visual_job_via_webgpt,
-    ensure_webgpt_lane_runtime_isolated, prewarm_webgpt_lane_sessions, safe_file_component,
-    visual_dispatch_dir_for_world,
+    ensure_webgpt_lane_runtime_isolated, existing_dispatch_is_retryable,
+    prewarm_webgpt_lane_sessions, safe_file_component, visual_dispatch_dir_for_world,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -633,7 +633,10 @@ fn visual_dispatch_record_exists_for_claim(
     let record_path = dispatch_dir.join(format!(
         "{slot_component}-{claim_component}-webgpt-image.json"
     ));
-    Ok(record_path.exists())
+    if !record_path.exists() {
+        return Ok(false);
+    }
+    Ok(!existing_dispatch_is_retryable(record_path.as_path())?)
 }
 
 fn webgpt_image_completed_event(record: &WebGptImageDispatchRecord) -> serde_json::Value {
@@ -702,6 +705,7 @@ mod tests {
         DEFAULT_WEBGPT_IMAGE_CDP_PORT, DEFAULT_WEBGPT_REFERENCE_IMAGE_CDP_PORT,
         DEFAULT_WEBGPT_TEXT_CDP_PORT,
     };
+    use singulari_world::{HostImageGenerationCall, VisualArtifactKind};
 
     #[test]
     fn one_shot_host_worker_skips_blocking_webgpt_prewarm() -> anyhow::Result<()> {
@@ -737,6 +741,117 @@ mod tests {
             emitted.is_empty(),
             "one-shot worker should dispatch directly without prewarm bookkeeping"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn failed_visual_dispatch_record_does_not_block_claim_retry() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let claim = visual_job_claim_for_test("failed");
+        write_visual_dispatch_record_for_test(temp.path(), &claim, "failed", None)?;
+
+        assert!(
+            !visual_dispatch_record_exists_for_claim(Some(temp.path()), &claim)?,
+            "failed image dispatch records must remain retryable"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn dispatching_visual_dispatch_record_blocks_duplicate_claim_retry() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let claim = visual_job_claim_for_test("dispatching");
+        write_visual_dispatch_record_for_test(temp.path(), &claim, "dispatching", None)?;
+
+        assert!(
+            visual_dispatch_record_exists_for_claim(Some(temp.path()), &claim)?,
+            "in-flight image dispatch records must still block duplicate sends"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn stale_dispatching_visual_dispatch_record_does_not_block_claim_retry() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let claim = visual_job_claim_for_test("stale-dispatching");
+        let stale_at = (chrono::Utc::now() - chrono::Duration::minutes(21)).to_rfc3339();
+        write_visual_dispatch_record_for_test(
+            temp.path(),
+            &claim,
+            "dispatching",
+            Some(stale_at.as_str()),
+        )?;
+
+        assert!(
+            !visual_dispatch_record_exists_for_claim(Some(temp.path()), &claim)?,
+            "stale image dispatching records must remain retryable"
+        );
+        Ok(())
+    }
+
+    fn visual_job_claim_for_test(claim_id: &str) -> singulari_world::VisualJobClaim {
+        let slot = "turn_cg:turn_0001".to_owned();
+        let destination_path = "/tmp/singulari-world-test-turn-cg.png".to_owned();
+        let prompt = "quiet rain over a stone road".to_owned();
+        let image_generation_call = HostImageGenerationCall {
+            capability: "image_generation".to_owned(),
+            slot: slot.clone(),
+            prompt: prompt.clone(),
+            destination_path: destination_path.clone(),
+            reference_paths: Vec::new(),
+            overwrite: true,
+        };
+        singulari_world::VisualJobClaim {
+            schema_version: "singulari.visual_job_claim.v1".to_owned(),
+            world_id: "stw_test".to_owned(),
+            slot: slot.clone(),
+            claim_id: claim_id.to_owned(),
+            claimed_by: "singulari_webgpt_image_worker".to_owned(),
+            claimed_at: "2026-04-30T00:00:00Z".to_owned(),
+            job: ImageGenerationJob {
+                tool: "image_generation".to_owned(),
+                image_generation_call,
+                slot,
+                artifact_kind: VisualArtifactKind::SceneCg,
+                canonical_use: "turn_cg".to_owned(),
+                display_allowed: true,
+                reference_allowed: false,
+                prompt,
+                destination_path,
+                reference_asset_urls: Vec::new(),
+                reference_paths: Vec::new(),
+                overwrite: true,
+                register_policy: "turn_cg".to_owned(),
+            },
+            claim_path: "/tmp/singulari-world-test-claim.json".to_owned(),
+        }
+    }
+
+    fn write_visual_dispatch_record_for_test(
+        store_root: &Path,
+        claim: &singulari_world::VisualJobClaim,
+        status: &str,
+        dispatched_at: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let dispatch_dir =
+            visual_dispatch_dir_for_world(Some(store_root), claim.world_id.as_str())?;
+        fs::create_dir_all(dispatch_dir.as_path())?;
+        let slot_component = safe_file_component(claim.slot.as_str());
+        let claim_component = safe_file_component(claim.claim_id.as_str());
+        let record_path = dispatch_dir.join(format!(
+            "{slot_component}-{claim_component}-webgpt-image.json"
+        ));
+        let mut record = serde_json::json!({
+            "schema_version": "singulari.webgpt_image_dispatch_record.v1",
+            "status": status,
+            "world_id": claim.world_id,
+            "slot": claim.slot,
+            "claim_id": claim.claim_id,
+        });
+        if let Some(dispatched_at) = dispatched_at {
+            record["dispatched_at"] = serde_json::json!(dispatched_at);
+        }
+        fs::write(record_path, serde_json::to_vec_pretty(&record)?)?;
         Ok(())
     }
 }

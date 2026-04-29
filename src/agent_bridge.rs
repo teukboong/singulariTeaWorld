@@ -1105,9 +1105,10 @@ fn audit_agent_resolution_proposal(
 
 fn resolution_critique_error(critique: &ResolutionCritique) -> anyhow::Error {
     anyhow::anyhow!(
-        "resolution proposal audit failed: failure_kind={:?}, message={}",
+        "resolution proposal audit failed: failure_kind={:?}, message={}, rejected_refs={:?}",
         critique.failure_kind,
-        critique.message
+        critique.message,
+        critique.rejected_refs
     )
 }
 

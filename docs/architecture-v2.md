@@ -64,6 +64,16 @@ narratively intelligent outcomes, and draft Korean VN prose. Rust should audit
 that proposal against hard laws, evidence refs, visibility, gates, causality,
 and rebuildable event projections before committing it as world truth.
 
+## Scene Direction
+
+After resolution authority, the next quality layer should be
+[Scene Director / Dramatic Pacing](scene-director-dramatic-pacing.md). The
+runtime should track what dramatic job each turn performs for the current scene:
+probe, escalation, complication, reveal, cost, decompression, transition, or
+cliffhanger. The LLM still writes the Korean VN prose and chooses expressive
+execution; Rust tracks beat history, repetition budgets, tension streaks,
+scene exit pressure, and safe player-visible pacing hints.
+
 ## Runtime Capability Profiles
 
 Runtime surfaces should describe their authority through

@@ -36,6 +36,7 @@ pub mod response_context;
 pub mod resume;
 pub mod revival;
 pub mod runtime_profile;
+pub mod scene_director;
 pub mod scene_pressure;
 pub mod sqlite;
 pub mod start;
@@ -284,6 +285,12 @@ pub use revival::{
 pub use runtime_profile::{
     RUNTIME_CAPABILITY_PROFILE_SCHEMA_VERSION, RuntimeCapability, RuntimeCapabilityBoundary,
     RuntimeCapabilityProfile, RuntimeSurfaceKind,
+};
+pub use scene_director::{
+    DramaticBeat, DramaticBeatKind, DramaticBeatRecommendation, ParagraphBudgetHint,
+    SCENE_DIRECTOR_PACKET_SCHEMA_VERSION, SceneArc, SceneDirectorPacket, SceneDirectorPolicy,
+    SceneExitCondition, ScenePhase, TensionLevel, TransitionPressure,
+    compile_scene_director_packet,
 };
 pub use scene_pressure::{
     ACTIVE_SCENE_PRESSURES_FILENAME, SCENE_PRESSURE_AUDIT_FILENAME,

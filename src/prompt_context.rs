@@ -8,6 +8,7 @@ use crate::prompt_context_budget::{
     compile_prompt_context_budget_report,
 };
 use crate::revival::{AgentRevivalCompileOptions, build_agent_revival_packet};
+use crate::scene_director::{SceneDirectorPacket, compile_scene_director_packet};
 use crate::scene_pressure::ScenePressurePacket;
 use crate::turn_context::{TurnContextPacket, assemble_turn_context_packet};
 use crate::world_process_clock::{WorldProcessClockPacket, compile_world_process_clock_packet};
@@ -44,6 +45,7 @@ pub struct PromptVisibleContext {
     pub affordance_graph: Value,
     pub belief_graph: Value,
     pub world_process_clock: Value,
+    pub active_scene_director: Value,
     pub narrative_style_state: Value,
     pub active_character_text_design: Value,
     pub active_change_ledger: Value,
@@ -176,6 +178,7 @@ pub fn assemble_prompt_context_packet(
         known_facts: &prompt_memory.known_facts,
         selected_memory_items: &prompt_memory.selected_memory_items,
         scene_pressure: &scene_pressure,
+        active_pattern_debt: &prompt_memory.active_pattern_debt,
         body_resource: &body_resource,
         location_graph: &location_graph,
         private_context: &private_context,
@@ -202,6 +205,7 @@ pub fn assemble_prompt_context_packet(
         affordance_graph: &derived.affordance_graph,
         belief_graph: &derived.belief_graph,
         world_process_clock: &derived.world_process_clock,
+        scene_director: &derived.scene_director,
     })?;
     let adjudication_context = compile_adjudication_context(AdjudicationContextSource {
         memory,
@@ -271,6 +275,7 @@ struct DerivedContextPackets {
     affordance_graph: AffordanceGraphPacket,
     belief_graph: BeliefGraphPacket,
     world_process_clock: WorldProcessClockPacket,
+    scene_director: SceneDirectorPacket,
 }
 
 #[derive(Clone, Copy)]
@@ -279,6 +284,7 @@ struct CompileDerivedContextSource<'a> {
     known_facts: &'a Value,
     selected_memory_items: &'a Value,
     scene_pressure: &'a ScenePressurePacket,
+    active_pattern_debt: &'a Value,
     body_resource: &'a BodyResourcePacket,
     location_graph: &'a LocationGraphPacket,
     private_context: &'a crate::agent_bridge::AgentPrivateAdjudicationContext,
@@ -287,26 +293,36 @@ struct CompileDerivedContextSource<'a> {
 fn compile_derived_context_packets(
     source: CompileDerivedContextSource<'_>,
 ) -> DerivedContextPackets {
+    let affordance_graph = compile_affordance_graph_packet(
+        source.turn_context.world_id.as_str(),
+        source.turn_context.turn_id.as_str(),
+        source.scene_pressure,
+        source.body_resource,
+        source.location_graph,
+    );
+    let belief_graph = compile_belief_graph_packet(
+        source.turn_context.world_id.as_str(),
+        source.turn_context.turn_id.as_str(),
+        source.known_facts,
+        source.selected_memory_items,
+    );
+    let world_process_clock = compile_world_process_clock_packet(
+        source.turn_context.world_id.as_str(),
+        source.turn_context.turn_id.as_str(),
+        source.scene_pressure,
+        source.private_context,
+    );
+    let scene_director = compile_scene_director_packet(
+        source.turn_context.world_id.as_str(),
+        source.turn_context.turn_id.as_str(),
+        source.scene_pressure,
+        source.active_pattern_debt,
+    );
     DerivedContextPackets {
-        affordance_graph: compile_affordance_graph_packet(
-            source.turn_context.world_id.as_str(),
-            source.turn_context.turn_id.as_str(),
-            source.scene_pressure,
-            source.body_resource,
-            source.location_graph,
-        ),
-        belief_graph: compile_belief_graph_packet(
-            source.turn_context.world_id.as_str(),
-            source.turn_context.turn_id.as_str(),
-            source.known_facts,
-            source.selected_memory_items,
-        ),
-        world_process_clock: compile_world_process_clock_packet(
-            source.turn_context.world_id.as_str(),
-            source.turn_context.turn_id.as_str(),
-            source.scene_pressure,
-            source.private_context,
-        ),
+        affordance_graph,
+        belief_graph,
+        world_process_clock,
+        scene_director,
     }
 }
 
@@ -349,6 +365,7 @@ struct VisibleContextSource<'a> {
     affordance_graph: &'a AffordanceGraphPacket,
     belief_graph: &'a BeliefGraphPacket,
     world_process_clock: &'a WorldProcessClockPacket,
+    scene_director: &'a SceneDirectorPacket,
 }
 
 fn compile_visible_context(source: VisibleContextSource<'_>) -> Result<PromptVisibleContext> {
@@ -363,6 +380,7 @@ fn compile_visible_context(source: VisibleContextSource<'_>) -> Result<PromptVis
         affordance_graph: serde_json::to_value(source.affordance_graph)?,
         belief_graph: serde_json::to_value(source.belief_graph)?,
         world_process_clock: serde_json::to_value(&source.world_process_clock.visible_processes)?,
+        active_scene_director: serde_json::to_value(source.scene_director)?,
         active_character_text_design: capsule_covered_prompt_projection(
             "active_character_text_design",
             "character_text_design",
@@ -647,6 +665,27 @@ mod tests {
         assert!(!visible.contains("secret timer"));
         assert!(adjudication.contains("secret:selected"));
         assert!(adjudication.contains("secret timer"));
+        Ok(())
+    }
+
+    #[test]
+    fn prompt_context_includes_player_visible_scene_director_packet() -> anyhow::Result<()> {
+        let context = assemble_prompt_context_packet(&sample_turn_context())?;
+        let director = &context.visible_context.active_scene_director;
+
+        assert_eq!(
+            director
+                .pointer("/schema_version")
+                .and_then(serde_json::Value::as_str),
+            Some(crate::scene_director::SCENE_DIRECTOR_PACKET_SCHEMA_VERSION)
+        );
+        assert_eq!(
+            director
+                .pointer("/compiler_policy/mode")
+                .and_then(serde_json::Value::as_str),
+            Some("advisory_only")
+        );
+        assert!(!serde_json::to_string(director)?.contains("secret timer"));
         Ok(())
     }
 

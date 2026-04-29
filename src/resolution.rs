@@ -721,6 +721,7 @@ fn collect_visible_refs(context: &PromptContextPacket) -> Result<BTreeSet<String
 
     collect_string_refs_from_value(&visible.known_facts, &mut refs);
     collect_string_refs_from_value(&visible.active_plot_threads, &mut refs);
+    collect_string_refs_from_value(&visible.selected_context_capsules, &mut refs);
     collect_string_refs_from_value(&visible.selected_memory_items, &mut refs);
     Ok(refs)
 }
@@ -957,6 +958,40 @@ mod tests {
     }
 
     #[test]
+    fn accepts_selected_context_capsule_refs_as_visible_resolution_refs() {
+        let mut context = sample_context();
+        context.visible_context.selected_context_capsules = serde_json::json!({
+            "selected_capsules": [{
+                "capsule_id": "relationship:rel_guard_distance",
+                "kind": "relationship",
+                "reason": "current_goal_match",
+                "body": {
+                    "payload": {
+                        "edge_id": "rel:guard->protagonist:distance",
+                        "source_entity_id": "char:guard",
+                        "target_entity_id": "char:protagonist"
+                    }
+                }
+            }],
+            "rejected_capsules": [],
+            "budget_report": {}
+        });
+        let mut proposal = sample_proposal();
+        proposal.gate_results.push(GateResult {
+            gate_kind: GateKind::SocialPermission,
+            gate_ref: "rel:guard->protagonist:distance".to_owned(),
+            visibility: ResolutionVisibility::PlayerVisible,
+            status: GateStatus::Softened,
+            reason: "문지기와 주인공 사이의 거리가 조금 좁혀진다.".to_owned(),
+            evidence_refs: vec!["rel:guard->protagonist:distance".to_owned()],
+        });
+
+        if let Err(critique) = audit_resolution_proposal(&context, &proposal) {
+            panic!("selected context capsule ref should pass audit: {critique:?}");
+        }
+    }
+
+    #[test]
     fn rejects_ordinary_choice_without_affordance_grounding() {
         let context = sample_context();
         let mut proposal = sample_proposal();
@@ -1137,6 +1172,7 @@ mod tests {
                     next_tick_contract: "시간이 지나면 문이 닫힌다.".to_owned(),
                     source_refs: vec!["pressure:social:gate".to_owned()],
                 }]),
+                active_scene_director: Value::Null,
                 narrative_style_state: Value::Null,
                 active_character_text_design: Value::Null,
                 active_change_ledger: Value::Null,

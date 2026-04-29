@@ -249,6 +249,8 @@ const AGENT_TURN_RESPONSE_SCHEMA_GUIDE: &str = r#"AgentTurnResponse 스키마:
 ```
 - next_choices는 서사 생성과 같은 응답에서 반드시 함께 작성한다. 별도 선택지 재생성 턴을 만들지 않는다.
 - resolution_proposal은 LLM 지능이 해석한 판정 제안이고, Rust가 commit 전에 audit한다. 가능한 한 작성하되, prompt_context에 없는 ref나 evidence_refs 없는 durable effect를 넣지 않는다.
+- resolution_proposal의 모든 `target_refs`, `pressure_refs`, `gate_ref`, `grounding_ref`, `process_ref`, `effect.target_ref`는 prompt_context JSON 안에 실제 문자열로 존재하는 ref만 쓴다. 설명용 JSON pointer(`visible_context...`)나 새로 만든 관계/장소/인물 ref는 쓰지 않는다.
+- selected_context_capsules와 selected_memory_items 안의 `source_id`, `edge_id`, `capsule_id`, `entity_id`, `location_id`, `pressure_id`, `affordance_id`처럼 실제 문자열로 들어 있는 ref는 evidence로 쓸 수 있다. 단 rejected_capsules에만 있는 ref는 쓰지 않는다.
 - resolution_proposal의 visible field에는 hidden/adjudication-only 세부 내용을 절대 쓰지 않는다.
 - resolution_proposal.next_choice_plan은 slot 1..7을 모두 포함한다. ordinary_affordance slot 1..5는 prompt_context.visible_context.affordance_graph의 같은 slot affordance_id를 grounding_ref/evidence_refs에 넣는다. slot 6은 freeform, slot 7은 delegated_judgment다.
 - actor_goal_events/actor_move_events는 중요한 NPC가 실제 장면에서 보인 목표와 움직임만 기록한다. actor_ref는 기존 relationship/entity ref 또는 이번 응답의 entity_updates로 생성한 char:id여야 한다. hidden 목표는 visible_scene/next_choices에 동기로 해설하지 말고 관찰 가능한 행동으로만 암시한다.
@@ -327,6 +329,7 @@ pub(super) fn build_webgpt_turn_prompt(prompt_context: &PromptContextPacket) -> 
 - prompt_context.visible_context.affordance_graph는 slot 1..5의 행동 허가표다. next_choices 1..5는 각 slot의 affordance_kind/action_contract/source_refs/forbidden_shortcuts를 지켜 장면별 문구로 다시 써라. affordance_id나 source_refs 자체를 선택지에 노출하지 마라.
 - prompt_context.visible_context.belief_graph는 주인공과 player-visible narrator가 확정적으로 아는 것의 경계다. belief node가 없는 원인, 정체, 배후, 과거사, 세계 규칙은 확정 서술하지 말고 단서나 불확실성으로만 남겨라.
 - prompt_context.visible_context.world_process_clock는 보이는 세계 진행 압력이다. 다음 턴으로 넘기면 악화, 완화, 전환, 해소 중 하나가 일어날 수 있음을 문단 압력과 선택지 비용에 반영해라.
+- prompt_context.visible_context.active_scene_director는 장면 박자 권고다. recommended_next_beats/forbidden_repetition/paragraph_budget_hint를 사용해 이번 턴 기능을 바꾸되, beat taxonomy나 Scene Director 용어를 player-visible text에 노출하지 마라. 이 packet은 canon source가 아니며 새 사실, hidden motive, 장소, 결과를 만들 권한이 없다.
 - prompt_context.visible_context.narrative_style_state는 서사 문체와 문단 박자 계약이다. 소재나 설정을 만들지 말고 밀도, 문장 압력, 대사 호흡, 번역체 방지에만 적용해라.
 - prompt_context.visible_context.active_character_text_design은 캐릭터별 화법/어미/어투/제스처/습관/drift 계약이다. 전역 문체와 섞지 말고, 인물이 말하거나 행동할 때만 자연스럽게 반영해라.
 - prompt_context.visible_context.active_change_ledger는 플레이어 행동으로 변한 세계/관계/압력의 요약 장부다. 오래된 원시 사건보다 active_changes의 before/after/cause_turns를 우선해서 현재 장면의 여파로 반영해라.

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::Serialize;
 use singulari_world::{
     AgentCommitTurnOptions, AgentTurnResponse, CompilePromptContextPacketOptions,
@@ -33,6 +33,7 @@ use image::{
 pub(crate) const DEFAULT_WEBGPT_TEXT_CDP_PORT: u16 = 9238;
 pub(crate) const DEFAULT_WEBGPT_IMAGE_CDP_PORT: u16 = 9239;
 pub(crate) const DEFAULT_WEBGPT_REFERENCE_IMAGE_CDP_PORT: u16 = 9240;
+const STALE_DISPATCH_RETRY_AFTER_SECS: i64 = 20 * 60;
 const WEBGPT_TEXT_JOB_OWNER: &str = "webgpt_host_worker";
 
 fn ensure_control_safe_runtime_value(field: &str, value: &str) -> Result<()> {
@@ -236,7 +237,7 @@ pub(super) fn dispatch_pending_agent_turn_via_webgpt(
     fs::create_dir_all(&dispatch_dir)
         .with_context(|| format!("failed to create {}", dispatch_dir.display()))?;
     let record_path = dispatch_dir.join(format!("{}-webgpt.json", pending.turn_id));
-    if record_path.exists() {
+    if record_path.exists() && !existing_dispatch_is_retryable(record_path.as_path())? {
         return Ok(WebGptDispatchOutcome::AlreadyDispatched(
             record_path.display().to_string(),
         ));
@@ -1409,11 +1410,32 @@ fn write_dispatch_claim(path: &Path, claim: &serde_json::Value) -> Result<bool> 
     }
 }
 
-fn existing_dispatch_is_retryable(path: &Path) -> Result<bool> {
+pub(super) fn existing_dispatch_is_retryable(path: &Path) -> Result<bool> {
     let Some(value) = read_json_value_if_present(path)? else {
         return Ok(false);
     };
-    Ok(value.get("status").and_then(serde_json::Value::as_str) == Some("failed"))
+    let status = value.get("status").and_then(serde_json::Value::as_str);
+    let error = value
+        .get("error")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    Ok(matches!(status, Some("failed"))
+        || (matches!(status, Some("dispatching")) && dispatch_record_is_stale(&value)?)
+        || (matches!(status, Some("commit_failed")) && is_repairable_webgpt_commit_error(error)))
+}
+
+fn dispatch_record_is_stale(value: &serde_json::Value) -> Result<bool> {
+    let Some(dispatched_at) = value
+        .get("dispatched_at")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Ok(false);
+    };
+    let dispatched_at = DateTime::parse_from_rfc3339(dispatched_at)
+        .with_context(|| format!("invalid dispatch timestamp: {dispatched_at}"))?
+        .with_timezone(&Utc);
+    Ok(Utc::now().signed_duration_since(dispatched_at)
+        >= ChronoDuration::seconds(STALE_DISPATCH_RETRY_AFTER_SECS))
 }
 
 pub(super) fn safe_file_component(value: &str) -> String {
@@ -1490,6 +1512,62 @@ mod tests {
         assert!(!write_dispatch_claim(&path, &claim)?);
         let value: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
         assert_eq!(value["status"], serde_json::json!("completed"));
+        Ok(())
+    }
+
+    #[test]
+    fn dispatch_claim_replaces_repairable_commit_failed_record() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("turn_0001-webgpt.json");
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema_version": "singulari.webgpt_dispatch_record.v1",
+                "status": "commit_failed",
+                "turn_id": "turn_0001",
+                "error": "resolution proposal audit failed: failure_kind=TargetRef, message=resolution proposal references an unknown or forbidden ref",
+            }))?,
+        )?;
+
+        let claim = serde_json::json!({
+            "schema_version": "singulari.webgpt_dispatch_record.v1",
+            "status": "dispatching",
+            "turn_id": "turn_0001",
+            "attempt": "retry",
+        });
+
+        assert!(write_dispatch_claim(&path, &claim)?);
+        let value: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
+        assert_eq!(value["status"], serde_json::json!("dispatching"));
+        assert_eq!(value["attempt"], serde_json::json!("retry"));
+        Ok(())
+    }
+
+    #[test]
+    fn dispatch_claim_replaces_stale_dispatching_record() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("turn_0001-webgpt.json");
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema_version": "singulari.webgpt_dispatch_record.v1",
+                "status": "dispatching",
+                "turn_id": "turn_0001",
+                "dispatched_at": (Utc::now() - ChronoDuration::minutes(21)).to_rfc3339(),
+            }))?,
+        )?;
+
+        let claim = serde_json::json!({
+            "schema_version": "singulari.webgpt_dispatch_record.v1",
+            "status": "dispatching",
+            "turn_id": "turn_0001",
+            "attempt": "retry",
+        });
+
+        assert!(write_dispatch_claim(&path, &claim)?);
+        let value: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
+        assert_eq!(value["status"], serde_json::json!("dispatching"));
+        assert_eq!(value["attempt"], serde_json::json!("retry"));
         Ok(())
     }
 
