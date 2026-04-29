@@ -122,7 +122,10 @@ Current implementation note: the first extraction step now lives under
 `src/runtime/`. `runtime::host_worker` owns the loop, lane dispatch, events, and
 visual job claiming; `runtime::webgpt` owns WebGPT MCP runtime isolation,
 conversation bindings, prompt construction, dispatch records, and adapter
-tests.
+tests. The WebGPT adapter is now split into focused submodules:
+`webgpt::prompt` builds the backend prompt contract, `webgpt::image` owns visual
+job dispatch and session-kind validation, and `webgpt::json_extract` keeps
+answer parsing separate from transport.
 
 ## Non-Goals
 
