@@ -1,6 +1,9 @@
 #![allow(clippy::missing_errors_doc)]
 
 use crate::agent_bridge::AgentTurnResponse;
+use crate::consequence_spine::{
+    ActiveConsequence, ConsequenceKind, ConsequenceSeverity, ConsequenceSpinePacket,
+};
 use crate::relationship_graph::RelationshipGraphPacket;
 use crate::response_context::ContextVisibility;
 use crate::store::{append_jsonl, read_json, write_json};
@@ -274,6 +277,107 @@ pub fn load_actor_agency_state(
 }
 
 #[must_use]
+pub fn merge_consequence_actor_agency(
+    mut packet: ActorAgencyPacket,
+    consequences: &ConsequenceSpinePacket,
+) -> ActorAgencyPacket {
+    let mut existing_goals = packet
+        .active_goals
+        .iter()
+        .map(|goal| goal.goal_id.clone())
+        .collect::<BTreeSet<_>>();
+    for consequence in &consequences.active {
+        if packet.active_goals.len() >= packet.compiler_policy.active_goal_budget {
+            break;
+        }
+        if !consequence_should_drive_actor(consequence) {
+            continue;
+        }
+        let Some(actor_ref) = actor_ref_from_consequence(consequence) else {
+            continue;
+        };
+        let goal_id = format!("goal:consequence:{}", consequence.consequence_id);
+        if !existing_goals.insert(goal_id.clone()) {
+            continue;
+        }
+        packet.active_goals.push(ActorGoal {
+            schema_version: ACTOR_GOAL_SCHEMA_VERSION.to_owned(),
+            actor_ref,
+            goal_id,
+            visibility: ContextVisibility::PlayerVisible,
+            desire: actor_desire_from_consequence(consequence),
+            fear_or_constraint: consequence.player_visible_signal.clone(),
+            current_leverage: consequence.linked_projection_refs.clone(),
+            pressure_refs: vec![format!(
+                "pressure:consequence:{}",
+                consequence.consequence_id
+            )],
+            evidence_refs: consequence.source_refs.clone(),
+            source_event_id: format!("consequence:{}", consequence.consequence_id),
+        });
+    }
+    if !consequences.active.is_empty() {
+        "materialized_from_actor_events_and_consequences_v1"
+            .clone_into(&mut packet.compiler_policy.source);
+    }
+    packet
+}
+
+fn consequence_should_drive_actor(consequence: &ActiveConsequence) -> bool {
+    matches!(
+        consequence.kind,
+        ConsequenceKind::SocialDebt
+            | ConsequenceKind::TrustShift
+            | ConsequenceKind::SuspicionRaised
+            | ConsequenceKind::AlarmRaised
+            | ConsequenceKind::MoralDebt
+            | ConsequenceKind::OpportunityLost
+    ) || matches!(
+        consequence.severity,
+        ConsequenceSeverity::Major | ConsequenceSeverity::Critical
+    )
+}
+
+fn actor_ref_from_consequence(consequence: &ActiveConsequence) -> Option<String> {
+    consequence
+        .linked_entity_refs
+        .iter()
+        .chain(consequence.linked_projection_refs.iter())
+        .find_map(|reference| actor_ref_from_text(reference))
+}
+
+fn actor_ref_from_text(reference: &str) -> Option<String> {
+    if reference.starts_with("char:") {
+        return Some(reference.to_owned());
+    }
+    reference
+        .find("char:")
+        .map(|start| {
+            reference[start..]
+                .split(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, ':' | '_')))
+                .next()
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .filter(|value| !value.is_empty())
+}
+
+fn actor_desire_from_consequence(consequence: &ActiveConsequence) -> String {
+    match consequence.kind {
+        ConsequenceKind::SuspicionRaised | ConsequenceKind::AlarmRaised => {
+            "이전 선택의 여파를 확인하고 대응한다."
+        }
+        ConsequenceKind::SocialDebt | ConsequenceKind::MoralDebt => {
+            "남은 빚이나 손상을 자기 방식으로 회수하려 한다."
+        }
+        ConsequenceKind::TrustShift => "바뀐 신뢰를 기준으로 거리를 조정한다.",
+        ConsequenceKind::OpportunityLost => "닫힌 기회 때문에 다른 압박을 만든다.",
+        _ => "선택의 여파에 따라 행동 방향을 바꾼다.",
+    }
+    .to_owned()
+}
+
+#[must_use]
 pub fn build_actor_agency_from_events(
     base_packet: &ActorAgencyPacket,
     goal_records: &[ActorGoalEventRecord],
@@ -523,6 +627,43 @@ mod tests {
         assert!(format!("{error:#}").contains("unknown actor_ref=char:guard"));
     }
 
+    #[test]
+    fn consequence_creates_actor_goal_leverage() {
+        let packet = merge_consequence_actor_agency(
+            ActorAgencyPacket {
+                world_id: "stw_actor".to_owned(),
+                turn_id: "turn_0004".to_owned(),
+                ..ActorAgencyPacket::default()
+            },
+            &crate::consequence_spine::ConsequenceSpinePacket {
+                world_id: "stw_actor".to_owned(),
+                turn_id: "turn_0004".to_owned(),
+                active: vec![crate::consequence_spine::ActiveConsequence {
+                    schema_version: crate::consequence_spine::CONSEQUENCE_SCHEMA_VERSION.to_owned(),
+                    consequence_id: "consequence:turn_0003:guard".to_owned(),
+                    origin_turn_id: "turn_0003".to_owned(),
+                    kind: ConsequenceKind::SuspicionRaised,
+                    scope: crate::consequence_spine::ConsequenceScope::Relationship,
+                    status: crate::consequence_spine::ConsequenceStatus::Active,
+                    severity: ConsequenceSeverity::Major,
+                    summary: "문지기의 의심이 남았다.".to_owned(),
+                    player_visible_signal: "문지기가 의심을 거두지 않는다.".to_owned(),
+                    source_refs: vec!["choice:1".to_owned()],
+                    linked_entity_refs: Vec::new(),
+                    linked_projection_refs: vec!["rel:char:guard->player:suspicious".to_owned()],
+                    expected_return:
+                        crate::consequence_spine::ConsequenceReturnWindow::CurrentScene,
+                    decay: crate::consequence_spine::ConsequenceDecay::default(),
+                }],
+                ..crate::consequence_spine::ConsequenceSpinePacket::default()
+            },
+        );
+
+        assert_eq!(packet.active_goals.len(), 1);
+        assert_eq!(packet.active_goals[0].actor_ref, "char:guard");
+        assert!(packet.active_goals[0].pressure_refs[0].starts_with("pressure:consequence:"));
+    }
+
     fn sample_relationship_graph() -> RelationshipGraphPacket {
         RelationshipGraphPacket {
             schema_version: crate::relationship_graph::RELATIONSHIP_GRAPH_PACKET_SCHEMA_VERSION
@@ -551,6 +692,7 @@ mod tests {
             turn_id: "turn_0003".to_owned(),
             resolution_proposal: None,
             scene_director_proposal: None,
+            consequence_proposal: None,
             visible_scene: NarrativeScene {
                 schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                 speaker: None,

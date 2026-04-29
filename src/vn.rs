@@ -1004,6 +1004,11 @@ fn condition_row(source: &VnStatusRowSource<'_>) -> VnStatusRow {
                 "장면 흐름",
                 scene_flow_status(source.dashboard.status.as_str(), source.open_questions),
             ),
+            status_cell(
+                "🪢",
+                "여파",
+                consequence_status(source.dashboard.status.as_str(), source.open_questions),
+            ),
             status_cell("🕯️", "희망", hope_status(source.open_questions)),
             status_cell("⚠️", "치명 상태", critical_status(source.body)),
         ],
@@ -1131,6 +1136,21 @@ fn scene_flow_status(status: &str, open_questions: &[String]) -> String {
         "압박이 좁혀지는 중".to_owned()
     } else {
         "현재 압력을 고르는 중".to_owned()
+    }
+}
+
+fn consequence_status(status: &str, open_questions: &[String]) -> String {
+    if status.contains("대가") || status.contains("비용") || status.contains("부상") {
+        "선택의 여파가 남아 있음".to_owned()
+    } else if status.contains("의심") || status.contains("경계") || status.contains("빚") {
+        "방금 만든 빚이 장면을 밀고 있음".to_owned()
+    } else if open_questions
+        .iter()
+        .any(|question| question.contains("왜") || question.contains("어떻게"))
+    {
+        "이전 행동의 흔적이 돌아오는 중".to_owned()
+    } else {
+        "여파는 잠잠하지만 기록됨".to_owned()
     }
 }
 

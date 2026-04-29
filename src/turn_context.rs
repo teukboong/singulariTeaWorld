@@ -90,6 +90,7 @@ mod tests {
     use crate::body_resource::BodyResourcePacket;
     use crate::change_ledger::ChangeLedgerPacket;
     use crate::character_text_design::CharacterTextDesignPacket;
+    use crate::consequence_spine::ConsequenceSpinePacket;
     use crate::context_capsule::ContextCapsuleSelection;
     use crate::extra_memory::ExtraMemoryPacket;
     use crate::location_graph::LocationGraphPacket;
@@ -134,6 +135,7 @@ mod tests {
                 active_player_intent_trace: PlayerIntentTracePacket::default(),
                 active_narrative_style_state: NarrativeStyleState::default(),
                 active_scene_director: SceneDirectorPacket::default(),
+                active_consequence_spine: ConsequenceSpinePacket::default(),
                 active_turn_retrieval_controller: TurnRetrievalControllerPacket::default(),
                 selected_context_capsules: ContextCapsuleSelection::default(),
                 active_autobiographical_index: AutobiographicalIndexPacket::default(),

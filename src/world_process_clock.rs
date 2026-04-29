@@ -1,6 +1,9 @@
 #![allow(clippy::missing_errors_doc)]
 
 use crate::agent_bridge::AgentPrivateAdjudicationContext;
+use crate::consequence_spine::{
+    ActiveConsequence, ConsequenceKind, ConsequenceSeverity, ConsequenceSpinePacket,
+};
 use crate::resolution::{ResolutionProposal, ResolutionVisibility};
 use crate::scene_pressure::{
     ScenePressure, ScenePressureEventPlan, ScenePressureKind, ScenePressurePacket,
@@ -238,6 +241,74 @@ pub fn load_world_process_clock_state(
         return read_json(&path);
     }
     Ok(base_packet)
+}
+
+#[must_use]
+pub fn merge_consequence_world_processes(
+    mut packet: WorldProcessClockPacket,
+    consequences: &ConsequenceSpinePacket,
+) -> WorldProcessClockPacket {
+    let mut known = packet
+        .visible_processes
+        .iter()
+        .map(|process| process.process_id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    for consequence in &consequences.active {
+        if packet.visible_processes.len() >= PERSISTED_PROCESS_BUDGET {
+            break;
+        }
+        if !consequence_should_drive_process(consequence) {
+            continue;
+        }
+        let process = process_from_consequence(consequence);
+        if known.insert(process.process_id.clone()) {
+            packet.visible_processes.push(process);
+        }
+    }
+    if !consequences.active.is_empty() {
+        "materialized_from_world_process_events_and_consequences_v1"
+            .clone_into(&mut packet.compiler_policy.source);
+    }
+    packet
+}
+
+fn consequence_should_drive_process(consequence: &ActiveConsequence) -> bool {
+    matches!(
+        consequence.kind,
+        ConsequenceKind::AlarmRaised
+            | ConsequenceKind::LocationAccessChanged
+            | ConsequenceKind::ProcessAccelerated
+            | ConsequenceKind::ProcessDelayed
+            | ConsequenceKind::OpportunityOpened
+            | ConsequenceKind::OpportunityLost
+            | ConsequenceKind::MoralDebt
+    ) || matches!(
+        consequence.severity,
+        ConsequenceSeverity::Major | ConsequenceSeverity::Critical
+    )
+}
+
+fn process_from_consequence(consequence: &ActiveConsequence) -> WorldProcess {
+    WorldProcess {
+        schema_version: WORLD_PROCESS_SCHEMA_VERSION.to_owned(),
+        process_id: format!("process:consequence:{}", consequence.consequence_id),
+        visibility: WorldProcessVisibility::PlayerVisible,
+        tempo: tempo_from_consequence_severity(consequence.severity),
+        summary: consequence.player_visible_signal.clone(),
+        next_tick_contract:
+            "Consequence process should tick only when new player action, time passage, or pressure evidence touches it."
+                .to_owned(),
+        source_refs: vec![consequence.consequence_id.clone()],
+    }
+}
+
+const fn tempo_from_consequence_severity(severity: ConsequenceSeverity) -> WorldProcessTempo {
+    match severity {
+        ConsequenceSeverity::Trace | ConsequenceSeverity::Minor => WorldProcessTempo::Ambient,
+        ConsequenceSeverity::Moderate => WorldProcessTempo::Soon,
+        ConsequenceSeverity::Major => WorldProcessTempo::Immediate,
+        ConsequenceSeverity::Critical => WorldProcessTempo::Crisis,
+    }
 }
 
 fn load_world_process_event_records(world_dir: &Path) -> Result<Vec<WorldProcessEventRecord>> {
@@ -479,5 +550,45 @@ mod tests {
         assert_eq!(plan.records.len(), 1);
         assert_eq!(plan.records[0].process_id, "process:visible_pressure:00");
         assert_eq!(plan.records[0].tempo, WorldProcessTempo::Immediate);
+    }
+
+    #[test]
+    fn consequence_creates_visible_world_process() {
+        let packet = merge_consequence_world_processes(
+            WorldProcessClockPacket {
+                world_id: "stw_clock".to_owned(),
+                turn_id: "turn_0005".to_owned(),
+                ..WorldProcessClockPacket::default()
+            },
+            &ConsequenceSpinePacket {
+                world_id: "stw_clock".to_owned(),
+                turn_id: "turn_0005".to_owned(),
+                active: vec![ActiveConsequence {
+                    schema_version: crate::consequence_spine::CONSEQUENCE_SCHEMA_VERSION.to_owned(),
+                    consequence_id: "consequence:turn_0004:alarm".to_owned(),
+                    origin_turn_id: "turn_0004".to_owned(),
+                    kind: ConsequenceKind::AlarmRaised,
+                    scope: crate::consequence_spine::ConsequenceScope::WorldProcess,
+                    status: crate::consequence_spine::ConsequenceStatus::Active,
+                    severity: ConsequenceSeverity::Critical,
+                    summary: "경계가 올라갔다.".to_owned(),
+                    player_visible_signal: "수색이 바로 따라붙는다.".to_owned(),
+                    source_refs: vec!["turn:0004".to_owned()],
+                    linked_entity_refs: Vec::new(),
+                    linked_projection_refs: Vec::new(),
+                    expected_return: crate::consequence_spine::ConsequenceReturnWindow::NextTurn,
+                    decay: crate::consequence_spine::ConsequenceDecay::default(),
+                }],
+                ..ConsequenceSpinePacket::default()
+            },
+        );
+
+        assert_eq!(packet.visible_processes.len(), 1);
+        assert_eq!(packet.visible_processes[0].tempo, WorldProcessTempo::Crisis);
+        assert!(
+            packet.visible_processes[0]
+                .process_id
+                .starts_with("process:consequence:")
+        );
     }
 }

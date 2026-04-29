@@ -1,6 +1,7 @@
 use crate::actor_agency::{
     ActorAgencyPacket, AgentActorGoalUpdate, AgentActorMoveUpdate, append_actor_agency_event_plan,
-    load_actor_agency_state, prepare_actor_agency_event_plan, rebuild_actor_agency_packet,
+    load_actor_agency_state, merge_consequence_actor_agency, prepare_actor_agency_event_plan,
+    rebuild_actor_agency_packet,
 };
 use crate::autobiographical_index::{
     AutobiographicalIndexInput, AutobiographicalIndexPacket, rebuild_autobiographical_index,
@@ -21,6 +22,11 @@ use crate::character_text_design::{
     CharacterTextDesignPacket, append_character_text_design_event_plan,
     compile_character_text_design_with_projection, load_character_text_design_state,
     prepare_character_text_design_event_plan, rebuild_character_text_design,
+};
+use crate::consequence_spine::{
+    ConsequenceProposal, ConsequenceSpinePacket, append_consequence_event_plan,
+    audit_consequence_contract, load_consequence_spine_state, prepare_consequence_event_plan,
+    rebuild_consequence_spine,
 };
 use crate::context_capsule::{
     ContextCapsuleBuildInput, ContextCapsuleIndex, ContextCapsuleSelection,
@@ -81,7 +87,8 @@ use crate::scene_director::{
 use crate::scene_pressure::{
     ScenePressureEvent, ScenePressurePacket, append_scene_pressure_audit,
     append_scene_pressure_event_plan, compile_scene_pressure_packet, load_active_scene_pressures,
-    prepare_scene_pressure_event_plan, rebuild_active_scene_pressures,
+    merge_consequence_scene_pressures, prepare_scene_pressure_event_plan,
+    rebuild_active_scene_pressures,
 };
 use crate::store::{
     WorldFilePaths, append_jsonl, read_json, resolve_store_paths, world_file_paths, write_json,
@@ -99,7 +106,8 @@ use crate::world_lore::{
 };
 use crate::world_process_clock::{
     WorldProcessClockPacket, append_world_process_event_plan, load_world_process_clock_state,
-    prepare_world_process_event_plan, rebuild_world_process_clock,
+    merge_consequence_world_processes, prepare_world_process_event_plan,
+    rebuild_world_process_clock,
 };
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
@@ -201,6 +209,8 @@ pub struct AgentVisibleContext {
     #[serde(default)]
     pub active_scene_director: SceneDirectorPacket,
     #[serde(default)]
+    pub active_consequence_spine: ConsequenceSpinePacket,
+    #[serde(default)]
     pub active_turn_retrieval_controller: TurnRetrievalControllerPacket,
     #[serde(default)]
     pub selected_context_capsules: ContextCapsuleSelection,
@@ -280,6 +290,8 @@ pub struct AgentTurnResponse {
     pub resolution_proposal: Option<ResolutionProposal>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scene_director_proposal: Option<SceneDirectorProposal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consequence_proposal: Option<ConsequenceProposal>,
     pub visible_scene: NarrativeScene,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adjudication: Option<AgentResponseAdjudication>,
@@ -618,6 +630,13 @@ pub fn commit_agent_turn(options: &AgentCommitTurnOptions) -> Result<CommittedAg
         &active_scene_director,
         response.scene_director_proposal.as_ref(),
     )?;
+    audit_consequence_contract(
+        &prompt_context,
+        &pending.visible_context.active_consequence_spine,
+        response.consequence_proposal.as_ref(),
+        response.resolution_proposal.as_ref(),
+    )
+    .context("consequence proposal audit failed")?;
     let body_resource_event_plan = prepare_body_resource_event_plan(
         options.world_id.as_str(),
         pending.turn_id.as_str(),
@@ -653,6 +672,11 @@ pub fn commit_agent_turn(options: &AgentCommitTurnOptions) -> Result<CommittedAg
         &scene_pressure_event_plan,
         response.resolution_proposal.as_ref(),
     );
+    let consequence_event_plan = prepare_consequence_event_plan(
+        &pending.visible_context.active_consequence_spine,
+        response.consequence_proposal.as_ref(),
+        response.resolution_proposal.as_ref(),
+    )?;
     let player_intent_event_plan = prepare_player_intent_event_plan(
         options.world_id.as_str(),
         pending.turn_id.as_str(),
@@ -970,6 +994,24 @@ pub fn commit_agent_turn(options: &AgentCommitTurnOptions) -> Result<CommittedAg
         || {
             append_scene_director_event_plan(files.dir.as_path(), &scene_director_event_plan)?;
             rebuild_scene_director(files.dir.as_path(), &active_scene_director)?;
+            Ok(())
+        },
+    )?;
+    commit_post_advance_materialization(
+        &files,
+        options.world_id.as_str(),
+        pending.turn_id.as_str(),
+        "consequence_spine",
+        || {
+            append_consequence_event_plan(files.dir.as_path(), &consequence_event_plan)?;
+            rebuild_consequence_spine(
+                files.dir.as_path(),
+                &ConsequenceSpinePacket {
+                    world_id: options.world_id.clone(),
+                    turn_id: pending.turn_id.clone(),
+                    ..pending.visible_context.active_consequence_spine.clone()
+                },
+            )?;
             Ok(())
         },
     )?;
@@ -1423,16 +1465,27 @@ fn visible_context(input: &VisibleContextInput<'_>) -> Result<AgentVisibleContex
         snapshot,
         input.player_input,
     )?;
-    let active_scene_pressure = load_active_scene_pressures(
+    let active_consequence_spine = load_consequence_spine_state(
         files.dir.as_path(),
-        compile_scene_pressure_packet(
-            snapshot,
-            input.selected_choice,
-            &extra_memory,
-            input.private_context,
-            input.player_input,
-        )?,
+        ConsequenceSpinePacket {
+            world_id: input.current_packet.world_id.clone(),
+            turn_id: next_turn_id.clone(),
+            ..ConsequenceSpinePacket::default()
+        },
     )?;
+    let active_scene_pressure = merge_consequence_scene_pressures(
+        load_active_scene_pressures(
+            files.dir.as_path(),
+            compile_scene_pressure_packet(
+                snapshot,
+                input.selected_choice,
+                &extra_memory,
+                input.private_context,
+                input.player_input,
+            )?,
+        )?,
+        &active_consequence_spine,
+    );
     let active_plot_threads =
         load_plot_threads(files.dir.as_path(), compile_plot_thread_packet(snapshot))?;
     let active_body_resource_state =
@@ -1450,7 +1503,13 @@ fn visible_context(input: &VisibleContextInput<'_>) -> Result<AgentVisibleContex
         load_visible_world_lore(input, next_turn_id.as_str(), &context_projection)?;
     let active_relationship_graph =
         load_visible_relationship_graph(input, next_turn_id.as_str(), &context_projection)?;
-    let active_projections = load_active_projection_context(input, next_turn_id.as_str())?;
+    let mut active_projections = load_active_projection_context(input, next_turn_id.as_str())?;
+    active_projections.actor_agency =
+        merge_consequence_actor_agency(active_projections.actor_agency, &active_consequence_spine);
+    active_projections.world_process_clock = merge_consequence_world_processes(
+        active_projections.world_process_clock,
+        &active_consequence_spine,
+    );
     let active_turn_retrieval_controller = compile_visible_turn_retrieval_controller(
         input,
         next_turn_id.as_str(),
@@ -1535,6 +1594,7 @@ fn visible_context(input: &VisibleContextInput<'_>) -> Result<AgentVisibleContex
         active_player_intent_trace: active_projections.player_intent_trace,
         active_narrative_style_state: active_projections.narrative_style_state,
         active_scene_director,
+        active_consequence_spine,
         active_turn_retrieval_controller,
         selected_context_capsules: context_capsules.selection,
         active_autobiographical_index,
@@ -1821,6 +1881,7 @@ mod tests {
     use crate::body_resource::BodyResourcePacket;
     use crate::change_ledger::ChangeLedgerPacket;
     use crate::character_text_design::CharacterTextDesignPacket;
+    use crate::consequence_spine::ConsequenceSpinePacket;
     use crate::context_capsule::ContextCapsuleSelection;
     use crate::extra_memory::{
         ExtraMemoryPacket, ExtraMemoryProjectionStatus, load_extra_memory_projection_records,
@@ -1976,6 +2037,7 @@ premise:
             turn_id: "turn_0001".to_owned(),
             resolution_proposal: None,
             scene_director_proposal: None,
+            consequence_proposal: None,
             visible_scene: NarrativeScene {
                 schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                 speaker: None,
@@ -2043,6 +2105,7 @@ premise:
                 active_player_intent_trace: PlayerIntentTracePacket::default(),
                 active_narrative_style_state: NarrativeStyleState::default(),
                 active_scene_director: SceneDirectorPacket::default(),
+                active_consequence_spine: ConsequenceSpinePacket::default(),
                 active_turn_retrieval_controller: TurnRetrievalControllerPacket::default(),
                 selected_context_capsules: ContextCapsuleSelection::default(),
                 active_autobiographical_index: AutobiographicalIndexPacket::default(),
@@ -2068,6 +2131,7 @@ premise:
             turn_id: "turn_0001".to_owned(),
             resolution_proposal: None,
             scene_director_proposal: None,
+            consequence_proposal: None,
             visible_scene: NarrativeScene {
                 schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                 speaker: None,
@@ -2167,6 +2231,7 @@ premise:
                 turn_id: pending.turn_id.clone(),
                 resolution_proposal: None,
                 scene_director_proposal: None,
+                consequence_proposal: None,
                 visible_scene: NarrativeScene {
                     schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                     speaker: None,
@@ -2249,6 +2314,7 @@ premise:
                 turn_id: pending.turn_id.clone(),
                 resolution_proposal: None,
                 scene_director_proposal: None,
+                consequence_proposal: None,
                 visible_scene: NarrativeScene {
                     schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                     speaker: None,
@@ -2342,6 +2408,7 @@ premise:
                 turn_id: pending.turn_id.clone(),
                 resolution_proposal: None,
                 scene_director_proposal: None,
+                consequence_proposal: None,
                 visible_scene: NarrativeScene {
                     schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                     speaker: None,
@@ -2417,6 +2484,7 @@ premise:
                 turn_id: pending.turn_id,
                 resolution_proposal: None,
                 scene_director_proposal: None,
+                consequence_proposal: None,
                 visible_scene: NarrativeScene {
                     schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                     speaker: None,
@@ -2478,6 +2546,7 @@ premise:
                 turn_id: pending.turn_id,
                 resolution_proposal: None,
                 scene_director_proposal: None,
+                consequence_proposal: None,
                 visible_scene: NarrativeScene {
                     schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                     speaker: None,
@@ -2542,6 +2611,7 @@ premise:
                     pending.turn_id.as_str(),
                 )),
                 scene_director_proposal: None,
+                consequence_proposal: None,
                 visible_scene: NarrativeScene {
                     schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                     speaker: None,
@@ -2588,6 +2658,7 @@ premise:
             turn_id: "turn_0001".to_owned(),
             resolution_proposal: None,
             scene_director_proposal: None,
+            consequence_proposal: None,
             visible_scene: NarrativeScene {
                 schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                 speaker: None,
@@ -2650,6 +2721,7 @@ premise:
                 turn_id: pending.turn_id.clone(),
                 resolution_proposal: None,
                 scene_director_proposal: None,
+                consequence_proposal: None,
                 visible_scene: NarrativeScene {
                     schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                     speaker: None,

@@ -6,6 +6,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use crate::agent_bridge::{AgentPrivateAdjudicationContext, PendingAgentChoice};
+use crate::consequence_spine::{ActiveConsequence, ConsequenceKind, ConsequenceSpinePacket};
 use crate::extra_memory::ExtraMemoryPacket;
 use crate::models::{FREEFORM_CHOICE_SLOT, GUIDE_CHOICE_SLOT, TurnSnapshot};
 use crate::store::{append_jsonl, read_json, write_json};
@@ -316,6 +317,97 @@ pub fn load_active_scene_pressures(
         return read_json(&path);
     }
     Ok(fallback)
+}
+
+#[must_use]
+pub fn merge_consequence_scene_pressures(
+    mut packet: ScenePressurePacket,
+    consequences: &ConsequenceSpinePacket,
+) -> ScenePressurePacket {
+    let mut existing = packet
+        .visible_active
+        .iter()
+        .map(|pressure| pressure.pressure_id.clone())
+        .collect::<BTreeSet<_>>();
+    for consequence in &consequences.active {
+        if packet.visible_active.len() >= packet.compiler_policy.visible_budget {
+            break;
+        }
+        let pressure = pressure_from_consequence(consequence);
+        if existing.insert(pressure.pressure_id.clone()) {
+            packet.visible_active.push(pressure);
+        }
+    }
+    if !consequences.active.is_empty() {
+        "materialized_from_pending_turn_scene_pressure_and_consequences_v1"
+            .clone_into(&mut packet.compiler_policy.source);
+    }
+    packet
+}
+
+fn pressure_from_consequence(consequence: &ActiveConsequence) -> ScenePressure {
+    ScenePressure {
+        schema_version: SCENE_PRESSURE_SCHEMA_VERSION.to_owned(),
+        pressure_id: format!("pressure:consequence:{}", consequence.consequence_id),
+        kind: pressure_kind_from_consequence(consequence.kind),
+        visibility: ScenePressureVisibility::PlayerVisible,
+        intensity: pressure_intensity_from_consequence(consequence.severity),
+        urgency: pressure_urgency_from_consequence(consequence.severity),
+        source_refs: vec![consequence.consequence_id.clone()],
+        observable_signals: vec![consequence.player_visible_signal.clone()],
+        choice_affordances: vec!["이전 선택의 여파를 감안해 행동한다.".to_owned()],
+        prose_effect: ScenePressureProseEffect {
+            paragraph_pressure: "consequence".to_owned(),
+            sensory_focus: vec!["aftermath".to_owned()],
+            dialogue_style: "consequence-aware".to_owned(),
+        },
+    }
+}
+
+const fn pressure_kind_from_consequence(kind: ConsequenceKind) -> ScenePressureKind {
+    match kind {
+        ConsequenceKind::BodyCost => ScenePressureKind::Body,
+        ConsequenceKind::ResourceCost => ScenePressureKind::Resource,
+        ConsequenceKind::SocialDebt
+        | ConsequenceKind::TrustShift
+        | ConsequenceKind::SuspicionRaised => ScenePressureKind::SocialPermission,
+        ConsequenceKind::AlarmRaised => ScenePressureKind::Threat,
+        ConsequenceKind::KnowledgeOpened | ConsequenceKind::KnowledgeResolved => {
+            ScenePressureKind::Knowledge
+        }
+        ConsequenceKind::LocationAccessChanged => ScenePressureKind::Environment,
+        ConsequenceKind::ProcessAccelerated | ConsequenceKind::ProcessDelayed => {
+            ScenePressureKind::TimePressure
+        }
+        ConsequenceKind::MoralDebt => ScenePressureKind::MoralCost,
+        ConsequenceKind::OpportunityOpened | ConsequenceKind::OpportunityLost => {
+            ScenePressureKind::Desire
+        }
+    }
+}
+
+const fn pressure_intensity_from_consequence(
+    severity: crate::consequence_spine::ConsequenceSeverity,
+) -> u8 {
+    match severity {
+        crate::consequence_spine::ConsequenceSeverity::Trace => 1,
+        crate::consequence_spine::ConsequenceSeverity::Minor => 2,
+        crate::consequence_spine::ConsequenceSeverity::Moderate => 3,
+        crate::consequence_spine::ConsequenceSeverity::Major => 4,
+        crate::consequence_spine::ConsequenceSeverity::Critical => 5,
+    }
+}
+
+const fn pressure_urgency_from_consequence(
+    severity: crate::consequence_spine::ConsequenceSeverity,
+) -> ScenePressureUrgency {
+    match severity {
+        crate::consequence_spine::ConsequenceSeverity::Trace => ScenePressureUrgency::Ambient,
+        crate::consequence_spine::ConsequenceSeverity::Minor
+        | crate::consequence_spine::ConsequenceSeverity::Moderate => ScenePressureUrgency::Soon,
+        crate::consequence_spine::ConsequenceSeverity::Major => ScenePressureUrgency::Immediate,
+        crate::consequence_spine::ConsequenceSeverity::Critical => ScenePressureUrgency::Crisis,
+    }
 }
 
 fn load_scene_pressure_event_records(world_dir: &Path) -> Result<Vec<ScenePressureEventRecord>> {
@@ -740,6 +832,50 @@ mod tests {
                 .is_empty()
         );
         Ok(())
+    }
+
+    #[test]
+    fn active_consequence_returns_as_visible_scene_pressure() {
+        let packet = ScenePressurePacket {
+            world_id: "world".to_owned(),
+            turn_id: "turn_0004".to_owned(),
+            ..ScenePressurePacket::default()
+        };
+        let merged = merge_consequence_scene_pressures(
+            packet,
+            &ConsequenceSpinePacket {
+                world_id: "world".to_owned(),
+                turn_id: "turn_0004".to_owned(),
+                active: vec![ActiveConsequence {
+                    schema_version: crate::consequence_spine::CONSEQUENCE_SCHEMA_VERSION.to_owned(),
+                    consequence_id: "consequence:turn_0003:gate".to_owned(),
+                    origin_turn_id: "turn_0003".to_owned(),
+                    kind: ConsequenceKind::SuspicionRaised,
+                    scope: crate::consequence_spine::ConsequenceScope::Relationship,
+                    status: crate::consequence_spine::ConsequenceStatus::Active,
+                    severity: crate::consequence_spine::ConsequenceSeverity::Major,
+                    summary: "문지기의 의심이 남았다.".to_owned(),
+                    player_visible_signal: "문답은 의심에서 시작된다.".to_owned(),
+                    source_refs: vec!["choice:1".to_owned()],
+                    linked_entity_refs: Vec::new(),
+                    linked_projection_refs: vec!["rel:guard".to_owned()],
+                    expected_return:
+                        crate::consequence_spine::ConsequenceReturnWindow::CurrentScene,
+                    decay: crate::consequence_spine::ConsequenceDecay::default(),
+                }],
+                ..ConsequenceSpinePacket::default()
+            },
+        );
+
+        assert_eq!(merged.visible_active.len(), 1);
+        assert_eq!(
+            merged.visible_active[0].kind,
+            ScenePressureKind::SocialPermission
+        );
+        assert_eq!(
+            merged.visible_active[0].urgency,
+            ScenePressureUrgency::Immediate
+        );
     }
 
     #[test]

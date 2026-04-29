@@ -6,6 +6,7 @@ use crate::backend_selection::{
     WorldBackendSelection, WorldTextBackend, WorldVisualBackend, load_world_backend_selection,
     save_world_backend_selection,
 };
+use crate::consequence_spine::ACTIVE_CONSEQUENCES_FILENAME;
 use crate::host_supervisor::{HostSupervisorPlan, build_host_supervisor_plan};
 use crate::job_ledger::{
     ReadWorldJobsOptions, WorldJob, WorldJobKind, WorldJobStatus, read_world_jobs,
@@ -250,6 +251,7 @@ struct VnRuntimeDetails {
     latest_text_dispatch: Option<serde_json::Value>,
     latest_visual_dispatch: Option<serde_json::Value>,
     scene_director: Option<serde_json::Value>,
+    consequence_spine: Option<serde_json::Value>,
     world_jobs: Vec<WorldJob>,
     projection_health: ProjectionHealthReport,
     host_supervisor: HostSupervisorPlan,
@@ -814,6 +816,11 @@ fn runtime_status(state: &VnServerState) -> Result<VnRuntimeStatusResponse> {
             latest_text_dispatch,
             latest_visual_dispatch,
             scene_director: scene_director_runtime_details(state, world_id.as_str())?,
+            consequence_spine: materialized_runtime_details(
+                state,
+                world_id.as_str(),
+                ACTIVE_CONSEQUENCES_FILENAME,
+            )?,
             world_jobs,
             projection_health,
             host_supervisor,
@@ -825,11 +832,16 @@ fn scene_director_runtime_details(
     state: &VnServerState,
     world_id: &str,
 ) -> Result<Option<serde_json::Value>> {
+    materialized_runtime_details(state, world_id, SCENE_DIRECTOR_FILENAME)
+}
+
+fn materialized_runtime_details(
+    state: &VnServerState,
+    world_id: &str,
+    filename: &str,
+) -> Result<Option<serde_json::Value>> {
     let store_paths = resolve_store_paths(state.store_root.as_deref())?;
-    let path = store_paths
-        .worlds_dir
-        .join(world_id)
-        .join(SCENE_DIRECTOR_FILENAME);
+    let path = store_paths.worlds_dir.join(world_id).join(filename);
     if !path.exists() {
         return Ok(None);
     }

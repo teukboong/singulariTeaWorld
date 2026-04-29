@@ -363,6 +363,7 @@ mod tests {
             turn_id: "turn_0002".to_owned(),
             resolution_proposal: None,
             scene_director_proposal: None,
+            consequence_proposal: None,
             visible_scene: NarrativeScene {
                 schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
                 speaker: None,

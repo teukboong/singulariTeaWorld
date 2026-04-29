@@ -3,6 +3,7 @@ use crate::belief_graph::BELIEF_GRAPH_FILENAME;
 use crate::body_resource::BODY_RESOURCE_STATE_FILENAME;
 use crate::change_ledger::CHANGE_LEDGER_FILENAME;
 use crate::character_text_design::{CHARACTER_TEXT_DESIGN_FILENAME, CharacterTextDesignPacket};
+use crate::consequence_spine::ACTIVE_CONSEQUENCES_FILENAME;
 use crate::context_capsule::{
     CONTEXT_CAPSULE_DIR, CONTEXT_CAPSULE_INDEX_FILENAME, CONTEXT_CAPSULE_SELECTION_EVENTS_FILENAME,
     ContextCapsuleIndex, ContextCapsuleSelectionEvent,
@@ -3392,6 +3393,12 @@ const MATERIALIZED_PROJECTION_FILES: &[MaterializedProjectionFile] = &[
         kind: "scene_director",
         title: "장면 흐름",
         filename: SCENE_DIRECTOR_FILENAME,
+    },
+    MaterializedProjectionFile {
+        id: "active_consequences",
+        kind: "consequence_spine",
+        title: "선택의 여파",
+        filename: ACTIVE_CONSEQUENCES_FILENAME,
     },
     MaterializedProjectionFile {
         id: "visual_asset_graph",

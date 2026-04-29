@@ -1173,6 +1173,7 @@ mod tests {
                     source_refs: vec!["pressure:social:gate".to_owned()],
                 }]),
                 active_scene_director: Value::Null,
+                active_consequence_spine: Value::Null,
                 narrative_style_state: Value::Null,
                 active_character_text_design: Value::Null,
                 active_change_ledger: Value::Null,

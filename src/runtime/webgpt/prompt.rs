@@ -122,6 +122,15 @@ const AGENT_TURN_RESPONSE_SCHEMA_GUIDE: &str = r#"AgentTurnResponse 스키마:
     "transition": null,
     "evidence_refs": ["prompt_context 안의 visible ref"]
   },
+  "consequence_proposal": {
+    "schema_version": "singulari.consequence_proposal.v1",
+    "world_id": "<world_id>",
+    "turn_id": "<turn_id>",
+    "introduced": [],
+    "updated": [],
+    "paid_off": [],
+    "ephemeral_effects": []
+  },
   "visible_scene": {
     "schema_version": "singulari.narrative_scene.v1",
     "text_blocks": ["위 서사 출력 지시와 pending.output_contract.narrative_budget에 맞춘 한국어 VN 본문"],
@@ -274,6 +283,8 @@ const AGENT_TURN_RESPONSE_SCHEMA_GUIDE: &str = r#"AgentTurnResponse 스키마:
 - scene_director_proposal은 선택(optional)이다. 작성할 경우 prompt_context.visible_context.active_scene_director의 current_scene/recommended_next_beats/paragraph_budget_hint에 맞춰 이번 턴의 구조적 역할을 요약한다.
 - scene_director_proposal은 resolution_proposal을 대체하지 않는다. 장면 박자와 선택지 모양만 설명하며, 새 canon 사실이나 hidden motive를 만들 권한이 없다.
 - scene_director_proposal.evidence_refs는 prompt_context JSON 안의 player-visible 문자열 ref만 쓴다. hidden/adjudication-only ref는 금지한다.
+- consequence_proposal은 선택(optional)이다. 작성할 경우 비용, 의심, 관계 변화, 지식 변화, 기회 상실처럼 다음 턴에도 돌아와야 하는 여파만 기록한다.
+- consequence_proposal은 typed projection을 대체하지 않는다. body/resource/relationship/process/lore 변화는 기존 effect/event와 evidence로 연결하고, 사소한 색채 효과는 ephemeral_effects로 설명한다.
 - resolution_proposal의 모든 `target_refs`, `pressure_refs`, `gate_ref`, `grounding_ref`, `process_ref`, `effect.target_ref`는 prompt_context JSON 안에 실제 문자열로 존재하는 ref만 쓴다. 설명용 JSON pointer(`visible_context...`)나 새로 만든 관계/장소/인물 ref는 쓰지 않는다.
 - selected_context_capsules와 selected_memory_items 안의 `source_id`, `edge_id`, `capsule_id`, `entity_id`, `location_id`, `pressure_id`, `affordance_id`처럼 실제 문자열로 들어 있는 ref는 evidence로 쓸 수 있다. 단 rejected_capsules에만 있는 ref는 쓰지 않는다.
 - resolution_proposal의 visible field에는 hidden/adjudication-only 세부 내용을 절대 쓰지 않는다.

@@ -2,6 +2,7 @@ use crate::affordance_graph::{AffordanceGraphPacket, compile_affordance_graph_pa
 use crate::agent_bridge::{AgentOutputContract, PendingAgentTurn};
 use crate::belief_graph::{BeliefGraphPacket, compile_belief_graph_packet};
 use crate::body_resource::BodyResourcePacket;
+use crate::consequence_spine::ConsequenceSpinePacket;
 use crate::location_graph::LocationGraphPacket;
 use crate::prompt_context_budget::{
     PromptContextBudgetReport, PromptContextBudgetReportSource,
@@ -49,6 +50,7 @@ pub struct PromptVisibleContext {
     pub belief_graph: Value,
     pub world_process_clock: Value,
     pub active_scene_director: Value,
+    pub active_consequence_spine: Value,
     pub narrative_style_state: Value,
     pub active_character_text_design: Value,
     pub active_change_ledger: Value,
@@ -242,6 +244,7 @@ struct PromptMemoryValues {
     known_facts: Value,
     active_plot_threads: Value,
     active_scene_director: Option<SceneDirectorPacket>,
+    active_consequence_spine: Value,
     active_change_ledger: Value,
     active_pattern_debt: Value,
     active_belief_graph: Value,
@@ -263,6 +266,21 @@ fn load_prompt_memory_values(memory: &Value, active_memory: &Value) -> Result<Pr
             .pointer("/active_scene_director")
             .cloned()
             .and_then(|value| serde_json::from_value(value).ok()),
+        active_consequence_spine: memory
+            .pointer("/active_consequence_spine")
+            .cloned()
+            .unwrap_or_else(|| {
+                serde_json::json!({
+                    "schema_version": crate::consequence_spine::CONSEQUENCE_SPINE_PACKET_SCHEMA_VERSION,
+                    "world_id": "",
+                    "turn_id": "",
+                    "active": [],
+                    "recently_paid_off": [],
+                    "pressure_links": [],
+                    "required_followups": [],
+                    "compiler_policy": ConsequenceSpinePacket::default().compiler_policy
+                })
+            }),
         active_change_ledger: required_path(memory, "/active_change_ledger")?.clone(),
         active_pattern_debt: required_path(memory, "/active_pattern_debt")?.clone(),
         active_belief_graph: required_path(memory, "/active_belief_graph")?.clone(),
@@ -416,6 +434,7 @@ fn compile_visible_context(source: VisibleContextSource<'_>) -> Result<PromptVis
         belief_graph: serde_json::to_value(source.belief_graph)?,
         world_process_clock: serde_json::to_value(&source.world_process_clock.visible_processes)?,
         active_scene_director: serde_json::to_value(source.scene_director)?,
+        active_consequence_spine: source.prompt_memory.active_consequence_spine,
         active_character_text_design: capsule_covered_prompt_projection(
             "active_character_text_design",
             "character_text_design",

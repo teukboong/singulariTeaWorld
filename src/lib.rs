@@ -12,6 +12,7 @@ pub mod change_ledger;
 pub mod character_text_design;
 pub mod chat;
 pub mod codex_view;
+pub mod consequence_spine;
 pub mod context_capsule;
 pub mod entity_update;
 pub mod extra_memory;
@@ -63,8 +64,8 @@ pub use actor_agency::{
     ACTOR_MOVE_EVENTS_FILENAME, ACTOR_MOVE_SCHEMA_VERSION, ActorAgencyEventPlan, ActorAgencyPacket,
     ActorAgencyPolicy, ActorGoal, ActorGoalEventRecord, ActorMove, ActorMoveEventRecord,
     AgentActorGoalUpdate, AgentActorMoveUpdate, append_actor_agency_event_plan,
-    build_actor_agency_from_events, load_actor_agency_state, prepare_actor_agency_event_plan,
-    rebuild_actor_agency_packet,
+    build_actor_agency_from_events, load_actor_agency_state, merge_consequence_actor_agency,
+    prepare_actor_agency_event_plan, rebuild_actor_agency_packet,
 };
 pub use adjudication::{AdjudicationInput, adjudicate_turn};
 pub use affordance_graph::{
@@ -130,6 +131,17 @@ pub use chat::{
 pub use codex_view::{
     BuildCodexViewOptions, CodexViewSection, build_codex_view, render_codex_view_markdown,
     render_codex_view_section_markdown,
+};
+pub use consequence_spine::{
+    ACTIVE_CONSEQUENCES_FILENAME, ActiveConsequence, CONSEQUENCE_EVENT_SCHEMA_VERSION,
+    CONSEQUENCE_EVENTS_FILENAME, CONSEQUENCE_PROPOSAL_SCHEMA_VERSION, CONSEQUENCE_SCHEMA_VERSION,
+    CONSEQUENCE_SPINE_PACKET_SCHEMA_VERSION, ConsequenceDecay, ConsequenceEventKind,
+    ConsequenceEventPlan, ConsequenceEventRecord, ConsequenceFollowup, ConsequenceKind,
+    ConsequenceMemory, ConsequenceMutation, ConsequencePayoff, ConsequencePressureLink,
+    ConsequenceProposal, ConsequenceReturnWindow, ConsequenceScope, ConsequenceSeverity,
+    ConsequenceSpinePacket, ConsequenceSpinePolicy, ConsequenceStatus, EphemeralConsequenceReason,
+    append_consequence_event_plan, audit_consequence_contract, load_consequence_spine_state,
+    prepare_consequence_event_plan, rebuild_consequence_spine,
 };
 pub use context_capsule::{
     CONTEXT_CAPSULE_DIR, CONTEXT_CAPSULE_INDEX_ENTRY_SCHEMA_VERSION,
@@ -304,8 +316,8 @@ pub use scene_pressure::{
     ScenePressureEvent, ScenePressureEventPlan, ScenePressureEventRecord, ScenePressureKind,
     ScenePressurePacket, ScenePressurePolicy, ScenePressureProseEffect, ScenePressureUrgency,
     ScenePressureVisibility, append_scene_pressure_audit, append_scene_pressure_event_plan,
-    compile_scene_pressure_packet, load_active_scene_pressures, prepare_scene_pressure_event_plan,
-    rebuild_active_scene_pressures,
+    compile_scene_pressure_packet, load_active_scene_pressures, merge_consequence_scene_pressures,
+    prepare_scene_pressure_event_plan, rebuild_active_scene_pressures,
 };
 pub use start::{
     StartWorldOptions, StartedWorld, render_started_world_report, start_world,
@@ -393,5 +405,6 @@ pub use world_process_clock::{
     WorldProcess, WorldProcessClockPacket, WorldProcessClockPolicy, WorldProcessEventPlan,
     WorldProcessEventRecord, WorldProcessTempo, WorldProcessVisibility,
     append_world_process_event_plan, compile_world_process_clock_packet,
-    load_world_process_clock_state, prepare_world_process_event_plan, rebuild_world_process_clock,
+    load_world_process_clock_state, merge_consequence_world_processes,
+    prepare_world_process_event_plan, rebuild_world_process_clock,
 };

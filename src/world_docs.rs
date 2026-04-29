@@ -1,5 +1,6 @@
 use crate::body_resource::BODY_RESOURCE_STATE_FILENAME;
 use crate::character_text_design::CHARACTER_TEXT_DESIGN_FILENAME;
+use crate::consequence_spine::ACTIVE_CONSEQUENCES_FILENAME;
 use crate::location_graph::LOCATION_GRAPH_FILENAME;
 use crate::models::{
     CanonEvent, EntityRecords, HiddenState, PlayerKnowledge, TurnSnapshot, WorldRecord,
@@ -388,6 +389,14 @@ const DOC_PROJECTION_FILES: &[DocProjectionFile] = &[
         title: "Scene Director",
         filename: SCENE_DIRECTOR_FILENAME,
         summary_fields: &[("recent_beats", "recent beats")],
+    },
+    DocProjectionFile {
+        title: "Consequence Spine",
+        filename: ACTIVE_CONSEQUENCES_FILENAME,
+        summary_fields: &[
+            ("active", "active consequences"),
+            ("recently_paid_off", "recently paid off"),
+        ],
     },
     DocProjectionFile {
         title: "Visual Asset Graph",

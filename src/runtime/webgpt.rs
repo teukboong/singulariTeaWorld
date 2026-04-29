@@ -480,6 +480,9 @@ fn is_repairable_webgpt_commit_error(error: &str) -> bool {
     [
         "resolution proposal audit failed",
         "scene director proposal audit failed",
+        "consequence proposal",
+        "consequence mutation",
+        "consequence payoff",
         "agent response next_choices",
         "actor agency update",
     ]
