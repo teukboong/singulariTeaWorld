@@ -1,5 +1,5 @@
 use crate::body_resource::BodyResourcePacket;
-use crate::encounter_surface::EncounterSurfacePacket;
+use crate::encounter_surface::{EncounterSurfaceKind, EncounterSurfacePacket};
 use crate::knowledge_ledger::{
     KnowledgeTier, can_render_knowledge_tier_to_player, render_rule_for_player,
     visible_knowledge_text_is_qualified,
@@ -660,6 +660,9 @@ fn audit_world_change_set_against_context(
     for mutation in &change_set.fact_mutations {
         audit_fact_mutation_context_ref(&refs, mutation, accepted_checks, violations);
     }
+    audit_resource_spend_pairing(change_set, accepted_checks, violations);
+    audit_location_reachability(&refs, change_set, accepted_checks, violations);
+    audit_social_authority(&refs, change_set, accepted_checks, violations);
     if !change_set
         .proposed_events
         .iter()
@@ -687,7 +690,9 @@ struct CourtReferenceIndex {
     all: BTreeSet<String>,
     body_resource: BTreeSet<String>,
     location: BTreeSet<String>,
+    reachable_location: BTreeSet<String>,
     social: BTreeSet<String>,
+    social_authority: BTreeSet<String>,
     encounter_surface: BTreeSet<String>,
 }
 
@@ -757,9 +762,27 @@ impl CourtReferenceIndex {
         }
     }
 
+    fn insert_reachable_location(&mut self, item_ref: impl AsRef<str>) {
+        let item_ref = item_ref.as_ref();
+        if !item_ref.trim().is_empty() {
+            self.reachable_location.insert(item_ref.to_owned());
+            self.location.insert(item_ref.to_owned());
+            self.all.insert(item_ref.to_owned());
+        }
+    }
+
     fn insert_social(&mut self, item_ref: impl AsRef<str>) {
         let item_ref = item_ref.as_ref();
         if !item_ref.trim().is_empty() {
+            self.social.insert(item_ref.to_owned());
+            self.all.insert(item_ref.to_owned());
+        }
+    }
+
+    fn insert_social_authority(&mut self, item_ref: impl AsRef<str>) {
+        let item_ref = item_ref.as_ref();
+        if !item_ref.trim().is_empty() {
+            self.social_authority.insert(item_ref.to_owned());
             self.social.insert(item_ref.to_owned());
             self.all.insert(item_ref.to_owned());
         }
@@ -827,21 +850,21 @@ impl CourtReferenceIndex {
 
     fn index_location_graph_packet(&mut self, packet: &LocationGraphPacket) {
         if let Some(location) = &packet.current_location {
-            self.insert_location(&location.location_id);
+            self.insert_reachable_location(&location.location_id);
             for source_ref in &location.source_refs {
                 self.insert_location(source_ref);
             }
             if let Some(alias) = sanitized_ref_alias("location", location.name.as_str()) {
-                self.insert_location(alias);
+                self.insert_reachable_location(alias);
             }
         }
         for location in &packet.known_nearby_locations {
-            self.insert_location(&location.location_id);
+            self.insert_reachable_location(&location.location_id);
             for source_ref in &location.source_refs {
                 self.insert_location(source_ref);
             }
             if let Some(alias) = sanitized_ref_alias("location", location.name.as_str()) {
-                self.insert_location(alias);
+                self.insert_reachable_location(alias);
             }
         }
     }
@@ -851,8 +874,10 @@ impl CourtReferenceIndex {
             self.insert_social(&stance.stance_id);
             self.insert_social(&stance.actor_ref);
             self.insert_social(&stance.target_ref);
+            self.insert_social_authority(&stance.stance_id);
             for relationship_ref in &stance.relationship_refs {
                 self.insert_social(relationship_ref);
+                self.insert_social_authority(relationship_ref);
             }
             for source_ref in &stance.source_refs {
                 self.insert_social(source_ref);
@@ -878,6 +903,13 @@ impl CourtReferenceIndex {
             self.insert_social(&leverage.leverage_id);
             self.insert_social(&leverage.holder_ref);
             self.insert_social(&leverage.target_ref);
+            if leverage.leverage_kind
+                == crate::social_exchange::ConversationLeverageKind::ControlsAccess
+            {
+                self.insert_social_authority(&leverage.leverage_id);
+                self.insert_social_authority(&leverage.holder_ref);
+                self.insert_social_authority(&leverage.target_ref);
+            }
             for source_ref in &leverage.source_refs {
                 self.insert_social(source_ref);
             }
@@ -892,6 +924,9 @@ impl CourtReferenceIndex {
             }
             if let Some(holder_ref) = &surface.holder_ref {
                 self.insert_social(holder_ref);
+                if surface.kind == EncounterSurfaceKind::AccessController {
+                    self.insert_social_authority(holder_ref);
+                }
             }
             for source_ref in &surface.source_refs {
                 self.insert_surface(source_ref);
@@ -901,6 +936,12 @@ impl CourtReferenceIndex {
             }
             for social_ref in &surface.linked_social_refs {
                 self.insert_social(social_ref);
+                if surface.kind == EncounterSurfaceKind::AccessController {
+                    self.insert_social_authority(social_ref);
+                }
+            }
+            if surface.kind == EncounterSurfaceKind::AccessController {
+                self.insert_social_authority(&surface.surface_id);
             }
             for affordance in &surface.affordances {
                 self.insert_surface(&affordance.affordance_id);
@@ -1016,6 +1057,131 @@ fn audit_fact_mutation_context_ref(
     ));
 }
 
+fn audit_resource_spend_pairing(
+    change_set: &WorldChangeSet,
+    accepted_checks: &mut Vec<String>,
+    violations: &mut Vec<WorldCourtViolation>,
+) {
+    let resource_costs = change_set
+        .cost_claims
+        .iter()
+        .filter(|cost| {
+            cost.cost_kind == CostClaimKind::Resource && cost.status == GateStatus::CostImposed
+        })
+        .collect::<Vec<_>>();
+    if resource_costs.is_empty() {
+        push_accepted_check(accepted_checks, "resource_spend_delta_pairing");
+        return;
+    }
+    for cost in resource_costs {
+        let paired = change_set.fact_mutations.iter().any(|mutation| {
+            mutation.mutation_kind == FactMutationKind::BodyResourceDelta
+                && refs_are_paired_by_target_or_evidence(cost, mutation)
+        });
+        if paired {
+            push_accepted_check(accepted_checks, "resource_spend_delta_pairing");
+        } else {
+            violations.push(change_set_violation(
+                WorldCourtLayer::BodyResource,
+                "resource_spend_delta_pairing",
+                "resource costs with cost_imposed must include a matching body/resource mutation",
+                cost.target_ref.as_str(),
+                "add a BodyResourceDelta for the spent resource or change the gate status",
+            ));
+        }
+    }
+}
+
+fn refs_are_paired_by_target_or_evidence(cost: &CostClaim, mutation: &FactMutation) -> bool {
+    refs_share_family(cost.target_ref.as_str(), mutation.target_ref.as_str())
+        || cost
+            .evidence_refs
+            .iter()
+            .any(|cost_ref| refs_share_family(cost_ref, mutation.target_ref.as_str()))
+        || mutation
+            .evidence_refs
+            .iter()
+            .any(|mutation_ref| refs_share_family(cost.target_ref.as_str(), mutation_ref))
+        || cost.evidence_refs.iter().any(|cost_ref| {
+            mutation
+                .evidence_refs
+                .iter()
+                .any(|mutation_ref| refs_share_family(cost_ref, mutation_ref))
+        })
+}
+
+fn audit_location_reachability(
+    refs: &CourtReferenceIndex,
+    change_set: &WorldChangeSet,
+    accepted_checks: &mut Vec<String>,
+    violations: &mut Vec<WorldCourtViolation>,
+) {
+    let mut checked_any = false;
+    for target_ref in change_set
+        .cost_claims
+        .iter()
+        .filter(|cost| cost.cost_kind == CostClaimKind::Location)
+        .map(|cost| cost.target_ref.as_str())
+        .chain(
+            change_set
+                .fact_mutations
+                .iter()
+                .filter(|mutation| mutation.mutation_kind == FactMutationKind::LocationDelta)
+                .map(|mutation| mutation.target_ref.as_str()),
+        )
+    {
+        checked_any = true;
+        if refs.reachable_location.is_empty()
+            || ref_set_contains(&refs.reachable_location, target_ref)
+        {
+            push_accepted_check(accepted_checks, "location_move_reachability");
+        } else {
+            violations.push(change_set_violation(
+                WorldCourtLayer::Space,
+                "location_move_reachability",
+                "location changes must target the current or a known nearby location",
+                target_ref,
+                "retarget to current/nearby location or add a discovery route before moving",
+            ));
+        }
+    }
+    if !checked_any {
+        push_accepted_check(accepted_checks, "location_move_reachability");
+    }
+}
+
+fn audit_social_authority(
+    refs: &CourtReferenceIndex,
+    change_set: &WorldChangeSet,
+    accepted_checks: &mut Vec<String>,
+    violations: &mut Vec<WorldCourtViolation>,
+) {
+    let social_permission_costs = change_set
+        .cost_claims
+        .iter()
+        .filter(|cost| cost.cost_kind == CostClaimKind::SocialPermission)
+        .collect::<Vec<_>>();
+    if social_permission_costs.is_empty() {
+        push_accepted_check(accepted_checks, "social_permission_controller_authority");
+        return;
+    }
+    for cost in social_permission_costs {
+        if refs.social_authority.is_empty()
+            || ref_set_contains(&refs.social_authority, cost.target_ref.as_str())
+        {
+            push_accepted_check(accepted_checks, "social_permission_controller_authority");
+        } else {
+            violations.push(change_set_violation(
+                WorldCourtLayer::SocialAuthority,
+                "social_permission_controller_authority",
+                "social permission gates must reference an active stance, leverage, or access controller",
+                cost.target_ref.as_str(),
+                "retarget to the active controller/stance/leverage or adjudicate the social attempt as blocked",
+            ));
+        }
+    }
+}
+
 fn refs_for_cost_claim(
     refs: &CourtReferenceIndex,
     cost_kind: CostClaimKind,
@@ -1076,11 +1242,19 @@ const fn context_fact_mutation_check_name(mutation_kind: FactMutationKind) -> &'
 
 fn ref_set_contains(refs: &BTreeSet<String>, item_ref: &str) -> bool {
     refs.contains(item_ref)
-        || refs.iter().any(|known_ref| {
-            known_ref
-                .strip_prefix(item_ref)
-                .is_some_and(|suffix| suffix.starts_with("->") || suffix.starts_with(':'))
-        })
+        || refs
+            .iter()
+            .any(|known_ref| refs_share_family(item_ref, known_ref))
+}
+
+fn refs_share_family(left: &str, right: &str) -> bool {
+    left == right
+        || right
+            .strip_prefix(left)
+            .is_some_and(|suffix| suffix.starts_with("->") || suffix.starts_with(':'))
+        || left
+            .strip_prefix(right)
+            .is_some_and(|suffix| suffix.starts_with("->") || suffix.starts_with(':'))
 }
 
 fn audit_fact_mutation(
@@ -1531,8 +1705,9 @@ mod tests {
     };
     use crate::scene_pressure::ScenePressureKind;
     use crate::social_exchange::{
-        DialogueStance, DialogueStanceKind, SocialExchangePacket, SocialExchangePolicy,
-        SocialIntensity,
+        AskStatus, ConversationLeverage, ConversationLeverageKind, DialogueStance,
+        DialogueStanceKind, SocialDueWindow, SocialExchangePacket, SocialExchangePolicy,
+        SocialIntensity, UnresolvedSocialAsk,
     };
     use crate::world_process_clock::WorldProcessTempo;
     use serde::Serialize;
@@ -2024,6 +2199,91 @@ mod tests {
     }
 
     #[test]
+    fn world_change_set_rejects_resource_cost_without_delta_pair() {
+        let context = context_with_reference_packets();
+        let change_set = super::WorldChangeSet {
+            schema_version: super::WORLD_CHANGE_SET_SCHEMA_VERSION.to_owned(),
+            world_id: "stw_court".to_owned(),
+            turn_id: "turn_0001".to_owned(),
+            proposed_events: vec![attempt_event("current_turn")],
+            fact_mutations: Vec::new(),
+            cost_claims: vec![super::CostClaim {
+                schema_version: super::COST_CLAIM_SCHEMA_VERSION.to_owned(),
+                cost_kind: super::CostClaimKind::Resource,
+                target_ref: "inventory:entry_token".to_owned(),
+                status: GateStatus::CostImposed,
+                visibility: ResolutionVisibility::PlayerVisible,
+                reason: "token is spent".to_owned(),
+                evidence_refs: vec!["resource:inventory:00".to_owned()],
+            }],
+            visibility_claims: Vec::new(),
+            evidence_refs: vec!["current_turn".to_owned()],
+        };
+        let mut accepted_checks = Vec::new();
+        let mut violations = Vec::new();
+
+        super::audit_world_change_set_against_context(
+            &context,
+            &change_set,
+            &mut accepted_checks,
+            &mut violations,
+        );
+
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.check == "resource_spend_delta_pairing")
+        );
+    }
+
+    #[test]
+    fn world_change_set_accepts_resource_cost_with_delta_pair() {
+        let context = context_with_reference_packets();
+        let change_set = super::WorldChangeSet {
+            schema_version: super::WORLD_CHANGE_SET_SCHEMA_VERSION.to_owned(),
+            world_id: "stw_court".to_owned(),
+            turn_id: "turn_0001".to_owned(),
+            proposed_events: vec![attempt_event("current_turn")],
+            fact_mutations: vec![super::FactMutation {
+                schema_version: super::FACT_MUTATION_SCHEMA_VERSION.to_owned(),
+                mutation_kind: super::FactMutationKind::BodyResourceDelta,
+                target_ref: "resource:inventory:00".to_owned(),
+                visibility: ResolutionVisibility::PlayerVisible,
+                summary: "entry token is spent".to_owned(),
+                knowledge_tier: None,
+                evidence_refs: vec!["resource:inventory:00".to_owned()],
+            }],
+            cost_claims: vec![super::CostClaim {
+                schema_version: super::COST_CLAIM_SCHEMA_VERSION.to_owned(),
+                cost_kind: super::CostClaimKind::Resource,
+                target_ref: "inventory:entry_token".to_owned(),
+                status: GateStatus::CostImposed,
+                visibility: ResolutionVisibility::PlayerVisible,
+                reason: "token is spent".to_owned(),
+                evidence_refs: vec!["resource:inventory:00".to_owned()],
+            }],
+            visibility_claims: Vec::new(),
+            evidence_refs: vec!["current_turn".to_owned()],
+        };
+        let mut accepted_checks = Vec::new();
+        let mut violations = Vec::new();
+
+        super::audit_world_change_set_against_context(
+            &context,
+            &change_set,
+            &mut accepted_checks,
+            &mut violations,
+        );
+
+        assert!(violations.is_empty());
+        assert!(
+            accepted_checks
+                .iter()
+                .any(|check| check == "resource_spend_delta_pairing")
+        );
+    }
+
+    #[test]
     fn world_change_set_rejects_location_mutation_absent_from_context() {
         let context = context_with_reference_packets();
         let change_set = super::WorldChangeSet {
@@ -2054,9 +2314,53 @@ mod tests {
             &mut violations,
         );
 
-        assert_eq!(violations.len(), 1);
-        assert_eq!(violations[0].layer, WorldCourtLayer::Space);
-        assert_eq!(violations[0].check, "space_mutation_context_ref_exists");
+        assert!(violations.iter().any(|violation| {
+            violation.layer == WorldCourtLayer::Space
+                && violation.check == "space_mutation_context_ref_exists"
+        }));
+        assert!(violations.iter().any(|violation| {
+            violation.layer == WorldCourtLayer::Space
+                && violation.check == "location_move_reachability"
+        }));
+    }
+
+    #[test]
+    fn world_change_set_accepts_nearby_location_mutation() {
+        let context = context_with_reference_packets();
+        let change_set = super::WorldChangeSet {
+            schema_version: super::WORLD_CHANGE_SET_SCHEMA_VERSION.to_owned(),
+            world_id: "stw_court".to_owned(),
+            turn_id: "turn_0001".to_owned(),
+            proposed_events: vec![attempt_event("current_turn")],
+            fact_mutations: vec![super::FactMutation {
+                schema_version: super::FACT_MUTATION_SCHEMA_VERSION.to_owned(),
+                mutation_kind: super::FactMutationKind::LocationDelta,
+                target_ref: "place:west_gate".to_owned(),
+                visibility: ResolutionVisibility::PlayerVisible,
+                summary: "move to the nearby west gate".to_owned(),
+                knowledge_tier: None,
+                evidence_refs: vec!["entities.places[west_gate]".to_owned()],
+            }],
+            cost_claims: Vec::new(),
+            visibility_claims: Vec::new(),
+            evidence_refs: vec!["current_turn".to_owned()],
+        };
+        let mut accepted_checks = Vec::new();
+        let mut violations = Vec::new();
+
+        super::audit_world_change_set_against_context(
+            &context,
+            &change_set,
+            &mut accepted_checks,
+            &mut violations,
+        );
+
+        assert!(violations.is_empty());
+        assert!(
+            accepted_checks
+                .iter()
+                .any(|check| check == "location_move_reachability")
+        );
     }
 
     #[test]
@@ -2095,6 +2399,44 @@ mod tests {
             accepted_checks
                 .iter()
                 .any(|check| { check == "social_authority_context_ref_exists" })
+        );
+    }
+
+    #[test]
+    fn world_change_set_rejects_social_permission_without_controller_authority() {
+        let context = context_with_reference_packets();
+        let change_set = super::WorldChangeSet {
+            schema_version: super::WORLD_CHANGE_SET_SCHEMA_VERSION.to_owned(),
+            world_id: "stw_court".to_owned(),
+            turn_id: "turn_0001".to_owned(),
+            proposed_events: vec![attempt_event("current_turn")],
+            fact_mutations: Vec::new(),
+            cost_claims: vec![super::CostClaim {
+                schema_version: super::COST_CLAIM_SCHEMA_VERSION.to_owned(),
+                cost_kind: super::CostClaimKind::SocialPermission,
+                target_ref: "ask:gate".to_owned(),
+                status: GateStatus::CostImposed,
+                visibility: ResolutionVisibility::PlayerVisible,
+                reason: "an ask is not itself an access controller".to_owned(),
+                evidence_refs: vec!["ask:gate".to_owned()],
+            }],
+            visibility_claims: Vec::new(),
+            evidence_refs: vec!["current_turn".to_owned()],
+        };
+        let mut accepted_checks = Vec::new();
+        let mut violations = Vec::new();
+
+        super::audit_world_change_set_against_context(
+            &context,
+            &change_set,
+            &mut accepted_checks,
+            &mut violations,
+        );
+
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.check == "social_permission_controller_authority")
         );
     }
 
@@ -2279,9 +2621,31 @@ mod tests {
                 last_changed_turn_id: "turn_0001".to_owned(),
             }],
             active_commitments: Vec::new(),
-            unresolved_asks: Vec::new(),
+            unresolved_asks: vec![UnresolvedSocialAsk {
+                schema_version: crate::social_exchange::UNRESOLVED_SOCIAL_ASK_SCHEMA_VERSION
+                    .to_owned(),
+                ask_id: "ask:gate".to_owned(),
+                asked_by_ref: "char:protagonist".to_owned(),
+                asked_to_ref: "char:guard".to_owned(),
+                question_summary: "asks for entry".to_owned(),
+                current_status: AskStatus::Open,
+                last_response: "not yet answered".to_owned(),
+                allowed_next_moves: Vec::new(),
+                blocked_repetitions: Vec::new(),
+                source_refs: vec!["social_exchange_event:ask".to_owned()],
+            }],
             recent_exchanges: Vec::new(),
-            leverage: Vec::new(),
+            leverage: vec![ConversationLeverage {
+                schema_version: crate::social_exchange::CONVERSATION_LEVERAGE_SCHEMA_VERSION
+                    .to_owned(),
+                leverage_id: "social:guard_controls_gate".to_owned(),
+                holder_ref: "char:guard".to_owned(),
+                target_ref: "rel:guard->protagonist:distance".to_owned(),
+                leverage_kind: ConversationLeverageKind::ControlsAccess,
+                summary: "guard controls the gate".to_owned(),
+                expires: SocialDueWindow::CurrentScene,
+                source_refs: vec!["social_exchange_event:leverage".to_owned()],
+            }],
             compiler_policy: SocialExchangePolicy::default(),
         });
         context
