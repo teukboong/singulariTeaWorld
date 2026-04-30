@@ -429,6 +429,7 @@ pub fn prepare_encounter_surface_event_plan(
 ) -> Result<EncounterSurfaceEventPlan> {
     let mut records = Vec::new();
     let recorded_at = Utc::now().to_rfc3339();
+    let mut event_context = current.clone();
     let mut known_ids = current
         .active_surfaces
         .iter()
@@ -436,9 +437,10 @@ pub fn prepare_encounter_surface_event_plan(
         .collect::<BTreeSet<_>>();
     if let Some(proposal) = &response.encounter_proposal {
         validate_encounter_proposal(current, response, proposal)?;
+        event_context.turn_id.clone_from(&proposal.turn_id);
         for mutation in &proposal.mutations {
             records.push(record_from_mutation(
-                current,
+                &event_context,
                 mutation.clone(),
                 records.len(),
                 &recorded_at,
@@ -453,16 +455,16 @@ pub fn prepare_encounter_surface_event_plan(
                 );
             }
             records.push(record_from_closure(
-                current,
+                &event_context,
                 closure.clone(),
                 records.len(),
                 &recorded_at,
             ));
         }
     }
-    for closure in derive_scene_transition_closures(current, response) {
+    for closure in derive_scene_transition_closures(&event_context, response) {
         records.push(record_from_closure(
-            current,
+            &event_context,
             closure,
             records.len(),
             &recorded_at,
@@ -475,7 +477,7 @@ pub fn prepare_encounter_surface_event_plan(
         .collect::<BTreeSet<_>>();
     for mutation in derive_response_choice_mutations(current, response, &existing_refs) {
         records.push(record_from_mutation(
-            current,
+            &event_context,
             mutation,
             records.len(),
             &recorded_at,
@@ -483,7 +485,7 @@ pub fn prepare_encounter_surface_event_plan(
     }
     for mutation in derive_resolution_gate_mutations(current, response, records.len()) {
         records.push(record_from_mutation(
-            current,
+            &event_context,
             mutation,
             records.len(),
             &recorded_at,
@@ -675,7 +677,13 @@ fn validate_encounter_proposal(
     if proposal.schema_version != ENCOUNTER_PROPOSAL_SCHEMA_VERSION {
         bail!("encounter proposal schema_version mismatch");
     }
-    if proposal.world_id != current.world_id || proposal.turn_id != current.turn_id {
+    let next_turn_id = encounter_next_turn_id(current.turn_id.as_str()).ok();
+    let turn_matches = proposal.turn_id == current.turn_id
+        || next_turn_id
+            .as_deref()
+            .is_some_and(|turn_id| proposal.turn_id == turn_id)
+        || proposal.turn_id == response.turn_id;
+    if proposal.world_id != current.world_id || !turn_matches {
         bail!("encounter proposal world_id/turn_id mismatch");
     }
     let visible_refs = response_visible_refs(response);
@@ -721,6 +729,16 @@ fn validate_encounter_proposal(
         }
     }
     Ok(())
+}
+
+fn encounter_next_turn_id(turn_id: &str) -> Result<String> {
+    let suffix = turn_id
+        .strip_prefix("turn_")
+        .context("encounter current turn_id missing turn_ prefix")?;
+    let index: u64 = suffix
+        .parse()
+        .context("encounter current turn_id suffix is not numeric")?;
+    Ok(format!("turn_{:04}", index + 1))
 }
 
 fn derive_response_choice_mutations(

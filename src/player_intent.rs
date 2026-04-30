@@ -295,6 +295,7 @@ mod tests {
                 }],
                 proposed_effects: Vec::new(),
                 process_ticks: Vec::new(),
+                pressure_noop_reasons: Vec::new(),
                 narrative_brief: NarrativeBrief {
                     visible_summary: "말끝에 틈이 생긴다.".to_owned(),
                     required_beats: Vec::new(),

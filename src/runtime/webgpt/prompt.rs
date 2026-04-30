@@ -36,6 +36,13 @@ const AGENT_TURN_RESPONSE_SCHEMA_GUIDE: &str = r#"AgentTurnResponse 스키마:
     ],
     "proposed_effects": [],
     "process_ticks": [],
+    "pressure_noop_reasons": [
+      {
+        "pressure_ref": "pressure id from prompt_context.pre_turn_simulation.pressure_obligations",
+        "reason": "이 턴에서 압력이 직접 이동하지 않았다면 visible한 이유",
+        "evidence_refs": ["same pressure id"]
+      }
+    ],
     "narrative_brief": {
       "visible_summary": "visible_scene을 쓰기 전 결과/박자 요약",
       "required_beats": ["visible prose에 반드시 반영할 박자"],
@@ -129,7 +136,13 @@ const AGENT_TURN_RESPONSE_SCHEMA_GUIDE: &str = r#"AgentTurnResponse 스키마:
     "introduced": [],
     "updated": [],
     "paid_off": [],
-    "ephemeral_effects": []
+    "ephemeral_effects": [
+      {
+        "effect_ref": "visible_scene.text_blocks[0]",
+        "reason": "장기 consequence로 남기지 않을 감각/분위기 효과만 여기에 적는다.",
+        "evidence_refs": ["visible_scene.text_blocks[0]"]
+      }
+    ]
   },
   "social_exchange_proposal": {
     "schema_version": "singulari.social_exchange_proposal.v1",
@@ -344,12 +357,12 @@ const AGENT_TURN_RESPONSE_SCHEMA_GUIDE: &str = r#"AgentTurnResponse 스키마:
 }
 ```
 - next_choices는 서사 생성과 같은 응답에서 반드시 함께 작성한다. 별도 선택지 재생성 턴을 만들지 않는다.
-- resolution_proposal은 LLM 지능이 해석한 판정 제안이고, Rust가 commit 전에 audit한다. 가능한 한 작성하되, prompt_context에 없는 ref나 evidence_refs 없는 durable effect를 넣지 않는다.
+- resolution_proposal은 LLM 지능이 해석한 판정 제안이고, Rust가 commit 전에 audit한다. prompt_context.pre_turn_simulation.required_resolution_fields.resolution_proposal_required가 true인 normal turn에서는 반드시 작성한다. prompt_context에 없는 ref나 evidence_refs 없는 durable effect를 넣지 않는다.
 - scene_director_proposal은 선택(optional)이다. 작성할 경우 prompt_context.visible_context.active_scene_director의 current_scene/recommended_next_beats/paragraph_budget_hint에 맞춰 이번 턴의 구조적 역할을 요약한다.
 - scene_director_proposal은 resolution_proposal을 대체하지 않는다. 장면 박자와 선택지 모양만 설명하며, 새 canon 사실이나 hidden motive를 만들 권한이 없다.
 - scene_director_proposal.evidence_refs는 prompt_context JSON 안의 player-visible 문자열 ref만 쓴다. hidden/adjudication-only ref는 금지한다.
 - consequence_proposal은 선택(optional)이다. 작성할 경우 비용, 의심, 관계 변화, 지식 변화, 기회 상실처럼 다음 턴에도 돌아와야 하는 여파만 기록한다.
-- consequence_proposal은 typed projection을 대체하지 않는다. body/resource/relationship/process/lore 변화는 기존 effect/event와 evidence로 연결하고, 사소한 색채 효과는 ephemeral_effects로 설명한다.
+- consequence_proposal은 typed projection을 대체하지 않는다. body/resource/relationship/process/lore 변화는 기존 effect/event와 evidence로 연결하고, 사소한 색채 효과는 ephemeral_effects 객체(`effect_ref`, `reason`, `evidence_refs`)로 설명한다. 문자열 배열은 금지한다.
 - social_exchange_proposal은 선택(optional)이다. 작성할 경우 이번 대화에서 교환/회피/거절/약속/조건/빚/미해결 질문으로 남은 것만 기록한다.
 - social_exchange_proposal은 대화 트리나 호감도 미터가 아니다. active_social_exchange를 보고 다음 대화의 현재 태도, unresolved_asks 반복 방지, 조건부 약속만 compact하게 갱신한다.
 - social_exchange_proposal의 source_refs/evidence_refs는 prompt_context JSON 안의 player-visible 문자열 ref만 쓴다. hidden motive, adjudication-only truth, 미래 route hint는 summary/signal/condition/ask에 쓰지 않는다.
@@ -358,6 +371,7 @@ const AGENT_TURN_RESPONSE_SCHEMA_GUIDE: &str = r#"AgentTurnResponse 스키마:
 - encounter_proposal의 source_refs/evidence_refs는 prompt_context JSON 안의 player-visible 문자열 ref 또는 이번 응답의 visible_scene.text_blocks/next_choices ref만 쓴다. HiddenButSignaled 표면은 보이는 신호만 적고 숨은 내용은 쓰지 않는다.
 - resolution_proposal의 모든 `target_refs`, `pressure_refs`, `gate_ref`, `grounding_ref`, `process_ref`, `effect.target_ref`는 prompt_context JSON 안에 실제 문자열로 존재하는 ref만 쓴다. 설명용 JSON pointer(`visible_context...`)나 새로 만든 관계/장소/인물 ref는 쓰지 않는다.
 - selected_context_capsules와 selected_memory_items 안의 `source_id`, `edge_id`, `capsule_id`, `entity_id`, `location_id`, `pressure_id`, `affordance_id`처럼 실제 문자열로 들어 있는 ref는 evidence로 쓸 수 있다. 단 rejected_capsules에만 있는 ref는 쓰지 않는다.
+- prompt_context.pre_turn_simulation.pressure_obligations의 각 pressure_id는 resolution_proposal에서 실제 gate/effect/process tick으로 움직이거나, `pressure_noop_reasons`에 같은 pressure_ref와 evidence_refs를 넣어 왜 직접 이동하지 않았는지 visible reason을 적어야 한다. 단순히 pressure_refs나 outcome.evidence_refs에 언급만 하는 것은 부족하다.
 - resolution_proposal의 visible field에는 hidden/adjudication-only 세부 내용을 절대 쓰지 않는다.
 - resolution_proposal.next_choice_plan은 slot 1..7을 모두 포함한다. ordinary_affordance slot 1..5는 prompt_context.visible_context.affordance_graph의 같은 slot affordance_id를 grounding_ref/evidence_refs에 넣는다. slot 6은 freeform, slot 7은 delegated_judgment다.
 - actor_goal_events/actor_move_events는 중요한 NPC가 실제 장면에서 보인 목표와 움직임만 기록한다. actor_ref는 기존 relationship/entity ref 또는 이번 응답의 entity_updates로 생성한 char:id여야 한다. hidden 목표는 visible_scene/next_choices에 동기로 해설하지 말고 관찰 가능한 행동으로만 암시한다.

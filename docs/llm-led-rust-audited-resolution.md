@@ -421,10 +421,10 @@ world truth.
 
 Acceptance:
 
-- [x] `AgentTurnResponse` can carry optional `resolution_proposal`.
+- [x] `AgentTurnResponse` can carry `resolution_proposal`.
 - [x] WebGPT prompt schema shows the proposal shape and grounding rules.
-- [x] Existing response fixtures remain valid by omitting the optional proposal.
-- [x] Commit path keeps backward compatibility for responses without a proposal.
+- [x] Bootstrap/diagnostic compatibility can omit the proposal.
+- [x] Normal post-bootstrap commit paths reject missing required proposals.
 
 ### Phase 3: Commit-Time Resolution Audit — implemented
 

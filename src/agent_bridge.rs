@@ -74,6 +74,7 @@ use crate::relationship_graph::{
     compile_relationship_graph_from_projection, load_relationship_graph_state,
     prepare_relationship_graph_event_plan, rebuild_relationship_graph,
 };
+use crate::render::{RenderPacketLoadOptions, load_render_packet};
 use crate::resolution::{
     ResolutionCritique, ResolutionProposal, audit_resolution_choices, audit_resolution_proposal,
 };
@@ -170,7 +171,7 @@ pub struct PendingAgentTurn {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PendingAgentChoice {
     pub slot: u8,
     pub tag: String,
@@ -454,11 +455,10 @@ pub fn enqueue_agent_turn(options: &AgentSubmitTurnOptions) -> Result<PendingAge
     let snapshot: TurnSnapshot = read_json(&files.latest_snapshot)?;
     let hidden_state: HiddenState = read_json(&files.hidden_state)?;
     let entities: crate::models::EntityRecords = read_json(&files.entities)?;
-    let current_packet = build_vn_packet(&BuildVnPacketOptions {
+    let current_packet = load_render_packet(&RenderPacketLoadOptions {
         store_root: options.store_root.clone(),
         world_id: options.world_id.clone(),
         turn_id: None,
-        scene_image_url: None,
     })?;
     let turn_id = next_turn_id(snapshot.turn_id.as_str())?;
     let pending_ref = pending_path.display().to_string();
@@ -1236,14 +1236,25 @@ fn audit_agent_resolution_proposal(
     pending: &PendingAgentTurn,
     response: &AgentTurnResponse,
 ) -> Result<()> {
-    let Some(proposal) = &response.resolution_proposal else {
-        return Ok(());
-    };
     let prompt_context = compile_prompt_context_packet(&CompilePromptContextPacketOptions {
         store_root,
         pending,
         engine_session_kind: "webgpt_project_session",
     })?;
+    let required_fields = &prompt_context
+        .pre_turn_simulation
+        .required_resolution_fields;
+    if required_fields.resolution_proposal_required && response.resolution_proposal.is_none() {
+        bail!(
+            "agent response missing required resolution_proposal before commit: world_id={}, turn_id={}, reason={}",
+            pending.world_id,
+            pending.turn_id,
+            required_fields.reason
+        );
+    }
+    let Some(proposal) = &response.resolution_proposal else {
+        return Ok(());
+    };
     audit_resolution_proposal(&prompt_context, proposal)
         .map_err(|critique| resolution_critique_error(&critique))
         .and_then(|()| {
@@ -1501,7 +1512,7 @@ struct VisibleContextInput<'a> {
     files: &'a WorldFilePaths,
     snapshot: &'a TurnSnapshot,
     entities: &'a crate::models::EntityRecords,
-    current_packet: &'a VnPacket,
+    current_packet: &'a crate::models::RenderPacket,
     selected_choice: Option<&'a PendingAgentChoice>,
     private_context: &'a AgentPrivateAdjudicationContext,
     player_input: &'a str,
@@ -1632,7 +1643,13 @@ fn visible_context(input: &VisibleContextInput<'_>) -> Result<AgentVisibleContex
     let world_process_clock_value = serde_json::to_value(&active_projections.world_process_clock)?;
     let player_intent_trace_value = serde_json::to_value(&active_projections.player_intent_trace)?;
     let active_social_exchange_value = serde_json::to_value(&active_social_exchange)?;
-    let recent_scene_window_value = serde_json::to_value(&input.current_packet.scene.text_blocks)?;
+    let recent_scene = input
+        .current_packet
+        .narrative_scene
+        .as_ref()
+        .map(|scene| scene.text_blocks.clone())
+        .unwrap_or_default();
+    let recent_scene_window_value = serde_json::to_value(&recent_scene)?;
     let compiled_encounter_surface = compile_encounter_surface_packet(
         input.current_packet.world_id.as_str(),
         next_turn_id.as_str(),
@@ -1669,7 +1686,7 @@ fn visible_context(input: &VisibleContextInput<'_>) -> Result<AgentVisibleContex
     );
     Ok(AgentVisibleContext {
         location: snapshot.protagonist_state.location.clone(),
-        recent_scene: input.current_packet.scene.text_blocks.clone(),
+        recent_scene,
         known_facts: known_facts(snapshot),
         voice_anchors: input
             .entities
@@ -2003,11 +2020,12 @@ mod tests {
     use crate::pattern_debt::PatternDebtPacket;
     use crate::player_intent::PlayerIntentTracePacket;
     use crate::plot_thread::PlotThreadPacket;
+    use crate::prompt_context::{CompilePromptContextPacketOptions, compile_prompt_context_packet};
     use crate::relationship_graph::RelationshipGraphPacket;
     use crate::resolution::{
-        ActionAmbiguity, ActionInputKind, ActionIntent, NarrativeBrief, ProposedEffect,
-        ProposedEffectKind, RESOLUTION_PROPOSAL_SCHEMA_VERSION, ResolutionOutcome,
-        ResolutionOutcomeKind, ResolutionProposal, ResolutionVisibility,
+        ActionAmbiguity, ActionInputKind, ActionIntent, ChoicePlan, ChoicePlanKind, NarrativeBrief,
+        PressureNoopReason, ProposedEffect, ProposedEffectKind, RESOLUTION_PROPOSAL_SCHEMA_VERSION,
+        ResolutionOutcome, ResolutionOutcomeKind, ResolutionProposal, ResolutionVisibility,
     };
     use crate::scene_director::SceneDirectorPacket;
     use crate::scene_pressure::ScenePressurePacket;
@@ -2020,6 +2038,7 @@ mod tests {
     use crate::vn::{BuildVnPacketOptions, build_vn_packet};
     use crate::world_lore::WorldLorePacket;
     use crate::world_process_clock::WorldProcessClockPacket;
+    use std::path::Path;
     use tempfile::tempdir;
 
     fn seed_body(world_id: &str) -> String {
@@ -2076,6 +2095,92 @@ premise:
         ]
     }
 
+    fn valid_resolution_proposal_for_pending(
+        store: &Path,
+        pending: &PendingAgentTurn,
+    ) -> anyhow::Result<ResolutionProposal> {
+        let context = compile_prompt_context_packet(&CompilePromptContextPacketOptions {
+            store_root: Some(store),
+            pending,
+            engine_session_kind: "webgpt_project_session",
+        })?;
+        let mut next_choice_plan = context
+            .pre_turn_simulation
+            .available_affordances
+            .iter()
+            .map(|affordance| ChoicePlan {
+                slot: affordance.slot,
+                plan_kind: ChoicePlanKind::OrdinaryAffordance,
+                grounding_ref: affordance.affordance_id.clone(),
+                label_seed: format!("slot {} scene action", affordance.slot),
+                intent_seed: affordance.action_contract.clone(),
+                evidence_refs: vec![affordance.affordance_id.clone()],
+            })
+            .collect::<Vec<_>>();
+        next_choice_plan.push(ChoicePlan {
+            slot: 6,
+            plan_kind: ChoicePlanKind::Freeform,
+            grounding_ref: "current_turn".to_owned(),
+            label_seed: "자유서술".to_owned(),
+            intent_seed: "직접 행동을 입력한다.".to_owned(),
+            evidence_refs: vec!["current_turn".to_owned()],
+        });
+        next_choice_plan.push(ChoicePlan {
+            slot: 7,
+            plan_kind: ChoicePlanKind::DelegatedJudgment,
+            grounding_ref: "current_turn".to_owned(),
+            label_seed: "판단 위임".to_owned(),
+            intent_seed: "맡긴다. 세부 내용은 선택 후 드러난다.".to_owned(),
+            evidence_refs: vec!["current_turn".to_owned()],
+        });
+        let pressure_refs = context
+            .pre_turn_simulation
+            .pressure_obligations
+            .iter()
+            .map(|obligation| obligation.pressure_id.clone())
+            .collect::<Vec<_>>();
+        Ok(ResolutionProposal {
+            schema_version: RESOLUTION_PROPOSAL_SCHEMA_VERSION.to_owned(),
+            world_id: pending.world_id.clone(),
+            turn_id: pending.turn_id.clone(),
+            interpreted_intent: ActionIntent {
+                input_kind: ActionInputKind::PresentedChoice,
+                summary: "플레이어가 현재 장면의 선택지를 따른다.".to_owned(),
+                target_refs: Vec::new(),
+                pressure_refs: pressure_refs.clone(),
+                evidence_refs: vec!["current_turn".to_owned()],
+                ambiguity: ActionAmbiguity::Clear,
+            },
+            outcome: ResolutionOutcome {
+                kind: ResolutionOutcomeKind::Success,
+                summary: "장면이 현재 입력에 맞춰 이어진다.".to_owned(),
+                evidence_refs: {
+                    let mut refs = vec!["current_turn".to_owned()];
+                    refs.extend(pressure_refs.iter().cloned());
+                    refs
+                },
+            },
+            gate_results: Vec::new(),
+            proposed_effects: Vec::new(),
+            process_ticks: Vec::new(),
+            pressure_noop_reasons: pressure_refs
+                .iter()
+                .map(|pressure_ref| PressureNoopReason {
+                    pressure_ref: pressure_ref.clone(),
+                    reason: "fixture response records no durable pressure movement for this turn"
+                        .to_owned(),
+                    evidence_refs: vec![pressure_ref.clone()],
+                })
+                .collect(),
+            narrative_brief: NarrativeBrief {
+                visible_summary: "장면이 현재 입력에 맞춰 이어진다.".to_owned(),
+                required_beats: Vec::new(),
+                forbidden_visible_details: Vec::new(),
+            },
+            next_choice_plan,
+        })
+    }
+
     fn invalid_resolution_proposal(world_id: &str, turn_id: &str) -> ResolutionProposal {
         ResolutionProposal {
             schema_version: RESOLUTION_PROPOSAL_SCHEMA_VERSION.to_owned(),
@@ -2103,6 +2208,7 @@ premise:
                 evidence_refs: vec!["current_turn".to_owned()],
             }],
             process_ticks: Vec::new(),
+            pressure_noop_reasons: Vec::new(),
             narrative_brief: NarrativeBrief {
                 visible_summary: "장면이 이어진다.".to_owned(),
                 required_beats: Vec::new(),
@@ -2343,7 +2449,10 @@ premise:
                 schema_version: AGENT_TURN_RESPONSE_SCHEMA_VERSION.to_owned(),
                 world_id: pending.world_id.clone(),
                 turn_id: pending.turn_id.clone(),
-                resolution_proposal: None,
+                resolution_proposal: Some(valid_resolution_proposal_for_pending(
+                    store.as_path(),
+                    &pending,
+                )?),
                 scene_director_proposal: None,
                 consequence_proposal: None,
                 social_exchange_proposal: None,
@@ -2428,7 +2537,10 @@ premise:
                 schema_version: AGENT_TURN_RESPONSE_SCHEMA_VERSION.to_owned(),
                 world_id: pending.world_id.clone(),
                 turn_id: pending.turn_id.clone(),
-                resolution_proposal: None,
+                resolution_proposal: Some(valid_resolution_proposal_for_pending(
+                    store.as_path(),
+                    &pending,
+                )?),
                 scene_director_proposal: None,
                 consequence_proposal: None,
                 social_exchange_proposal: None,
@@ -2516,6 +2628,7 @@ premise:
             input: "1".to_owned(),
             narrative_level: None,
         })?;
+        let resolution_proposal = valid_resolution_proposal_for_pending(store.as_path(), &pending)?;
         std::fs::write(files.dir.join(crate::REMEMBERED_EXTRAS_FILENAME), "{")?;
         let result = commit_agent_turn(&AgentCommitTurnOptions {
             store_root: Some(store.clone()),
@@ -2524,7 +2637,7 @@ premise:
                 schema_version: AGENT_TURN_RESPONSE_SCHEMA_VERSION.to_owned(),
                 world_id: pending.world_id.clone(),
                 turn_id: pending.turn_id.clone(),
-                resolution_proposal: None,
+                resolution_proposal: Some(resolution_proposal),
                 scene_director_proposal: None,
                 consequence_proposal: None,
                 social_exchange_proposal: None,
@@ -2777,6 +2890,75 @@ premise:
     }
 
     #[test]
+    fn rejects_missing_required_resolution_proposal_before_turn_advance() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(&seed_path, seed_body("stw_agent_missing_resolution"))?;
+        init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+
+        let pending = enqueue_agent_turn(&AgentSubmitTurnOptions {
+            store_root: Some(store.clone()),
+            world_id: "stw_agent_missing_resolution".to_owned(),
+            input: "1".to_owned(),
+            narrative_level: None,
+        })?;
+        let Err(error) = commit_agent_turn(&AgentCommitTurnOptions {
+            store_root: Some(store.clone()),
+            world_id: "stw_agent_missing_resolution".to_owned(),
+            response: AgentTurnResponse {
+                schema_version: AGENT_TURN_RESPONSE_SCHEMA_VERSION.to_owned(),
+                world_id: pending.world_id.clone(),
+                turn_id: pending.turn_id.clone(),
+                resolution_proposal: None,
+                scene_director_proposal: None,
+                consequence_proposal: None,
+                social_exchange_proposal: None,
+                encounter_proposal: None,
+                visible_scene: NarrativeScene {
+                    schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
+                    speaker: None,
+                    text_blocks: vec!["agent-authored visible scene".to_owned()],
+                    tone_notes: Vec::new(),
+                },
+                adjudication: None,
+                canon_event: None,
+                entity_updates: Vec::new(),
+                relationship_updates: Vec::new(),
+                plot_thread_events: Vec::new(),
+                scene_pressure_events: Vec::new(),
+                world_lore_updates: Vec::new(),
+                character_text_design_updates: Vec::new(),
+                body_resource_events: Vec::new(),
+                location_events: Vec::new(),
+                extra_contacts: Vec::new(),
+                hidden_state_delta: Vec::new(),
+                needs_context: Vec::new(),
+                next_choices: scene_specific_choices(),
+                actor_goal_events: Vec::new(),
+                actor_move_events: Vec::new(),
+            },
+        }) else {
+            anyhow::bail!("missing resolution proposal reached turn advance");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("missing required resolution_proposal before commit")
+        );
+
+        let store_paths = resolve_store_paths(Some(store.as_path()))?;
+        let files = world_file_paths(&store_paths, "stw_agent_missing_resolution");
+        let latest: TurnSnapshot = read_json(&files.latest_snapshot)?;
+        assert_eq!(latest.turn_id, "turn_0000");
+        Ok(())
+    }
+
+    #[test]
     fn rejects_agent_choices_that_leak_internal_anchor_ids() {
         let mut response = AgentTurnResponse {
             schema_version: AGENT_TURN_RESPONSE_SCHEMA_VERSION.to_owned(),
@@ -2847,7 +3029,10 @@ premise:
                 schema_version: AGENT_TURN_RESPONSE_SCHEMA_VERSION.to_owned(),
                 world_id: pending.world_id.clone(),
                 turn_id: pending.turn_id.clone(),
-                resolution_proposal: None,
+                resolution_proposal: Some(valid_resolution_proposal_for_pending(
+                    store.as_path(),
+                    &pending,
+                )?),
                 scene_director_proposal: None,
                 consequence_proposal: None,
                 social_exchange_proposal: None,

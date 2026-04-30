@@ -292,6 +292,7 @@ fn emit_webgpt_pending_agent_turn_event(
     pending: &singulari_world::PendingAgentTurn,
     options: &HostWorkerOptions,
 ) -> Result<bool> {
+    emit_host_text_dispatch_begin(pending, emitted)?;
     match dispatch_pending_agent_turn_via_webgpt(store_root, pending, options)? {
         WebGptDispatchOutcome::Started(record) => {
             let event_key = format!("webgpt-started:{}:{}", pending.world_id, pending.turn_id);
@@ -337,6 +338,16 @@ fn emit_host_text_and_visual_events_parallel(
     options: &HostWorkerOptions,
 ) -> Result<bool> {
     let pending = load_pending_agent_turn(store_root, world_id).ok();
+    if let Some(pending) = pending.as_ref() {
+        emit_host_text_dispatch_begin(pending, emitted)?;
+        let text_result = match text_backend {
+            HostWorkerTextBackend::Webgpt => HostTextDispatchResult::Webgpt {
+                outcome: dispatch_pending_agent_turn_via_webgpt(store_root, pending, options)?,
+            },
+        };
+        return emit_text_dispatch_result(pending, text_result, emitted);
+    }
+
     let visual_claims = match visual_backend {
         HostWorkerVisualBackend::Webgpt => {
             claim_next_host_visual_jobs(store_root, world_id, "singulari_webgpt_image_worker")?
@@ -537,6 +548,28 @@ fn webgpt_dispatch_skipped_event(
         "record_path": record_path,
         "consumer": HOST_WORKER_CONSUMER,
     })
+}
+
+fn emit_host_text_dispatch_begin(
+    pending: &singulari_world::PendingAgentTurn,
+    emitted: &mut HashSet<String>,
+) -> Result<bool> {
+    let event_key = format!(
+        "webgpt-dispatch-begin:{}:{}",
+        pending.world_id, pending.turn_id
+    );
+    if !emitted.insert(event_key) {
+        return Ok(false);
+    }
+    emit_host_event(&serde_json::json!({
+        "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
+        "event": "webgpt_dispatch_begin",
+        "world_id": pending.world_id,
+        "turn_id": pending.turn_id,
+        "pending_ref": pending.pending_ref,
+        "consumer": HOST_WORKER_CONSUMER,
+    }))?;
+    Ok(true)
 }
 
 fn claim_next_host_visual_jobs(

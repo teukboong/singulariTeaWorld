@@ -215,7 +215,7 @@ pub struct ConsequenceProposal {
     pub updated: Vec<ConsequenceMutation>,
     #[serde(default)]
     pub paid_off: Vec<ConsequencePayoff>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_ephemeral_effects")]
     pub ephemeral_effects: Vec<EphemeralConsequenceReason>,
 }
 
@@ -249,6 +249,25 @@ pub struct EphemeralConsequenceReason {
     pub reason: String,
     #[serde(default)]
     pub evidence_refs: Vec<String>,
+}
+
+fn deserialize_ephemeral_effects<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<EphemeralConsequenceReason>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let values = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    let mut effects = Vec::new();
+    for value in values {
+        if value.is_string() {
+            continue;
+        }
+        effects.push(
+            EphemeralConsequenceReason::deserialize(value).map_err(serde::de::Error::custom)?,
+        );
+    }
+    Ok(effects)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1202,6 +1221,33 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn parses_legacy_string_ephemeral_effects_as_non_durable_notes() -> anyhow::Result<()> {
+        let proposal: ConsequenceProposal = serde_json::from_value(serde_json::json!({
+            "schema_version": CONSEQUENCE_PROPOSAL_SCHEMA_VERSION,
+            "world_id": "world",
+            "turn_id": "turn_0003",
+            "introduced": [],
+            "updated": [],
+            "paid_off": [],
+            "ephemeral_effects": [
+                "문자열 형태의 분위기 설명은 durable consequence로 기록하지 않는다.",
+                {
+                    "effect_ref": "visible_scene.text_blocks[0]",
+                    "reason": "객체 형태의 사소한 효과는 evidence가 있으면 유지한다.",
+                    "evidence_refs": ["visible_scene.text_blocks[0]"]
+                }
+            ]
+        }))?;
+
+        assert_eq!(proposal.ephemeral_effects.len(), 1);
+        assert_eq!(
+            proposal.ephemeral_effects[0].effect_ref,
+            "visible_scene.text_blocks[0]"
+        );
+        Ok(())
+    }
+
     fn sample_resolution() -> ResolutionProposal {
         ResolutionProposal {
             schema_version: RESOLUTION_PROPOSAL_SCHEMA_VERSION.to_owned(),
@@ -1236,6 +1282,7 @@ mod tests {
                 evidence_refs: vec!["choice:1".to_owned()],
             }],
             process_ticks: Vec::new(),
+            pressure_noop_reasons: Vec::new(),
             narrative_brief: NarrativeBrief {
                 visible_summary: "의심이 남는다.".to_owned(),
                 required_beats: Vec::new(),

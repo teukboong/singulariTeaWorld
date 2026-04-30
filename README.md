@@ -24,6 +24,7 @@ Detailed operator guides:
 - [Host Worker Contract](docs/host-worker.md)
 - [Agent Bridge](docs/agent-bridge.md)
 - [Visual Canon and Budget Policy](docs/visual-canon-budget.md)
+- [Causal Simulation Upgrade Set](docs/causal-simulation-upgrade-set.md)
 
 ## Quick Start
 

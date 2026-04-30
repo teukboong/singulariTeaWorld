@@ -289,9 +289,15 @@ mod tests {
     use super::*;
     use crate::agent_bridge::{
         AGENT_TURN_RESPONSE_SCHEMA_VERSION, AgentCommitTurnOptions, AgentSubmitTurnOptions,
-        AgentTurnResponse, commit_agent_turn, enqueue_agent_turn,
+        AgentTurnResponse, PendingAgentTurn, commit_agent_turn, enqueue_agent_turn,
     };
     use crate::models::{GUIDE_CHOICE_TAG, TurnChoice};
+    use crate::prompt_context::{CompilePromptContextPacketOptions, compile_prompt_context_packet};
+    use crate::resolution::{
+        ActionAmbiguity, ActionInputKind, ActionIntent, ChoicePlan, ChoicePlanKind, NarrativeBrief,
+        PressureNoopReason, RESOLUTION_PROPOSAL_SCHEMA_VERSION, ResolutionOutcome,
+        ResolutionOutcomeKind, ResolutionProposal,
+    };
     use crate::store::{InitWorldOptions, init_world};
     use tempfile::tempdir;
 
@@ -329,7 +335,10 @@ premise:
                 schema_version: AGENT_TURN_RESPONSE_SCHEMA_VERSION.to_owned(),
                 world_id: pending.world_id.clone(),
                 turn_id: pending.turn_id.clone(),
-                resolution_proposal: None,
+                resolution_proposal: Some(valid_resolution_proposal_for_pending(
+                    store.as_path(),
+                    &pending,
+                )?),
                 scene_director_proposal: None,
                 consequence_proposal: None,
                 social_exchange_proposal: None,
@@ -410,5 +419,92 @@ premise:
                 intent: "맡긴다. 세부 내용은 선택 후 드러난다.".to_owned(),
             },
         ]
+    }
+
+    fn valid_resolution_proposal_for_pending(
+        store: &Path,
+        pending: &PendingAgentTurn,
+    ) -> anyhow::Result<ResolutionProposal> {
+        let context = compile_prompt_context_packet(&CompilePromptContextPacketOptions {
+            store_root: Some(store),
+            pending,
+            engine_session_kind: "turn_commit_repair_fixture",
+        })?;
+        let mut next_choice_plan = context
+            .pre_turn_simulation
+            .available_affordances
+            .iter()
+            .map(|affordance| ChoicePlan {
+                slot: affordance.slot,
+                plan_kind: ChoicePlanKind::OrdinaryAffordance,
+                grounding_ref: affordance.affordance_id.clone(),
+                label_seed: format!("slot {} repair action", affordance.slot),
+                intent_seed: affordance.action_contract.clone(),
+                evidence_refs: vec![affordance.affordance_id.clone()],
+            })
+            .collect::<Vec<_>>();
+        next_choice_plan.push(ChoicePlan {
+            slot: 6,
+            plan_kind: ChoicePlanKind::Freeform,
+            grounding_ref: "current_turn".to_owned(),
+            label_seed: "자유서술".to_owned(),
+            intent_seed: "직접 행동을 입력한다.".to_owned(),
+            evidence_refs: vec!["current_turn".to_owned()],
+        });
+        next_choice_plan.push(ChoicePlan {
+            slot: 7,
+            plan_kind: ChoicePlanKind::DelegatedJudgment,
+            grounding_ref: "current_turn".to_owned(),
+            label_seed: "판단 위임".to_owned(),
+            intent_seed: "맡긴다. 세부 내용은 선택 후 드러난다.".to_owned(),
+            evidence_refs: vec!["current_turn".to_owned()],
+        });
+        let pressure_refs = context
+            .pre_turn_simulation
+            .pressure_obligations
+            .iter()
+            .map(|obligation| obligation.pressure_id.clone())
+            .collect::<Vec<_>>();
+
+        Ok(ResolutionProposal {
+            schema_version: RESOLUTION_PROPOSAL_SCHEMA_VERSION.to_owned(),
+            world_id: pending.world_id.clone(),
+            turn_id: pending.turn_id.clone(),
+            interpreted_intent: ActionIntent {
+                input_kind: ActionInputKind::PresentedChoice,
+                summary: "repair fixture resolves the queued player choice".to_owned(),
+                target_refs: Vec::new(),
+                pressure_refs: pressure_refs.clone(),
+                evidence_refs: vec!["current_turn".to_owned()],
+                ambiguity: ActionAmbiguity::Clear,
+            },
+            outcome: ResolutionOutcome {
+                kind: ResolutionOutcomeKind::Success,
+                summary: "the repair fixture scene advances".to_owned(),
+                evidence_refs: {
+                    let mut refs = vec!["current_turn".to_owned()];
+                    refs.extend(pressure_refs.iter().cloned());
+                    refs
+                },
+            },
+            gate_results: Vec::new(),
+            proposed_effects: Vec::new(),
+            process_ticks: Vec::new(),
+            pressure_noop_reasons: pressure_refs
+                .iter()
+                .map(|pressure_ref| PressureNoopReason {
+                    pressure_ref: pressure_ref.clone(),
+                    reason: "repair fixture records no durable pressure movement for this turn"
+                        .to_owned(),
+                    evidence_refs: vec![pressure_ref.clone()],
+                })
+                .collect(),
+            narrative_brief: NarrativeBrief {
+                visible_summary: "the repair fixture scene advances".to_owned(),
+                required_beats: Vec::new(),
+                forbidden_visible_details: Vec::new(),
+            },
+            next_choice_plan,
+        })
     }
 }

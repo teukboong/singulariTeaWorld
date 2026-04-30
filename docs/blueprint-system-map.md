@@ -14,6 +14,10 @@ simulation loop:
 6. commit writes append-only evidence and materialized state
 7. VN/web/MCP surfaces expose only player-visible projections
 
+See [Causal Simulation Upgrade Set](causal-simulation-upgrade-set.md) for the
+bounded implementation plan that adds a pre-turn simulation artifact,
+mandatory resolution proposals, and deterministic soak tests to this map.
+
 ## Adjustment Verdict
 
 The graph is directionally right, but it needs three cuts before

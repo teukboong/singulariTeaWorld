@@ -18,6 +18,7 @@ const LOG_PAGE_SIZE = 5;
 const SIDE_DOCK_RIGHT_EXIT_GRACE_MS = 900;
 const VISUAL_JOB_POLL_MS = 2500;
 const RUNTIME_STATUS_POLL_MS = 3000;
+const AGENT_POLL_MS = 750;
 const DEFAULT_VIEW_MODE = "text";
 const FREEFORM_CHOICE_SLOT = 6;
 const GUIDE_CHOICE_SLOT = 7;
@@ -2321,6 +2322,8 @@ async function submitTurnInput(input) {
   els.choicePanel.hidden = true;
   els.shell.classList.add("is-loading");
   els.outcomeBadge.textContent = AGENT_WAITING_BADGE;
+  const previousPacket = state.packet;
+  renderAgentWaitingStage(false);
   try {
     const response = await fetchJson(chooseApiUrl, {
       method: "POST",
@@ -2341,8 +2344,12 @@ async function submitTurnInput(input) {
       `singulari-world turn --world-id ${packet.world_id} --input ${shellQuote(input)} --render`,
     );
   } catch (error) {
+    state.awaitingAgent = false;
+    if (previousPacket) {
+      renderPacket(previousPacket);
+      revealChoices();
+    }
     showTransientLine(`진행 실패: ${error.message}`);
-    revealChoices();
   } finally {
     state.busy = false;
     if (!waitingForAgent) {
@@ -2413,7 +2420,7 @@ function pollCommittedAgentTurn(turnId, attempt) {
     if (attempt < 120) {
       pollCommittedAgentTurn(turnId, attempt + 1);
     }
-  }, 1500);
+  }, AGENT_POLL_MS);
 }
 
 function selectCommand(command) {

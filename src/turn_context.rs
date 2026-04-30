@@ -9,6 +9,7 @@ pub struct TurnContextPacket {
     pub schema_version: String,
     pub world_id: String,
     pub turn_id: String,
+    pub pending_turn: PendingAgentTurn,
     pub source_revival: Value,
     pub assembly_policy: TurnContextAssemblyPolicy,
 }
@@ -73,6 +74,7 @@ pub fn assemble_turn_context_packet(
         schema_version: TURN_CONTEXT_PACKET_SCHEMA_VERSION.to_owned(),
         world_id: pending.world_id.clone(),
         turn_id: pending.turn_id.clone(),
+        pending_turn: pending.clone(),
         source_revival,
         assembly_policy: TurnContextAssemblyPolicy::default(),
     }

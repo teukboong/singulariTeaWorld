@@ -7,6 +7,9 @@ use crate::body_resource::BodyResourcePacket;
 use crate::consequence_spine::ConsequenceSpinePacket;
 use crate::encounter_surface::{ENCOUNTER_SURFACE_PACKET_SCHEMA_VERSION, EncounterSurfacePacket};
 use crate::location_graph::LocationGraphPacket;
+use crate::pre_turn_simulation::{
+    PreTurnSimulationPass, SimulationSourceBundle, compile_pre_turn_simulation_pass,
+};
 use crate::prompt_context_budget::{
     PromptContextBudgetReport, PromptContextBudgetReportSource,
     compile_prompt_context_budget_report,
@@ -35,6 +38,7 @@ pub struct PromptContextPacket {
     pub current_turn: Value,
     pub opening_randomizer: Value,
     pub output_contract: Value,
+    pub pre_turn_simulation: PreTurnSimulationPass,
     pub visible_context: PromptVisibleContext,
     pub adjudication_context: PromptAdjudicationContext,
     pub source_of_truth_policy: Value,
@@ -202,6 +206,14 @@ pub fn assemble_prompt_context_packet(
         location_graph: &location_graph,
         private_context: &private_context,
     });
+    let pre_turn_simulation = compile_prompt_pre_turn_simulation(
+        turn_context,
+        &derived,
+        &body_resource,
+        &location_graph,
+        &scene_pressure,
+        &private_context,
+    );
     let prompt_policy = PromptContextPolicy::default();
     let budget_report = compile_prompt_budget_report(CompilePromptBudgetSource {
         turn_context,
@@ -240,6 +252,7 @@ pub fn assemble_prompt_context_packet(
         current_turn: required_path(source, "/current_turn")?.clone(),
         opening_randomizer: required_path(source, "/opening_randomizer")?.clone(),
         output_contract: serde_json::to_value(&output_contract)?,
+        pre_turn_simulation,
         visible_context,
         adjudication_context,
         source_of_truth_policy: required_path(source, "/source_of_truth_policy")?.clone(),
@@ -582,6 +595,40 @@ where
         .with_context(|| format!("prompt context source invalid packet at {label}"))
 }
 
+fn compile_prompt_pre_turn_simulation(
+    turn_context: &TurnContextPacket,
+    derived: &DerivedContextPackets,
+    body_resource: &BodyResourcePacket,
+    location_graph: &LocationGraphPacket,
+    scene_pressure: &ScenePressurePacket,
+    private_context: &crate::agent_bridge::AgentPrivateAdjudicationContext,
+) -> PreTurnSimulationPass {
+    compile_pre_turn_simulation_pass(&SimulationSourceBundle {
+        pending: turn_context.pending_turn.clone(),
+        affordance_graph: derived.affordance_graph.clone(),
+        body_resource_state: body_resource.clone(),
+        location_graph: location_graph.clone(),
+        scene_pressure: scene_pressure.clone(),
+        world_process_clock: derived.world_process_clock.clone(),
+        relationship_graph: turn_context
+            .pending_turn
+            .visible_context
+            .active_relationship_graph
+            .clone(),
+        consequence_spine: turn_context
+            .pending_turn
+            .visible_context
+            .active_consequence_spine
+            .clone(),
+        encounter_surface: turn_context
+            .pending_turn
+            .visible_context
+            .active_encounter_surface
+            .clone(),
+        private_adjudication_context: private_context.clone(),
+    })
+}
+
 /// Extract and validate the prompt context JSON from a complete `WebGPT` prompt.
 ///
 /// # Errors
@@ -617,6 +664,7 @@ mod tests {
             schema_version: crate::turn_context::TURN_CONTEXT_PACKET_SCHEMA_VERSION.to_owned(),
             world_id: "stw_prompt".to_owned(),
             turn_id: "turn_0003".to_owned(),
+            pending_turn: sample_pending_turn(),
             assembly_policy: crate::turn_context::TurnContextAssemblyPolicy::default(),
             source_revival: serde_json::json!({
                 "schema_version": "singulari.agent_revival_packet.v1",
@@ -748,6 +796,69 @@ mod tests {
         }
     }
 
+    fn sample_pending_turn() -> PendingAgentTurn {
+        PendingAgentTurn {
+            schema_version: crate::agent_bridge::AGENT_PENDING_TURN_SCHEMA_VERSION.to_owned(),
+            world_id: "stw_prompt".to_owned(),
+            turn_id: "turn_0003".to_owned(),
+            status: "pending".to_owned(),
+            player_input: "피한 눈을 살핀다".to_owned(),
+            selected_choice: None,
+            visible_context: crate::agent_bridge::AgentVisibleContext {
+                location: "place:prompt".to_owned(),
+                recent_scene: Vec::new(),
+                known_facts: Vec::new(),
+                voice_anchors: Vec::new(),
+                extra_memory: crate::extra_memory::ExtraMemoryPacket::default(),
+                active_scene_pressure: crate::scene_pressure::ScenePressurePacket::default(),
+                active_plot_threads: crate::plot_thread::PlotThreadPacket::default(),
+                active_body_resource_state: crate::body_resource::BodyResourcePacket::default(),
+                active_location_graph: crate::location_graph::LocationGraphPacket::default(),
+                active_character_text_design:
+                    crate::character_text_design::CharacterTextDesignPacket::default(),
+                active_world_lore: crate::world_lore::WorldLorePacket::default(),
+                active_relationship_graph:
+                    crate::relationship_graph::RelationshipGraphPacket::default(),
+                active_actor_agency: crate::actor_agency::ActorAgencyPacket::default(),
+                active_change_ledger: crate::change_ledger::ChangeLedgerPacket::default(),
+                active_pattern_debt: crate::pattern_debt::PatternDebtPacket::default(),
+                active_belief_graph: crate::belief_graph::BeliefGraphPacket::default(),
+                active_world_process_clock:
+                    crate::world_process_clock::WorldProcessClockPacket::default(),
+                active_player_intent_trace: crate::player_intent::PlayerIntentTracePacket::default(
+                ),
+                active_narrative_style_state:
+                    crate::narrative_style_state::NarrativeStyleState::default(),
+                active_scene_director: crate::scene_director::SceneDirectorPacket::default(),
+                active_consequence_spine: crate::consequence_spine::ConsequenceSpinePacket::default(
+                ),
+                active_social_exchange: crate::social_exchange::SocialExchangePacket::default(),
+                active_encounter_surface: crate::encounter_surface::EncounterSurfacePacket::default(
+                ),
+                active_turn_retrieval_controller:
+                    crate::turn_retrieval_controller::TurnRetrievalControllerPacket::default(),
+                selected_context_capsules: crate::context_capsule::ContextCapsuleSelection::default(
+                ),
+                active_autobiographical_index:
+                    crate::autobiographical_index::AutobiographicalIndexPacket::default(),
+            },
+            private_adjudication_context: crate::agent_bridge::AgentPrivateAdjudicationContext {
+                hidden_timers: Vec::new(),
+                unrevealed_constraints: Vec::new(),
+                plausibility_gates: Vec::new(),
+            },
+            output_contract: crate::agent_bridge::AgentOutputContract {
+                language: "ko".to_owned(),
+                must_return_json: true,
+                hidden_truth_must_not_appear_in_visible_text: true,
+                narrative_level: 1,
+                narrative_budget: crate::agent_bridge::narrative_budget_for_level(Some(1)),
+            },
+            pending_ref: "agent_bridge/pending_turn.json".to_owned(),
+            created_at: "2026-04-30T00:00:00Z".to_owned(),
+        }
+    }
+
     #[test]
     fn prompt_context_excludes_debug_revival_sections() -> anyhow::Result<()> {
         let context = assemble_prompt_context_packet(&sample_turn_context())?;
@@ -758,6 +869,25 @@ mod tests {
         assert!(!serialized.contains("stale full graph edge"));
         assert!(!serialized.contains("stale full lore"));
         assert!(!serialized.contains("relationship_summaries"));
+        Ok(())
+    }
+
+    #[test]
+    fn prompt_context_includes_pre_turn_simulation_pass() -> anyhow::Result<()> {
+        let context = assemble_prompt_context_packet(&sample_turn_context())?;
+
+        assert_eq!(
+            context.pre_turn_simulation.schema_version,
+            crate::pre_turn_simulation::PRE_TURN_SIMULATION_PASS_SCHEMA_VERSION
+        );
+        assert_eq!(context.pre_turn_simulation.world_id, "stw_prompt");
+        assert_eq!(context.pre_turn_simulation.turn_id, "turn_0003");
+        assert!(
+            context
+                .pre_turn_simulation
+                .required_resolution_fields
+                .resolution_proposal_required
+        );
         Ok(())
     }
 

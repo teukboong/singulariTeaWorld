@@ -416,11 +416,13 @@ pub fn prepare_social_exchange_event_plan(
 ) -> Result<SocialExchangeEventPlan> {
     let mut records = Vec::new();
     let recorded_at = Utc::now().to_rfc3339();
+    let mut event_context = current.clone();
     if let Some(proposal) = &response.social_exchange_proposal {
-        validate_social_exchange_proposal(current, proposal)?;
+        validate_social_exchange_proposal(current, proposal, Some(response.turn_id.as_str()))?;
+        event_context.turn_id.clone_from(&proposal.turn_id);
         for exchange in &proposal.exchanges {
             records.push(record_from_exchange(
-                current,
+                &event_context,
                 exchange,
                 records.len(),
                 recorded_at.as_str(),
@@ -428,7 +430,7 @@ pub fn prepare_social_exchange_event_plan(
         }
         for commitment in &proposal.commitments {
             records.push(record_from_commitment(
-                current,
+                &event_context,
                 commitment,
                 records.len(),
                 recorded_at.as_str(),
@@ -436,7 +438,7 @@ pub fn prepare_social_exchange_event_plan(
         }
         for ask in &proposal.unresolved_asks {
             records.push(record_from_ask(
-                current,
+                &event_context,
                 ask,
                 records.len(),
                 recorded_at.as_str(),
@@ -444,7 +446,7 @@ pub fn prepare_social_exchange_event_plan(
         }
         for leverage in &proposal.leverage_updates {
             records.push(record_from_leverage(
-                current,
+                &event_context,
                 leverage,
                 records.len(),
                 recorded_at.as_str(),
@@ -452,7 +454,7 @@ pub fn prepare_social_exchange_event_plan(
         }
         for closure in &proposal.paid_off_or_closed {
             records.push(record_from_closure(
-                current,
+                &event_context,
                 closure,
                 records.len(),
                 recorded_at.as_str(),
@@ -464,7 +466,7 @@ pub fn prepare_social_exchange_event_plan(
         .flat_map(|record| record.source_refs.iter().map(String::as_str))
         .collect::<BTreeSet<_>>();
     let mut derived = derive_social_exchange_records(
-        current,
+        &event_context,
         response,
         consequences,
         records.len(),
@@ -473,8 +475,8 @@ pub fn prepare_social_exchange_event_plan(
     );
     records.append(&mut derived);
     Ok(SocialExchangeEventPlan {
-        world_id: current.world_id.clone(),
-        turn_id: current.turn_id.clone(),
+        world_id: event_context.world_id.clone(),
+        turn_id: event_context.turn_id.clone(),
         records,
     })
 }
@@ -487,7 +489,7 @@ pub fn audit_social_exchange_contract(
     let Some(proposal) = &response.social_exchange_proposal else {
         return Ok(());
     };
-    validate_social_exchange_proposal(current, proposal)?;
+    validate_social_exchange_proposal(current, proposal, Some(response.turn_id.as_str()))?;
     let mut visible_refs = collect_strings(&serde_json::to_value(&context.visible_context)?);
     extend_response_visible_refs(&mut visible_refs, response);
     let known_refs = collect_known_social_refs(context, response);
@@ -589,11 +591,18 @@ pub fn audit_social_exchange_contract(
 fn validate_social_exchange_proposal(
     current: &SocialExchangePacket,
     proposal: &SocialExchangeProposal,
+    expected_turn_id: Option<&str>,
 ) -> Result<()> {
     if proposal.schema_version != SOCIAL_EXCHANGE_PROPOSAL_SCHEMA_VERSION {
         bail!("social exchange proposal schema_version mismatch");
     }
-    if proposal.world_id != current.world_id || proposal.turn_id != current.turn_id {
+    let next_turn_id = social_exchange_next_turn_id(current.turn_id.as_str()).ok();
+    let turn_matches = proposal.turn_id == current.turn_id
+        || next_turn_id
+            .as_deref()
+            .is_some_and(|turn_id| proposal.turn_id == turn_id)
+        || expected_turn_id.is_some_and(|turn_id| proposal.turn_id == turn_id);
+    if proposal.world_id != current.world_id || !turn_matches {
         bail!("social exchange proposal world_id/turn_id mismatch");
     }
     for exchange in &proposal.exchanges {
@@ -613,6 +622,16 @@ fn validate_social_exchange_proposal(
         }
     }
     Ok(())
+}
+
+fn social_exchange_next_turn_id(turn_id: &str) -> Result<String> {
+    let suffix = turn_id
+        .strip_prefix("turn_")
+        .context("social exchange current turn_id missing turn_ prefix")?;
+    let index: u64 = suffix
+        .parse()
+        .context("social exchange current turn_id suffix is not numeric")?;
+    Ok(format!("turn_{:04}", index + 1))
 }
 
 fn record_from_exchange(
@@ -1383,7 +1402,31 @@ fn reject_hidden_text(context: &PromptContextPacket, text: &str) -> Result<()> {
 fn collect_strings(value: &serde_json::Value) -> BTreeSet<String> {
     let mut refs = BTreeSet::new();
     collect_strings_into(value, &mut refs);
+    insert_social_ref_aliases(&mut refs);
     refs
+}
+
+fn insert_social_ref_aliases(refs: &mut BTreeSet<String>) {
+    let aliases = refs
+        .iter()
+        .filter_map(|item| relationship_ref_alias(item))
+        .collect::<Vec<_>>();
+    refs.extend(aliases);
+}
+
+fn relationship_ref_alias(item: &str) -> Option<String> {
+    let body = item.strip_prefix("relationship:rel_")?;
+    let (source, target) = body.split_once("-_")?;
+    Some(format!(
+        "rel:{}->{}",
+        underscored_entity_ref(source)?,
+        underscored_entity_ref(target)?
+    ))
+}
+
+fn underscored_entity_ref(value: &str) -> Option<String> {
+    let (prefix, suffix) = value.split_once('_')?;
+    Some(format!("{prefix}:{suffix}"))
 }
 
 fn collect_strings_into(value: &serde_json::Value, refs: &mut BTreeSet<String>) {
@@ -1570,6 +1613,7 @@ mod tests {
             }],
             proposed_effects: Vec::new(),
             process_ticks: Vec::new(),
+            pressure_noop_reasons: Vec::new(),
             narrative_brief: NarrativeBrief {
                 visible_summary: "답이 막힌다.".to_owned(),
                 required_beats: Vec::new(),

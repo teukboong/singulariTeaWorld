@@ -27,6 +27,7 @@ pub mod narrative_style_state;
 pub mod pattern_debt;
 pub mod player_intent;
 pub mod plot_thread;
+pub mod pre_turn_simulation;
 pub mod projection_health;
 pub mod projection_registry;
 pub mod prompt_context;
@@ -40,6 +41,8 @@ pub mod revival;
 pub mod runtime_profile;
 pub mod scene_director;
 pub mod scene_pressure;
+#[cfg(test)]
+mod simulator_soak;
 pub mod social_exchange;
 pub mod sqlite;
 pub mod start;
@@ -254,6 +257,11 @@ pub use plot_thread::{
     PlotThreadStatus, PlotThreadUrgency, append_plot_thread_audit, append_plot_thread_event_plan,
     compile_plot_thread_packet, load_plot_threads, prepare_plot_thread_event_plan,
     rebuild_plot_threads,
+};
+pub use pre_turn_simulation::{
+    PRE_TURN_SIMULATION_PASS_SCHEMA_VERSION, PreTurnSimulationPass,
+    SIMULATION_SOURCE_BUNDLE_SCHEMA_VERSION, SimulationSourceBundle,
+    compile_pre_turn_simulation_pass,
 };
 pub use projection_health::{
     PROJECTION_HEALTH_SCHEMA_VERSION, ProjectionComponentHealth, ProjectionHealthReport,

@@ -108,7 +108,8 @@ move, inspect, talk, hide, fight, trade, rest, craft, remember, ask_for_help,
 take_risk, wait, use_object, freeform
 ```
 
-Slots 1, 2, 3, 5, and 6 must be scene-specific. Their labels are UI text; the
+Slots 1-5 must be scene-specific ordinary choices. Slot 6 is the inline
+`자유서술` surface, and slot 7 is `판단 위임`. Choice labels are UI text; the
 slot numbers carry the stable contract.
 
 ## Prompt Layers

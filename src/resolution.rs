@@ -26,6 +26,8 @@ pub struct ResolutionProposal {
     pub proposed_effects: Vec<ProposedEffect>,
     #[serde(default)]
     pub process_ticks: Vec<ProcessTickProposal>,
+    #[serde(default)]
+    pub pressure_noop_reasons: Vec<PressureNoopReason>,
     pub narrative_brief: NarrativeBrief,
     #[serde(default)]
     pub next_choice_plan: Vec<ChoicePlan>,
@@ -156,6 +158,14 @@ pub enum ProcessTickCause {
     ScenePressureChanged,
     NextTickConditionMet,
     HiddenRevealConditionSatisfied,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PressureNoopReason {
+    pub pressure_ref: String,
+    pub reason: String,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -331,6 +341,7 @@ struct ResolutionAuditor {
     turn_id: String,
     visible_refs: BTreeSet<String>,
     affordances_by_slot: BTreeMap<u8, crate::affordance_graph::AffordanceNode>,
+    pressure_obligation_ids: Vec<String>,
     hidden_refs: BTreeSet<String>,
     hidden_needles: Vec<String>,
 }
@@ -347,6 +358,12 @@ impl ResolutionAuditor {
             turn_id: context.turn_id.clone(),
             visible_refs,
             affordances_by_slot,
+            pressure_obligation_ids: context
+                .pre_turn_simulation
+                .pressure_obligations
+                .iter()
+                .map(|obligation| obligation.pressure_id.clone())
+                .collect(),
             hidden_refs,
             hidden_needles,
         })
@@ -359,6 +376,7 @@ impl ResolutionAuditor {
         self.audit_header(proposal)?;
         Self::audit_evidence(proposal)?;
         self.audit_refs(proposal)?;
+        self.audit_pressure_obligations(proposal)?;
         self.audit_choice_grounding(proposal)?;
         self.audit_hidden_visibility(proposal)
     }
@@ -399,6 +417,9 @@ impl ResolutionAuditor {
         for tick in &proposal.process_ticks {
             require_evidence("process_tick", &tick.evidence_refs)?;
         }
+        for noop in &proposal.pressure_noop_reasons {
+            require_evidence("pressure_noop_reason", &noop.evidence_refs)?;
+        }
         for choice in &proposal.next_choice_plan {
             require_evidence("choice_plan", &choice.evidence_refs)?;
         }
@@ -424,6 +445,9 @@ impl ResolutionAuditor {
         for tick in &proposal.process_ticks {
             self.require_known_ref(&tick.process_ref, tick.visibility)?;
         }
+        for noop in &proposal.pressure_noop_reasons {
+            self.require_known_ref(&noop.pressure_ref, ResolutionVisibility::PlayerVisible)?;
+        }
         for choice in &proposal.next_choice_plan {
             self.require_known_ref(&choice.grounding_ref, ResolutionVisibility::PlayerVisible)?;
         }
@@ -440,6 +464,13 @@ impl ResolutionAuditor {
         }
         if visibility == ResolutionVisibility::AdjudicationOnly
             && self.hidden_refs.contains(item_ref)
+        {
+            return Ok(());
+        }
+        if visibility == ResolutionVisibility::PlayerVisible
+            && shorthand_affordance_ref_slot(item_ref, &self.turn_id)
+                .and_then(|slot| self.affordances_by_slot.get(&slot))
+                .is_some()
         {
             return Ok(());
         }
@@ -465,13 +496,6 @@ impl ResolutionAuditor {
                             vec![choice.slot.to_string()],
                         ));
                     }
-                    if !choice.grounding_ref.starts_with("affordance:") {
-                        return Err(critique_with_refs(
-                            ResolutionFailureKind::ChoiceGrounding,
-                            "ordinary choice plans must be grounded in an affordance id",
-                            vec![choice.grounding_ref.clone()],
-                        ));
-                    }
                 }
                 ChoicePlanKind::Freeform => {
                     if choice.slot != 6 {
@@ -492,6 +516,25 @@ impl ResolutionAuditor {
                     }
                 }
             }
+        }
+        Ok(())
+    }
+
+    fn audit_pressure_obligations(
+        &self,
+        proposal: &ResolutionProposal,
+    ) -> std::result::Result<(), Box<ResolutionCritique>> {
+        for pressure_id in &self.pressure_obligation_ids {
+            if proposal_moves_pressure(proposal, pressure_id)
+                || proposal_has_pressure_noop_reason(proposal, pressure_id)
+            {
+                continue;
+            }
+            return Err(critique_with_refs(
+                ResolutionFailureKind::Causality,
+                "resolution proposal does not move or explicitly defer a pre-turn pressure obligation",
+                vec![pressure_id.clone()],
+            ));
         }
         Ok(())
     }
@@ -530,6 +573,7 @@ fn audit_choice_plan_complete(
             planned_slots.iter().map(u8::to_string).collect(),
         ));
     }
+    let mut grounded_affordance_slots = BTreeSet::new();
     for slot in 1..=5 {
         let Some(choice) = proposal
             .next_choice_plan
@@ -549,28 +593,60 @@ fn audit_choice_plan_complete(
                 vec![slot.to_string()],
             ));
         }
-        let Some(affordance) = affordances.get(&slot) else {
+        let Some(affordance_slot) =
+            affordance_slot_for_grounding_ref(choice.grounding_ref.as_str(), affordances)
+        else {
             return Err(critique_with_refs(
                 ResolutionFailureKind::ChoiceGrounding,
-                "ordinary choice plan has no compiled affordance for its slot",
-                vec![slot.to_string()],
+                "ordinary choice plan must cite one compiled affordance id",
+                vec![choice.grounding_ref.clone()],
             ));
         };
-        if choice.grounding_ref != affordance.affordance_id {
-            return Err(critique_with_refs(
-                ResolutionFailureKind::ChoiceGrounding,
-                "ordinary choice plan must cite the compiled affordance id for its slot",
-                vec![
-                    choice.grounding_ref.clone(),
-                    affordance.affordance_id.clone(),
-                ],
-            ));
-        }
+        grounded_affordance_slots.insert(affordance_slot);
+    }
+    let expected_affordance_slots = affordances.keys().copied().collect::<BTreeSet<_>>();
+    if grounded_affordance_slots != expected_affordance_slots {
+        return Err(critique_with_refs(
+            ResolutionFailureKind::ChoiceGrounding,
+            "ordinary choice plan must cite each compiled affordance exactly once",
+            grounded_affordance_slots
+                .iter()
+                .map(u8::to_string)
+                .collect(),
+        ));
     }
 
     require_choice_plan_kind(proposal, 6, ChoicePlanKind::Freeform)?;
     require_choice_plan_kind(proposal, 7, ChoicePlanKind::DelegatedJudgment)?;
     Ok(())
+}
+
+fn affordance_slot_for_grounding_ref(
+    grounding_ref: &str,
+    affordances: &BTreeMap<u8, crate::affordance_graph::AffordanceNode>,
+) -> Option<u8> {
+    for (slot, affordance) in affordances {
+        if grounding_ref == affordance.affordance_id {
+            return Some(*slot);
+        }
+    }
+    let slot = shorthand_affordance_ref_slot(grounding_ref, "")?;
+    affordances
+        .get(&slot)
+        .is_some_and(|affordance| affordance.affordance_id.starts_with("encounter:"))
+        .then_some(slot)
+}
+
+fn shorthand_affordance_ref_slot(item_ref: &str, turn_id: &str) -> Option<u8> {
+    if !item_ref.starts_with("encounter:") || !item_ref.ends_with("::affordance") {
+        return None;
+    }
+    if !turn_id.is_empty() && !item_ref.starts_with(format!("encounter:{turn_id}:slot:").as_str()) {
+        return None;
+    }
+    let (_, slot_tail) = item_ref.split_once(":slot:")?;
+    let slot = slot_tail.strip_suffix("::affordance")?;
+    slot.parse().ok()
 }
 
 fn require_choice_plan_kind(
@@ -597,6 +673,28 @@ fn require_choice_plan_kind(
         ));
     }
     Ok(())
+}
+
+fn proposal_moves_pressure(proposal: &ResolutionProposal, pressure_id: &str) -> bool {
+    proposal.gate_results.iter().any(|gate| {
+        gate.gate_ref == pressure_id || gate.evidence_refs.iter().any(|item| item == pressure_id)
+    }) || proposal.proposed_effects.iter().any(|effect| {
+        effect.target_ref == pressure_id
+            || effect.evidence_refs.iter().any(|item| item == pressure_id)
+    }) || proposal.process_ticks.iter().any(|tick| {
+        tick.process_ref == pressure_id || tick.evidence_refs.iter().any(|item| item == pressure_id)
+    })
+}
+
+fn proposal_has_pressure_noop_reason(proposal: &ResolutionProposal, pressure_id: &str) -> bool {
+    proposal.pressure_noop_reasons.iter().any(|noop| {
+        noop.pressure_ref == pressure_id
+            && !noop.reason.trim().is_empty()
+            && noop
+                .evidence_refs
+                .iter()
+                .any(|item| !item.trim().is_empty())
+    })
 }
 
 fn audit_visible_choice_text_against_affordances(
@@ -723,7 +821,31 @@ fn collect_visible_refs(context: &PromptContextPacket) -> Result<BTreeSet<String
     collect_string_refs_from_value(&visible.active_plot_threads, &mut refs);
     collect_string_refs_from_value(&visible.selected_context_capsules, &mut refs);
     collect_string_refs_from_value(&visible.selected_memory_items, &mut refs);
+    insert_visible_ref_aliases(&mut refs);
     Ok(refs)
+}
+
+fn insert_visible_ref_aliases(refs: &mut BTreeSet<String>) {
+    let aliases = refs
+        .iter()
+        .filter_map(|item| relationship_ref_alias(item))
+        .collect::<Vec<_>>();
+    refs.extend(aliases);
+}
+
+fn relationship_ref_alias(item: &str) -> Option<String> {
+    let body = item.strip_prefix("relationship:rel_")?;
+    let (source, target) = body.split_once("-_")?;
+    Some(format!(
+        "rel:{}->{}",
+        underscored_entity_ref(source)?,
+        underscored_entity_ref(target)?
+    ))
+}
+
+fn underscored_entity_ref(value: &str) -> Option<String> {
+    let (prefix, suffix) = value.split_once('_')?;
+    Some(format!("{prefix}:{suffix}"))
 }
 
 fn collect_affordances_by_slot(
@@ -843,6 +965,12 @@ fn proposal_visible_text(proposal: &ResolutionProposal) -> String {
     values.extend(proposal.process_ticks.iter().filter_map(|tick| {
         (tick.visibility == ResolutionVisibility::PlayerVisible).then_some(tick.summary.as_str())
     }));
+    values.extend(
+        proposal
+            .pressure_noop_reasons
+            .iter()
+            .map(|noop| noop.reason.as_str()),
+    );
     for choice in &proposal.next_choice_plan {
         values.push(choice.label_seed.as_str());
         values.push(choice.intent_seed.as_str());
@@ -906,7 +1034,12 @@ mod tests {
         LOCATION_GRAPH_PACKET_SCHEMA_VERSION, LOCATION_NODE_SCHEMA_VERSION, LocationGraphPolicy,
         LocationKnowledgeState, LocationNode,
     };
-    use crate::models::TurnChoice;
+    use crate::models::{TurnChoice, TurnInputKind};
+    use crate::pre_turn_simulation::{
+        HiddenVisibilityBoundary, PRE_TURN_SIMULATION_PASS_SCHEMA_VERSION, PreTurnSimulationPass,
+        PreTurnSimulationPolicy, PressureObligation, RequiredResolutionFields,
+        SIMULATION_SOURCE_BUNDLE_SCHEMA_VERSION,
+    };
     use crate::prompt_context::{
         PROMPT_CONTEXT_PACKET_SCHEMA_VERSION, PromptAdjudicationContext, PromptContextPacket,
         PromptContextPolicy, PromptVisibleContext,
@@ -992,6 +1125,50 @@ mod tests {
     }
 
     #[test]
+    fn accepts_webgpt_shorthand_encounter_affordance_refs_for_current_turn() {
+        let mut context = sample_context();
+        context.visible_context.affordance_graph = to_json_value(AffordanceGraphPacket {
+            schema_version: AFFORDANCE_GRAPH_PACKET_SCHEMA_VERSION.to_owned(),
+            world_id: "stw_resolution".to_owned(),
+            turn_id: "turn_0004".to_owned(),
+            ordinary_choice_slots: vec![
+                sample_affordance_node(1, "___", AffordanceKind::Move),
+                sample_affordance_node(2, "__", AffordanceKind::Observe),
+                sample_affordance_node(3, "__", AffordanceKind::Contact),
+                sample_affordance_node(4, "__", AffordanceKind::ResourceOrBody),
+                sample_affordance_node(5, "__", AffordanceKind::PressureResponse),
+            ]
+            .into_iter()
+            .map(|mut affordance| {
+                affordance.affordance_id = format!(
+                    "encounter:turn_0004:slot:{}:{}:affordance",
+                    affordance.slot,
+                    if affordance.slot == 1 { "___" } else { "__" }
+                );
+                affordance
+            })
+            .collect(),
+            compiler_policy: AffordanceGraphPolicy::default(),
+        });
+        let mut proposal = sample_proposal();
+        proposal.gate_results[0].gate_ref = "encounter:turn_0004:slot:4::affordance".to_owned();
+        for choice in &mut proposal.next_choice_plan {
+            if (1..=5).contains(&choice.slot) {
+                choice.grounding_ref =
+                    format!("encounter:turn_0004:slot:{}::affordance", choice.slot);
+            }
+        }
+        proposal.next_choice_plan[0].grounding_ref =
+            "encounter:turn_0004:slot:5::affordance".to_owned();
+        proposal.next_choice_plan[4].grounding_ref =
+            "encounter:turn_0004:slot:1::affordance".to_owned();
+
+        if let Err(critique) = audit_resolution_proposal(&context, &proposal) {
+            panic!("current-turn shorthand encounter affordance refs should pass: {critique:?}");
+        }
+    }
+
+    #[test]
     fn rejects_ordinary_choice_without_affordance_grounding() {
         let context = sample_context();
         let mut proposal = sample_proposal();
@@ -1047,6 +1224,54 @@ mod tests {
     }
 
     #[test]
+    fn rejects_uncovered_pre_turn_pressure_obligation() {
+        let context = sample_context();
+        let mut proposal = sample_proposal();
+        proposal
+            .interpreted_intent
+            .pressure_refs
+            .retain(|item| item != "pressure:social:gate");
+        proposal
+            .outcome
+            .evidence_refs
+            .retain(|item| item != "pressure:social:gate");
+        proposal
+            .outcome
+            .evidence_refs
+            .push("current_turn".to_owned());
+        proposal.gate_results.clear();
+        proposal.proposed_effects.clear();
+        proposal.process_ticks.clear();
+        for choice in &mut proposal.next_choice_plan {
+            choice
+                .evidence_refs
+                .retain(|item| item != "pressure:social:gate");
+        }
+
+        let critique = audit_failure(&context, &proposal);
+        assert_eq!(critique.failure_kind, ResolutionFailureKind::Causality);
+        assert_eq!(critique.rejected_refs, vec!["pressure:social:gate"]);
+    }
+
+    #[test]
+    fn accepts_explicit_pressure_noop_reason() {
+        let context = sample_context();
+        let mut proposal = sample_proposal();
+        proposal.gate_results.clear();
+        proposal.proposed_effects.clear();
+        proposal.process_ticks.clear();
+        proposal.pressure_noop_reasons = vec![PressureNoopReason {
+            pressure_ref: "pressure:social:gate".to_owned(),
+            reason: "이번 턴은 압력을 관찰만 했고 직접 밀지는 않는다.".to_owned(),
+            evidence_refs: vec!["pressure:social:gate".to_owned()],
+        }];
+
+        if let Err(critique) = audit_resolution_proposal(&context, &proposal) {
+            panic!("explicit pressure noop reason should pass audit: {critique:?}");
+        }
+    }
+
+    #[test]
     fn derives_freeform_gate_trace_from_resolution_proposal() {
         let proposal = sample_proposal();
         let Some(trace) = freeform_gate_trace_from_proposal("6 문지기에게 둘러댄다", &proposal)
@@ -1078,6 +1303,7 @@ mod tests {
                 narrative_level: 1,
                 narrative_budget: crate::agent_bridge::narrative_budget_for_level(Some(1)),
             }),
+            pre_turn_simulation: sample_pre_turn_simulation(),
             visible_context: PromptVisibleContext {
                 recent_scene_window: serde_json::json!(["서쪽 문 앞에 문지기가 서 있다."]),
                 known_facts: serde_json::json!(["place:west_gate", "pressure:social:gate"]),
@@ -1241,6 +1467,46 @@ mod tests {
         }
     }
 
+    fn sample_pre_turn_simulation() -> PreTurnSimulationPass {
+        PreTurnSimulationPass {
+            schema_version: PRE_TURN_SIMULATION_PASS_SCHEMA_VERSION.to_owned(),
+            source_bundle_schema_version: SIMULATION_SOURCE_BUNDLE_SCHEMA_VERSION.to_owned(),
+            world_id: "stw_resolution".to_owned(),
+            turn_id: "turn_0004".to_owned(),
+            player_input: "6 문지기에게 둘러댄다".to_owned(),
+            input_kind: TurnInputKind::FreeformAction,
+            selected_choice: None,
+            source_refs: vec![
+                "turn:turn_0004".to_owned(),
+                "pressure:social:gate".to_owned(),
+                "affordance:slot:1:move".to_owned(),
+            ],
+            available_affordances: Vec::new(),
+            blocked_affordances: Vec::new(),
+            pressure_obligations: vec![PressureObligation {
+                pressure_id: "pressure:social:gate".to_owned(),
+                kind: ScenePressureKind::SocialPermission,
+                obligation: "Move this pressure or state a visible no-op reason.".to_owned(),
+                evidence_refs: vec!["pressure:social:gate".to_owned()],
+            }],
+            due_processes: Vec::new(),
+            causal_risks: Vec::new(),
+            required_resolution_fields: RequiredResolutionFields {
+                resolution_proposal_required: true,
+                next_choice_plan_required: true,
+                pressure_movement_or_noop_reason_required: true,
+                reason: "test fixture".to_owned(),
+            },
+            hidden_visibility_boundary: HiddenVisibilityBoundary {
+                hidden_timer_count: 1,
+                unrevealed_constraint_count: 1,
+                forbidden_visible_needles: vec!["밀서".to_owned()],
+                render_policy: "test fixture".to_owned(),
+            },
+            compiler_policy: PreTurnSimulationPolicy::default(),
+        }
+    }
+
     fn sample_affordance_node(slot: u8, suffix: &str, kind: AffordanceKind) -> AffordanceNode {
         AffordanceNode {
             schema_version: AFFORDANCE_NODE_SCHEMA_VERSION.to_owned(),
@@ -1342,6 +1608,7 @@ mod tests {
                 summary: "문이 닫히기 전 남은 시간이 더 빡빡해진다.".to_owned(),
                 evidence_refs: vec!["pressure:social:gate".to_owned()],
             }],
+            pressure_noop_reasons: Vec::new(),
             narrative_brief: NarrativeBrief {
                 visible_summary: "문지기의 눈이 좁아지고, 말끝을 붙잡는 침묵이 길어진다."
                     .to_owned(),

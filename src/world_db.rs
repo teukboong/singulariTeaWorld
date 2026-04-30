@@ -2686,15 +2686,15 @@ fn index_relationship_updates(conn: &Connection, world_id: &str) -> Result<()> {
 }
 
 fn index_materialized_projections(conn: &Connection, world_id: &str) -> Result<()> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT projection_id, projection_kind, title, summary
-             FROM materialized_projections
-             WHERE world_id = ?1",
-        )
-        .context("world.db search index materialized projections prepare failed")?;
-    let rows = stmt
-        .query_map(params![world_id], |row| {
+    let rows = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT projection_id, projection_kind, title, summary
+                 FROM materialized_projections
+                 WHERE world_id = ?1",
+            )
+            .context("world.db search index materialized projections prepare failed")?;
+        stmt.query_map(params![world_id], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -2702,10 +2702,12 @@ fn index_materialized_projections(conn: &Connection, world_id: &str) -> Result<(
                 row.get::<_, String>(3)?,
             ))
         })
-        .context("world.db search index materialized projections query failed")?;
+        .context("world.db search index materialized projections query failed")?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("world.db search index materialized projection row failed")?
+    };
     for row in rows {
-        let (projection_id, projection_kind, title, summary) =
-            row.context("world.db search index materialized projection row failed")?;
+        let (projection_id, projection_kind, title, summary) = row;
         insert_search_document(
             conn,
             world_id,

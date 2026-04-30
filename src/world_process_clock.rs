@@ -530,6 +530,7 @@ mod tests {
                 summary: "문이 조금 더 닫힌다.".to_owned(),
                 evidence_refs: vec!["process:visible_pressure:00".to_owned()],
             }],
+            pressure_noop_reasons: Vec::new(),
             narrative_brief: NarrativeBrief {
                 visible_summary: "문틈이 좁아진다.".to_owned(),
                 required_beats: Vec::new(),

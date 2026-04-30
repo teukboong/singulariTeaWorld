@@ -1729,7 +1729,9 @@ fn audit_scene_director_resolution_coupling(
             vec!["Use a costly_success outcome, cost_imposed gate, or player-visible effect evidence.".to_owned()],
         ));
     }
-    if proposal.beat_kind == DramaticBeatKind::Reveal && !resolution_supports_reveal(resolution) {
+    if proposal.beat_kind == DramaticBeatKind::Reveal
+        && !resolution_supports_reveal(resolution, proposal)
+    {
         return Err(scene_director_critique(
             context,
             SceneDirectorFailureKind::Evidence,
@@ -1756,24 +1758,44 @@ fn resolution_supports_cost(resolution: &ResolutionProposal) -> bool {
         })
 }
 
-fn resolution_supports_reveal(resolution: &ResolutionProposal) -> bool {
-    !resolution.outcome.evidence_refs.is_empty()
-        && (resolution.outcome.summary.contains("드러")
-            || resolution.outcome.summary.contains("밝혀")
-            || resolution
-                .outcome
-                .summary
-                .to_ascii_lowercase()
-                .contains("reveal"))
-        || resolution.proposed_effects.iter().any(|effect| {
-            effect.visibility == ResolutionVisibility::PlayerVisible
-                && matches!(
-                    effect.effect_kind,
-                    crate::resolution::ProposedEffectKind::BeliefDelta
-                        | crate::resolution::ProposedEffectKind::WorldLoreDelta
-                )
-                && !effect.evidence_refs.is_empty()
-        })
+fn resolution_supports_reveal(
+    resolution: &ResolutionProposal,
+    proposal: &SceneDirectorProposal,
+) -> bool {
+    let support_refs = resolution_reveal_support_refs(resolution);
+    !support_refs.is_empty()
+        && proposal
+            .evidence_refs
+            .iter()
+            .any(|evidence_ref| support_refs.contains(evidence_ref.as_str()))
+}
+
+fn resolution_reveal_support_refs(resolution: &ResolutionProposal) -> BTreeSet<&str> {
+    let mut refs = BTreeSet::new();
+    if resolution.outcome.kind != ResolutionOutcomeKind::Blocked {
+        refs.extend(resolution.outcome.evidence_refs.iter().map(String::as_str));
+    }
+    for gate in &resolution.gate_results {
+        if gate.visibility == ResolutionVisibility::PlayerVisible
+            && matches!(
+                gate.status,
+                GateStatus::Passed | GateStatus::Softened | GateStatus::CostImposed
+            )
+        {
+            refs.extend(gate.evidence_refs.iter().map(String::as_str));
+        }
+    }
+    for effect in &resolution.proposed_effects {
+        if effect.visibility == ResolutionVisibility::PlayerVisible {
+            refs.extend(effect.evidence_refs.iter().map(String::as_str));
+        }
+    }
+    for tick in &resolution.process_ticks {
+        if tick.visibility == ResolutionVisibility::PlayerVisible {
+            refs.extend(tick.evidence_refs.iter().map(String::as_str));
+        }
+    }
+    refs
 }
 
 fn audit_scene_director_choice_strategy(
@@ -1869,11 +1891,78 @@ fn scene_director_critique(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resolution::{
+        ActionAmbiguity, ActionInputKind, ActionIntent, NarrativeBrief,
+        RESOLUTION_PROPOSAL_SCHEMA_VERSION, ResolutionOutcome,
+    };
     use crate::scene_pressure::{
         SCENE_PRESSURE_PACKET_SCHEMA_VERSION, SCENE_PRESSURE_SCHEMA_VERSION, ScenePressurePolicy,
         ScenePressureProseEffect, ScenePressureVisibility,
     };
     use serde_json::json;
+
+    #[test]
+    fn reveal_coupling_uses_structural_evidence_not_wording() {
+        let resolution = ResolutionProposal {
+            schema_version: RESOLUTION_PROPOSAL_SCHEMA_VERSION.to_owned(),
+            world_id: "world".to_owned(),
+            turn_id: "turn_0008".to_owned(),
+            interpreted_intent: ActionIntent {
+                input_kind: ActionInputKind::PresentedChoice,
+                summary: "player examines the current surface".to_owned(),
+                target_refs: Vec::new(),
+                pressure_refs: Vec::new(),
+                evidence_refs: vec!["surface:mark".to_owned()],
+                ambiguity: ActionAmbiguity::Clear,
+            },
+            outcome: ResolutionOutcome {
+                kind: ResolutionOutcomeKind::PartialSuccess,
+                summary: "표현은 자유롭고 특정 키워드에 묶이지 않는다.".to_owned(),
+                evidence_refs: vec!["surface:mark".to_owned()],
+            },
+            gate_results: Vec::new(),
+            proposed_effects: Vec::new(),
+            process_ticks: Vec::new(),
+            pressure_noop_reasons: Vec::new(),
+            narrative_brief: NarrativeBrief {
+                visible_summary: "scene changes through visible evidence".to_owned(),
+                required_beats: Vec::new(),
+                forbidden_visible_details: Vec::new(),
+            },
+            next_choice_plan: Vec::new(),
+        };
+        let proposal = SceneDirectorProposal {
+            schema_version: SCENE_DIRECTOR_PROPOSAL_SCHEMA_VERSION.to_owned(),
+            world_id: "world".to_owned(),
+            turn_id: "turn_0008".to_owned(),
+            scene_id: "scene:active".to_owned(),
+            beat_kind: DramaticBeatKind::Reveal,
+            turn_function: "advance the visible question".to_owned(),
+            tension_before: TensionLevel::Medium,
+            tension_after: TensionLevel::Medium,
+            scene_effect: SceneEffect::SceneQuestionNarrowed,
+            paragraph_strategy: ParagraphStrategy {
+                opening_shape: "evidence".to_owned(),
+                middle_shape: "changed attention".to_owned(),
+                closure_shape: "new pressure".to_owned(),
+            },
+            choice_strategy: ChoiceStrategy {
+                must_change_choice_shape: true,
+                avoid_recent_choice_tags: Vec::new(),
+            },
+            transition: None,
+            evidence_refs: vec!["surface:mark".to_owned()],
+        };
+
+        assert!(resolution_supports_reveal(&resolution, &proposal));
+        assert!(!resolution_supports_reveal(
+            &resolution,
+            &SceneDirectorProposal {
+                evidence_refs: vec!["unrelated:ref".to_owned()],
+                ..proposal
+            }
+        ));
+    }
 
     #[test]
     fn compiles_high_tension_advisory_from_visible_pressure() {
