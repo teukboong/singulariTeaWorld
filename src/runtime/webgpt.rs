@@ -2246,6 +2246,7 @@ fn normalize_location_events(response: &mut serde_json::Map<String, Value>) {
         let Some(event) = event.as_object_mut() else {
             continue;
         };
+        move_string_field(event, "location_ref", "location_id");
         move_string_field(event, "target_ref", "location_id");
         if !event.contains_key("event_kind") {
             let kind = event
@@ -3280,7 +3281,12 @@ premise:
                 "text_blocks": ["test"],
                 "tone_notes": []
             },
-            "next_choices": []
+            "next_choices": [],
+            "location_events": [{
+                "location_ref": "place:opening_location",
+                "summary": "test",
+                "evidence_refs": ["player_input"]
+            }]
         });
 
         normalize_webgpt_agent_turn_response(&mut value, &HashMap::new());
@@ -3304,6 +3310,14 @@ premise:
         assert_eq!(
             value["resolution_proposal"]["process_ticks"][0]["visibility"],
             serde_json::json!("adjudication_only")
+        );
+        assert_eq!(
+            value["location_events"][0]["location_id"],
+            serde_json::json!("place:opening_location")
+        );
+        assert_eq!(
+            value["location_events"][0]["event_kind"],
+            serde_json::json!("visited")
         );
     }
 
