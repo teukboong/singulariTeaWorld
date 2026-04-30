@@ -596,13 +596,37 @@ fn world_jobs_health(store_root: Option<&Path>, world_id: &str) -> ProjectionCom
                 .iter()
                 .filter(|job| job.status == WorldJobStatus::Completed)
                 .count();
+            let failed_terminal = jobs
+                .iter()
+                .filter(|job| job.status == WorldJobStatus::FailedTerminal)
+                .collect::<Vec<_>>();
+            let failed_retryable = jobs
+                .iter()
+                .filter(|job| job.status == WorldJobStatus::FailedRetryable)
+                .count();
+            let warnings = failed_terminal
+                .iter()
+                .map(|job| {
+                    format!(
+                        "terminal world job failure: kind={:?}, slot={}, error={}",
+                        job.kind,
+                        job.slot,
+                        job.last_error.as_deref().unwrap_or("<missing>")
+                    )
+                })
+                .collect::<Vec<_>>();
             ProjectionComponentHealth {
                 component: "world_jobs".to_owned(),
-                status: ProjectionHealthStatus::Healthy,
+                status: if failed_terminal.is_empty() {
+                    ProjectionHealthStatus::Healthy
+                } else {
+                    ProjectionHealthStatus::Degraded
+                },
                 detail: format!(
-                    "text_pending={text_pending}, visual_pending={visual_pending}, claimed={claimed}, completed={completed}"
+                    "text_pending={text_pending}, visual_pending={visual_pending}, claimed={claimed}, completed={completed}, failed_retryable={failed_retryable}, failed_terminal={}",
+                    failed_terminal.len()
                 ),
-                warnings: Vec::new(),
+                warnings,
                 errors: Vec::new(),
             }
         }
@@ -711,6 +735,8 @@ fn read_advisory_warning_events(path: &Path) -> Result<Vec<AdvisoryWarningEvent>
 #[cfg(test)]
 mod tests {
     use crate::agent_bridge::{ADVISORY_WARNING_EVENT_SCHEMA_VERSION, AdvisoryWarningEvent};
+    use crate::agent_bridge::{AgentSubmitTurnOptions, enqueue_agent_turn};
+    use crate::job_ledger::{WorldJobStatus, WriteTextTurnJobOptions, write_text_turn_job};
     use crate::projection_health::{
         ProjectionHealthStatus, build_projection_health_report, render_projection_health_report,
     };
@@ -1078,6 +1104,53 @@ premise:
         assert!(rendered.contains("latest_component=hook_ledger_promises"));
         assert!(rendered.contains("latest_kind=advisory_journal_append_failed"));
         assert!(rendered.contains("simulated append loss"));
+        Ok(())
+    }
+
+    #[test]
+    fn projection_health_degrades_on_terminal_text_job_failure() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(&seed_path, seed_body())?;
+        init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+        let pending = enqueue_agent_turn(&AgentSubmitTurnOptions {
+            store_root: Some(store.clone()),
+            world_id: "stw_projection_health".to_owned(),
+            input: "1".to_owned(),
+            narrative_level: None,
+        })?;
+        write_text_turn_job(&WriteTextTurnJobOptions {
+            store_root: Some(store.as_path()),
+            pending: &pending,
+            status: WorldJobStatus::FailedTerminal,
+            output_ref: Some("agent_bridge/dispatches/turn_0001-webgpt.json".to_owned()),
+            claim_owner: Some("webgpt_host_worker".to_owned()),
+            attempt_id: Some("webgpt:turn_0001".to_owned()),
+            last_error: Some("unknown variant hidden".to_owned()),
+        })?;
+
+        let report = build_projection_health_report(Some(&store), "stw_projection_health")?;
+
+        assert_eq!(report.status, ProjectionHealthStatus::Degraded);
+        let Some(world_jobs) = report
+            .components
+            .iter()
+            .find(|component| component.component == "world_jobs")
+        else {
+            anyhow::bail!("world_jobs health component missing");
+        };
+        assert_eq!(world_jobs.status, ProjectionHealthStatus::Degraded);
+        assert!(world_jobs.detail.contains("failed_terminal=1"));
+        assert!(world_jobs.warnings.iter().any(|warning| {
+            warning.contains("terminal world job failure")
+                && warning.contains("turn_0001")
+                && warning.contains("unknown variant hidden")
+        }));
         Ok(())
     }
 }

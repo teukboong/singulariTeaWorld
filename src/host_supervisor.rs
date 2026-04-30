@@ -1,4 +1,6 @@
-use crate::job_ledger::{ReadWorldJobsOptions, WorldJob, WorldJobKind, read_world_jobs};
+use crate::job_ledger::{
+    ReadWorldJobsOptions, WorldJob, WorldJobKind, WorldJobStatus, read_world_jobs,
+};
 use crate::projection_health::{
     ProjectionHealthReport, ProjectionHealthStatus, build_projection_health_report,
 };
@@ -14,6 +16,7 @@ pub enum HostSupervisorStatus {
     Idle,
     Ready,
     Blocked,
+    NeedsOperatorRepair,
 }
 
 impl std::fmt::Display for HostSupervisorStatus {
@@ -22,6 +25,7 @@ impl std::fmt::Display for HostSupervisorStatus {
             Self::Idle => formatter.write_str("idle"),
             Self::Ready => formatter.write_str("ready"),
             Self::Blocked => formatter.write_str("blocked"),
+            Self::NeedsOperatorRepair => formatter.write_str("needs_operator_repair"),
         }
     }
 }
@@ -86,6 +90,11 @@ pub fn build_host_supervisor_plan(
         HostSupervisorStatus::Blocked
     } else if lanes
         .iter()
+        .any(|lane| lane.status == HostSupervisorStatus::NeedsOperatorRepair)
+    {
+        HostSupervisorStatus::NeedsOperatorRepair
+    } else if lanes
+        .iter()
         .any(|lane| lane.status == HostSupervisorStatus::Ready)
     {
         HostSupervisorStatus::Ready
@@ -137,8 +146,15 @@ fn supervisor_lane_plan(
         .filter(|job| lane_owns_job(lane, job) && job.is_in_flight())
         .cloned()
         .collect();
+    let failed_terminal_jobs: Vec<WorldJob> = jobs
+        .iter()
+        .filter(|job| lane_owns_job(lane, job) && job.status == WorldJobStatus::FailedTerminal)
+        .cloned()
+        .collect();
     let status = if blocked {
         HostSupervisorStatus::Blocked
+    } else if !failed_terminal_jobs.is_empty() {
+        HostSupervisorStatus::NeedsOperatorRepair
     } else if !pending_jobs.is_empty() {
         HostSupervisorStatus::Ready
     } else {
@@ -147,7 +163,12 @@ fn supervisor_lane_plan(
     HostSupervisorLanePlan {
         lane,
         status,
-        detail: lane_detail(status, pending_jobs.len(), claimed_jobs.len()),
+        detail: lane_detail(
+            status,
+            pending_jobs.len(),
+            claimed_jobs.len(),
+            failed_terminal_jobs.len(),
+        ),
         pending_jobs,
         claimed_jobs,
     }
@@ -163,19 +184,28 @@ fn lane_owns_job(lane: HostSupervisorLaneKind, job: &WorldJob) -> bool {
     }
 }
 
-fn lane_detail(status: HostSupervisorStatus, pending: usize, claimed: usize) -> String {
+fn lane_detail(
+    status: HostSupervisorStatus,
+    pending: usize,
+    claimed: usize,
+    failed_terminal: usize,
+) -> String {
     match status {
         HostSupervisorStatus::Blocked => {
             format!("blocked by failed projection health; pending={pending}, claimed={claimed}")
         }
         HostSupervisorStatus::Ready => format!("ready jobs pending={pending}, claimed={claimed}"),
         HostSupervisorStatus::Idle => format!("no pending jobs; claimed={claimed}"),
+        HostSupervisorStatus::NeedsOperatorRepair => format!(
+            "terminal job failure needs operator repair; failed_terminal={failed_terminal}, pending={pending}, claimed={claimed}"
+        ),
     }
 }
 
 fn recommended_action(status: HostSupervisorStatus, lanes: &[HostSupervisorLanePlan]) -> String {
     match status {
         HostSupervisorStatus::Blocked => "repair_projection_before_dispatch".to_owned(),
+        HostSupervisorStatus::NeedsOperatorRepair => "inspect_failed_terminal_jobs".to_owned(),
         HostSupervisorStatus::Idle => "sleep_until_new_job".to_owned(),
         HostSupervisorStatus::Ready => {
             let ready_lanes: Vec<String> = lanes
@@ -190,9 +220,11 @@ fn recommended_action(status: HostSupervisorStatus, lanes: &[HostSupervisorLaneP
 
 #[cfg(test)]
 mod tests {
+    use crate::agent_bridge::{AgentSubmitTurnOptions, enqueue_agent_turn};
     use crate::host_supervisor::{
         HostSupervisorStatus, build_host_supervisor_plan, render_host_supervisor_plan,
     };
+    use crate::job_ledger::{WorldJobStatus, WriteTextTurnJobOptions, write_text_turn_job};
     use crate::store::{InitWorldOptions, init_world};
     use tempfile::tempdir;
 
@@ -244,6 +276,41 @@ premise:
 
         assert_eq!(plan.status, HostSupervisorStatus::Blocked);
         assert_eq!(plan.recommended_action, "repair_projection_before_dispatch");
+        Ok(())
+    }
+
+    #[test]
+    fn supervisor_plan_flags_terminal_text_job_failure() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(&seed_path, seed_body())?;
+        init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+        let pending = enqueue_agent_turn(&AgentSubmitTurnOptions {
+            store_root: Some(store.clone()),
+            world_id: "stw_host_supervisor".to_owned(),
+            input: "1".to_owned(),
+            narrative_level: None,
+        })?;
+        write_text_turn_job(&WriteTextTurnJobOptions {
+            store_root: Some(store.as_path()),
+            pending: &pending,
+            status: WorldJobStatus::FailedTerminal,
+            output_ref: Some("agent_bridge/dispatches/turn_0001-webgpt.json".to_owned()),
+            claim_owner: Some("webgpt_host_worker".to_owned()),
+            attempt_id: Some("webgpt:turn_0001".to_owned()),
+            last_error: Some("unknown variant hidden".to_owned()),
+        })?;
+
+        let plan = build_host_supervisor_plan(Some(&store), "stw_host_supervisor")?;
+
+        assert_eq!(plan.status, HostSupervisorStatus::NeedsOperatorRepair);
+        assert_eq!(plan.recommended_action, "inspect_failed_terminal_jobs");
+        assert!(render_host_supervisor_plan(&plan).contains("text: needs_operator_repair"));
         Ok(())
     }
 }

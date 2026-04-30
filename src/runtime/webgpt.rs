@@ -2053,7 +2053,7 @@ fn normalize_gate_results(resolution: &mut serde_json::Map<String, Value>) {
                 .map_or("knowledge", infer_gate_kind);
             gate.insert("gate_kind".to_owned(), Value::String(inferred.to_owned()));
         }
-        ensure_string_field(gate, "visibility", "player_visible");
+        ensure_visibility_field(gate, "visibility", "player_visible");
         if !gate.contains_key("status") {
             let status = if gate.get("passed").and_then(Value::as_bool) == Some(false) {
                 "blocked"
@@ -2090,8 +2090,26 @@ fn normalize_proposed_effects(resolution: &mut serde_json::Map<String, Value>) {
                 .map_or("scene_pressure_delta", infer_effect_kind);
             effect.insert("effect_kind".to_owned(), Value::String(inferred.to_owned()));
         }
-        ensure_string_field(effect, "visibility", "player_visible");
+        ensure_visibility_field(effect, "visibility", "player_visible");
     }
+}
+
+fn ensure_visibility_field(object: &mut serde_json::Map<String, Value>, key: &str, default: &str) {
+    let Some(value) = object.get_mut(key) else {
+        object.insert(key.to_owned(), Value::String(default.to_owned()));
+        return;
+    };
+    let Some(raw) = value.as_str() else {
+        *value = Value::String(default.to_owned());
+        return;
+    };
+    let normalized = match raw.trim().to_ascii_lowercase().as_str() {
+        "player_visible" | "player-visible" | "visible" | "public" => "player_visible",
+        "adjudication_only" | "adjudication-only" | "adjudication" | "hidden" | "private"
+        | "internal" => "adjudication_only",
+        _ => default,
+    };
+    *value = Value::String(normalized.to_owned());
 }
 
 fn normalize_choice_plan(
@@ -3123,6 +3141,73 @@ premise:
     }
 
     #[test]
+    fn normalizes_hidden_visibility_aliases_before_schema_parse() {
+        let mut value = serde_json::json!({
+            "schema_version": "singulari.agent_turn_response.v1",
+            "world_id": "stw_alias",
+            "turn_id": "turn_0001",
+            "resolution_proposal": {
+                "schema_version": "singulari.resolution_proposal.v1",
+                "world_id": "stw_alias",
+                "turn_id": "turn_0001",
+                "interpreted_intent": {
+                    "input_kind": "choice",
+                    "summary": "test",
+                    "target_refs": ["current_turn"],
+                    "pressure_refs": ["pressure:open_questions"],
+                    "evidence_refs": ["player_input"],
+                    "ambiguity": "clear"
+                },
+                "outcome": {
+                    "kind": "success",
+                    "summary": "test",
+                    "evidence_refs": ["player_input"]
+                },
+                "gate_results": [{
+                    "gate_kind": "hidden_constraint",
+                    "gate_ref": "current_turn",
+                    "visibility": "hidden",
+                    "status": "passed",
+                    "reason": "private adjudication stayed private",
+                    "evidence_refs": ["player_input"]
+                }],
+                "proposed_effects": [{
+                    "effect_kind": "scene_opened",
+                    "target_ref": "scene:active",
+                    "visibility": "private",
+                    "summary": "test",
+                    "evidence_refs": ["player_input"]
+                }],
+                "process_ticks": [],
+                "pressure_noop_reasons": [],
+                "narrative_brief": {
+                    "visible_summary": "test",
+                    "required_beats": [],
+                    "forbidden_visible_details": []
+                },
+                "next_choice_plan": []
+            },
+            "visible_scene": {
+                "schema_version": "singulari.narrative_scene.v1",
+                "text_blocks": ["test"],
+                "tone_notes": []
+            },
+            "next_choices": []
+        });
+
+        normalize_webgpt_agent_turn_response(&mut value, &HashMap::new());
+
+        assert_eq!(
+            value["resolution_proposal"]["gate_results"][0]["visibility"],
+            serde_json::json!("adjudication_only")
+        );
+        assert_eq!(
+            value["resolution_proposal"]["proposed_effects"][0]["visibility"],
+            serde_json::json!("adjudication_only")
+        );
+    }
+
+    #[test]
     #[allow(
         clippy::too_many_lines,
         reason = "prompt contract regression test intentionally keeps the full expectation list together"
@@ -3227,6 +3312,7 @@ premise:
             "\"conflict_rule\":\"revival_packet_wins\"",
             "AgentTurnResponse JSON만 반환한다.",
             "schema_version=\"singulari.agent_turn_response.v1\"",
+            "visibility는 player_visible 또는 adjudication_only만 쓴다.",
             "slot 6 tag=\"자유서술\"",
             "slot 7 tag=\"판단 위임\"",
             "world_id는 \"stw_contract\", turn_id는 \"turn_0001\"와 정확히 같아야 한다.",
