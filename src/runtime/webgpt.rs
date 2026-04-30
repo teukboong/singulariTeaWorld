@@ -1951,6 +1951,9 @@ fn normalize_webgpt_agent_turn_response(
         return;
     };
     normalize_visible_scene(response);
+    normalize_plot_thread_events(response);
+    normalize_scene_pressure_events(response);
+    normalize_location_events(response);
     let Some(resolution) = response
         .get_mut("resolution_proposal")
         .and_then(Value::as_object_mut)
@@ -1972,9 +1975,6 @@ fn normalize_webgpt_agent_turn_response(
     normalize_proposed_effects(resolution);
     normalize_process_ticks(resolution);
     normalize_choice_plan(resolution, &choice_seeds);
-    normalize_plot_thread_events(response);
-    normalize_scene_pressure_events(response);
-    normalize_location_events(response);
 }
 
 fn normalize_visible_scene(response: &mut serde_json::Map<String, Value>) {
@@ -3312,12 +3312,16 @@ premise:
     }
 
     #[test]
-    fn normalizes_webgpt_event_aliases_before_schema_parse() {
+    fn normalizes_webgpt_event_aliases_before_schema_parse() -> anyhow::Result<()> {
         let mut value = serde_json::json!({
             "schema_version": "singulari.agent_turn_response.v1",
             "world_id": "stw_alias",
             "turn_id": "turn_0001",
-            "resolution_proposal": {},
+            "visible_scene": {
+                "schema_version": "singulari.narrative_scene.v1",
+                "text_blocks": ["test"],
+                "tone_notes": []
+            },
             "scene_pressure_events": [{
                 "pressure_ref": "pressure:open_questions",
                 "event_kind": "preserved",
@@ -3350,6 +3354,16 @@ premise:
             value["scene_pressure_events"][0]["change"],
             serde_json::json!("softened")
         );
+        let parsed = serde_json::from_value::<AgentTurnResponse>(value)?;
+        assert_eq!(
+            serde_json::to_value(parsed.scene_pressure_events[0].change)?,
+            serde_json::json!("softened")
+        );
+        assert_eq!(
+            serde_json::to_value(parsed.location_events[0].event_kind)?,
+            serde_json::json!("discovered")
+        );
+        Ok(())
     }
 
     #[test]
