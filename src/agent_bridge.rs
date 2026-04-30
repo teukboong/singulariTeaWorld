@@ -101,8 +101,8 @@ use crate::social_exchange::{
     rebuild_social_exchange,
 };
 use crate::store::{
-    WorldFilePaths, acquire_world_commit_lock, append_jsonl, read_json, resolve_store_paths,
-    world_file_paths, write_json, write_json_new,
+    WorldFilePaths, acquire_world_commit_lock, append_jsonl_durable, read_json,
+    resolve_store_paths, world_file_paths, write_json, write_json_new,
 };
 use crate::turn::{AdvanceTurnOptions, advance_turn_without_world_lock_with_authority};
 use crate::turn_commit::{TurnCommitEnvelope, append_turn_commit_envelope};
@@ -1378,7 +1378,7 @@ fn commit_post_advance_materialization(
                 error: None,
                 recorded_at: Utc::now().to_rfc3339(),
             };
-            append_jsonl(
+            append_jsonl_durable(
                 &files.dir.join(POST_COMMIT_MATERIALIZATION_EVENTS_FILENAME),
                 &event,
             )
@@ -1394,7 +1394,7 @@ fn commit_post_advance_materialization(
                 error: Some(rendered.clone()),
                 recorded_at: Utc::now().to_rfc3339(),
             };
-            append_jsonl(
+            append_jsonl_durable(
                 &files.dir.join(POST_COMMIT_MATERIALIZATION_EVENTS_FILENAME),
                 &event,
             )?;
@@ -1478,7 +1478,7 @@ fn append_world_court_rejection_record(
     let agent_bridge_dir = world_dir.join(AGENT_BRIDGE_DIR);
     fs::create_dir_all(&agent_bridge_dir)
         .with_context(|| format!("failed to create {}", agent_bridge_dir.display()))?;
-    append_jsonl(
+    append_jsonl_durable(
         &agent_bridge_dir.join(WORLD_COURT_REJECTIONS_FILENAME),
         &WorldCourtRejectionRecord {
             schema_version: WORLD_COURT_REJECTION_RECORD_SCHEMA_VERSION.to_owned(),

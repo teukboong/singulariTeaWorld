@@ -11,7 +11,8 @@ use crate::models::{
 };
 use crate::store::{
     StorePaths, TURN_LOG_FILENAME, WorldFilePaths, acquire_world_commit_lock, append_canon_event,
-    append_jsonl, read_json, resolve_store_paths, world_file_paths, write_json,
+    append_jsonl, append_jsonl_durable, read_json, resolve_store_paths, world_file_paths,
+    write_json,
 };
 use crate::world_db::RecordTurnDbInput;
 use crate::world_db::record_turn_in_world_db;
@@ -236,7 +237,7 @@ fn persist_turn_artifacts(input: &PersistTurnInput<'_>) -> Result<CanonEvent> {
     write_json(&input.paths.snapshot, input.snapshot)?;
     write_json(&input.files.latest_snapshot, input.snapshot)?;
     write_json(&input.paths.render_packet, input.render_packet)?;
-    append_jsonl(&input.paths.turn_log, input.turn_log_entry)?;
+    append_jsonl_durable(&input.paths.turn_log, input.turn_log_entry)?;
     record_turn_in_world_db(&RecordTurnDbInput {
         world_dir: &input.files.dir,
         world: input.world,

@@ -5,8 +5,8 @@ use crate::models::{
     TurnChoice, TurnSnapshot, VisibleState,
 };
 use crate::store::{
-    acquire_world_commit_lock, append_jsonl, read_json, resolve_store_paths, world_file_paths,
-    write_json,
+    acquire_world_commit_lock, append_jsonl_durable, read_json, resolve_store_paths,
+    world_file_paths, write_json,
 };
 use crate::vn::{BuildVnPacketOptions, VnPacket, build_vn_packet};
 use anyhow::{Context, Result, bail};
@@ -189,7 +189,7 @@ impl TurnCommitEnvelope {
 ///
 /// Returns an error when the JSONL append fails.
 pub fn append_turn_commit_envelope(world_dir: &Path, envelope: &TurnCommitEnvelope) -> Result<()> {
-    append_jsonl(&world_dir.join(TURN_COMMITS_FILENAME), envelope)
+    append_jsonl_durable(&world_dir.join(TURN_COMMITS_FILENAME), envelope)
 }
 
 /// Recover idempotent turn-commit journal state after a crash or worker restart.

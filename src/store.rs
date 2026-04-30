@@ -517,13 +517,32 @@ pub(crate) fn append_jsonl<T>(path: &Path, value: &T) -> Result<()>
 where
     T: serde::Serialize,
 {
+    append_jsonl_with_sync(path, value, false)
+}
+
+pub(crate) fn append_jsonl_durable<T>(path: &Path, value: &T) -> Result<()>
+where
+    T: serde::Serialize,
+{
+    append_jsonl_with_sync(path, value, true)
+}
+
+fn append_jsonl_with_sync<T>(path: &Path, value: &T, durable: bool) -> Result<()>
+where
+    T: serde::Serialize,
+{
     let body = serde_json::to_string(value).context("failed to serialize JSONL value")?;
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
         .with_context(|| format!("failed to open {}", path.display()))?;
-    writeln!(file, "{body}").with_context(|| format!("failed to append {}", path.display()))
+    writeln!(file, "{body}").with_context(|| format!("failed to append {}", path.display()))?;
+    if durable {
+        file.sync_all()
+            .with_context(|| format!("failed to sync {}", path.display()))?;
+    }
+    Ok(())
 }
 
 pub(crate) fn acquire_world_commit_lock(world_dir: &Path, holder: &str) -> Result<WorldCommitLock> {
@@ -805,8 +824,8 @@ fn render_laws(world: &WorldRecord) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        InitWorldOptions, acquire_world_commit_lock, clear_world_commit_lock, init_world,
-        load_active_world, load_active_world_if_present, save_active_world,
+        InitWorldOptions, acquire_world_commit_lock, append_jsonl_durable, clear_world_commit_lock,
+        init_world, load_active_world, load_active_world_if_present, save_active_world,
         world_commit_lock_status, write_json_new,
     };
     use crate::models::ANCHOR_CHARACTER_ID;
@@ -928,6 +947,26 @@ premise:
         assert!(format!("{error:#}").contains("failed to create"));
         let stored: serde_json::Value = read_json(&path)?;
         assert_eq!(stored["turn"], 1);
+        Ok(())
+    }
+
+    #[test]
+    fn append_jsonl_durable_appends_parseable_lines() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let path = temp.path().join("journal.jsonl");
+
+        append_jsonl_durable(&path, &serde_json::json!({ "stage": "prepared" }))?;
+        append_jsonl_durable(&path, &serde_json::json!({ "stage": "committed" }))?;
+
+        let raw = std::fs::read_to_string(&path)?;
+        let stages = raw
+            .lines()
+            .map(serde_json::from_str::<serde_json::Value>)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        assert_eq!(stages.len(), 2);
+        assert_eq!(stages[0]["stage"], "prepared");
+        assert_eq!(stages[1]["stage"], "committed");
         Ok(())
     }
 
