@@ -300,6 +300,8 @@ pub struct OfferedChoice {
     pub visible_intent: String,
     #[serde(default)]
     pub evidence_refs: Vec<String>,
+    #[serde(default)]
+    pub anchor_refs: Vec<String>,
     pub omission_profile: OmissionProfile,
 }
 
@@ -700,7 +702,7 @@ pub fn omission_profile_for_choice(
     risk_tags: &[String],
     evidence_refs: &[String],
 ) -> OmissionProfile {
-    if !(1..=5).contains(&slot) || evidence_refs.is_empty() || risk_tags.is_empty() {
+    if !(1..=5).contains(&slot) || evidence_refs.is_empty() {
         return OmissionProfile::default();
     }
     let text = format!("{label} {intent}").to_lowercase();
@@ -713,7 +715,10 @@ pub fn omission_profile_for_choice(
     } else if !risk_tags.is_empty() {
         visible_stakes.push("이 선택지는 장면 압력과 연결되어 있다.".to_owned());
     }
-    let echo_weight = if risk_tags.is_empty() { 4 } else { 7 };
+    if visible_stakes.is_empty() {
+        return OmissionProfile::default();
+    }
+    let echo_weight = if risk_tags.is_empty() { 5 } else { 7 };
     OmissionProfile {
         can_create_echo: true,
         echo_weight,
@@ -747,6 +752,10 @@ fn offered_choice_set(
                 },
                 |profile| profile.evidence_refs.clone(),
             );
+            let anchor_refs = profile.map_or_else(
+                || vec![scene_id.to_owned()],
+                |profile| profile.anchor_refs.clone(),
+            );
             OfferedChoice {
                 choice_id: format!("choice:{}", choice.slot),
                 slot: choice.slot,
@@ -756,6 +765,7 @@ fn offered_choice_set(
                     .map(|profile| profile.omission_profile.clone())
                     .unwrap_or_default(),
                 evidence_refs,
+                anchor_refs,
             }
         })
         .collect();
@@ -790,7 +800,11 @@ fn create_unchosen_echo(
             unchosen_choice_id: choice.choice_id.clone(),
             visible_summary: echo_visible_summary(choice),
             implied_meaning: Some(format!("{:?}", choice.omission_profile.omission_meaning)),
-            anchor_refs: vec![offered.scene_id.clone()],
+            anchor_refs: if choice.anchor_refs.is_empty() {
+                vec![offered.scene_id.clone()]
+            } else {
+                choice.anchor_refs.clone()
+            },
             evidence_refs: choice.evidence_refs.clone(),
             return_conditions: choice.omission_profile.return_conditions.clone(),
             possible_payoffs: vec![PayoffKind::Progress, PayoffKind::Reframe],
@@ -1102,6 +1116,10 @@ mod tests {
 
         assert_eq!(packet.active_echoes.len(), 1);
         assert_eq!(packet.active_echoes[0].unchosen_choice_id, "choice:1");
+        assert_eq!(
+            packet.active_echoes[0].anchor_refs,
+            vec!["place:north_gate".to_owned()]
+        );
         assert!(packet.tea_recap.remaining_words[0].contains("입 밖으로 나오지 않았다"));
         Ok(())
     }
@@ -1175,6 +1193,21 @@ mod tests {
 
         assert!(packet.active_echoes.is_empty());
         Ok(())
+    }
+
+    #[test]
+    fn explicit_visible_stakes_can_create_profile_without_risk_tags() {
+        let profile = omission_profile_for_choice(
+            1,
+            "이름을 묻는다",
+            "문지기가 반응한 이름을 확인한다",
+            &[],
+            &["next_choices[slot=1]".to_owned()],
+        );
+
+        assert!(profile.can_create_echo);
+        assert!(!profile.visible_stakes.is_empty());
+        assert_eq!(profile.echo_weight, 5);
     }
 
     #[test]

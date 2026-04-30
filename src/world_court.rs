@@ -1,6 +1,6 @@
 use crate::body_resource::BodyResourcePacket;
 use crate::encounter_surface::{EncounterSurfaceKind, EncounterSurfacePacket};
-use crate::hook_ledger::{AgentHookEvent, accepted_agent_hook_events};
+use crate::hook_ledger::{AgentHookEvent, HookPacket, accepted_agent_hook_events};
 use crate::knowledge_ledger::{
     KnowledgeTier, can_render_knowledge_tier_to_player, render_rule_for_player,
     visible_knowledge_text_is_qualified,
@@ -908,6 +908,12 @@ impl CourtReferenceIndex {
         )? {
             self.index_encounter_surface_packet(&packet);
         }
+        if let Some(packet) = parse_visible_packet::<HookPacket>(
+            &context.visible_context.active_hook_ledger,
+            "active_hook_ledger",
+        )? {
+            self.index_hook_packet(&packet);
+        }
         Ok(())
     }
 
@@ -1062,6 +1068,39 @@ impl CourtReferenceIndex {
                 self.insert_all(unblock_ref);
             }
             for evidence_ref in &blocked.evidence_refs {
+                self.insert_all(evidence_ref);
+            }
+        }
+    }
+
+    fn index_hook_packet(&mut self, packet: &HookPacket) {
+        for thread in packet
+            .active_promises
+            .iter()
+            .chain(packet.due_promises.iter())
+        {
+            self.insert_all(&thread.hook_id);
+            self.insert_all(&thread.opened_by_event);
+            for item_ref in thread.anchor_refs.iter().chain(thread.evidence_refs.iter()) {
+                self.insert_all(item_ref);
+            }
+        }
+        for echo in packet
+            .active_echoes
+            .iter()
+            .chain(packet.returning_echoes.iter())
+        {
+            self.insert_all(&echo.echo_id);
+            self.insert_all(&echo.unchosen_choice_id);
+            self.insert_all(&echo.source_turn_id);
+            for item_ref in echo.anchor_refs.iter().chain(echo.evidence_refs.iter()) {
+                self.insert_all(item_ref);
+            }
+        }
+        for bias in &packet.choice_biases {
+            self.insert_all(&bias.source_ref);
+            self.insert_all(&bias.target_ref);
+            for evidence_ref in &bias.evidence_refs {
                 self.insert_all(evidence_ref);
             }
         }
@@ -1769,8 +1808,8 @@ mod tests {
         RESOURCE_ITEM_SCHEMA_VERSION, ResourceItem, ResourceKind,
     };
     use crate::hook_ledger::{
-        AgentHookEvent, HOOK_EVENT_SCHEMA_VERSION, HookEventKind, HookKind, HookReturnRights,
-        PayoffContract,
+        AgentHookEvent, HOOK_EVENT_SCHEMA_VERSION, HookEventKind, HookKind, HookPacket,
+        HookReturnRights, HookStatus, HookThread, PayoffContract,
     };
     use crate::knowledge_ledger::KnowledgeTier;
     use crate::location_graph::{
@@ -1947,6 +1986,57 @@ mod tests {
                 .violations
                 .iter()
                 .any(|violation| violation.check == "hook_event_visible_ref")
+        );
+    }
+
+    #[test]
+    fn accepts_hook_lifecycle_refs_from_active_hook_ledger() {
+        let mut context = minimal_context(false);
+        context.visible_context.active_hook_ledger = test_json(HookPacket {
+            world_id: "stw_court".to_owned(),
+            turn_id: "turn_0001".to_owned(),
+            active_promises: vec![HookThread {
+                hook_id: "hook:north_gate".to_owned(),
+                kind: HookKind::Mystery,
+                visible_promise: "북문 안쪽 걸쇠는 아직 설명되지 않았다.".to_owned(),
+                anchor_refs: vec!["encounter:turn_0001:slot:1:north_gate".to_owned()],
+                evidence_refs: vec!["next_choices[slot=1]".to_owned()],
+                opened_by_event: "turn_0001".to_owned(),
+                payoff_contract: PayoffContract::default(),
+                return_rights: HookReturnRights::default(),
+                fatigue_score: 0,
+                status: HookStatus::Opened,
+                opened_turn_id: "turn_0001".to_owned(),
+                last_touched_turn_id: "turn_0001".to_owned(),
+            }],
+            ..HookPacket::default()
+        });
+        let hook_event = AgentHookEvent {
+            schema_version: HOOK_EVENT_SCHEMA_VERSION.to_owned(),
+            event_kind: HookEventKind::Progressed,
+            hook_id: "hook:north_gate".to_owned(),
+            kind: HookKind::Mystery,
+            visible_promise: "북문 안쪽 걸쇠의 단서가 조금 더 선명해졌다.".to_owned(),
+            anchor_refs: vec!["hook:north_gate".to_owned()],
+            evidence_refs: vec!["next_choices[slot=1]".to_owned()],
+            opened_by_event: "turn_0001".to_owned(),
+            payoff_contract: PayoffContract::default(),
+            return_rights: HookReturnRights::default(),
+            summary: "걸쇠 단서가 진행됨".to_owned(),
+        };
+
+        let verdict = adjudicate_world_changes(&WorldCourtInput {
+            context: &context,
+            resolution_proposal: None,
+            next_choices: &[],
+            hook_events: &[hook_event],
+        });
+
+        assert_eq!(verdict.status, WorldCourtVerdictStatus::Accept);
+        assert!(
+            verdict
+                .accepted_checks
+                .contains(&"hook_event_visible_refs".to_owned())
         );
     }
 

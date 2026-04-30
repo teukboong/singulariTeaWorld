@@ -820,7 +820,7 @@ pub fn commit_agent_turn(options: &AgentCommitTurnOptions) -> Result<CommittedAg
                 )?;
                 Ok(())
             },
-        )?;
+        );
         if !response.hook_events.is_empty() {
             commit_advisory_post_advance_materialization(
                 &files,
@@ -836,7 +836,7 @@ pub fn commit_agent_turn(options: &AgentCommitTurnOptions) -> Result<CommittedAg
                     )?;
                     Ok(())
                 },
-            )?;
+            );
         }
 
         let committed_at = Utc::now().to_rfc3339();
@@ -1489,7 +1489,7 @@ fn commit_advisory_post_advance_materialization(
     turn_id: &str,
     component: &str,
     materialize: impl FnOnce() -> Result<()>,
-) -> Result<()> {
+) {
     let (status, error) = match materialize() {
         Ok(()) => ("committed", None),
         Err(error) => ("advisory_failed", Some(format!("{error:#}"))),
@@ -1503,10 +1503,10 @@ fn commit_advisory_post_advance_materialization(
         error,
         recorded_at: Utc::now().to_rfc3339(),
     };
-    append_jsonl_durable(
+    let _ = append_jsonl_durable(
         &files.dir.join(POST_COMMIT_MATERIALIZATION_EVENTS_FILENAME),
         &event,
-    )
+    );
 }
 
 fn validate_agent_response(pending: &PendingAgentTurn, response: &AgentTurnResponse) -> Result<()> {
@@ -2363,7 +2363,7 @@ mod tests {
         ExtraMemoryPacket, ExtraMemoryProjectionStatus, load_extra_memory_projection_records,
         load_remembered_extras,
     };
-    use crate::hook_ledger::HookPacket;
+    use crate::hook_ledger::{HookPacket, OFFERED_CHOICE_SETS_FILENAME};
     use crate::location_graph::LocationGraphPacket;
     use crate::models::{
         EventAuthority, GUIDE_CHOICE_TAG, NARRATIVE_SCENE_SCHEMA_VERSION, NarrativeScene,
@@ -3179,12 +3179,90 @@ premise:
             "turn_0001",
             "hook_ledger_promises",
             || anyhow::bail!("synthetic advisory hook failure"),
-        )?;
+        );
 
         let materialization_events =
             std::fs::read_to_string(files.dir.join("post_commit_materialization_events.jsonl"))?;
         assert!(materialization_events.contains("\"status\":\"advisory_failed\""));
         assert!(materialization_events.contains("synthetic advisory hook failure"));
+        Ok(())
+    }
+
+    #[test]
+    fn advisory_journal_append_failure_is_swallowed() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(&seed_path, seed_body("stw_agent_advisory_journal_fail"))?;
+        init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+        let store_paths = resolve_store_paths(Some(store.as_path()))?;
+        let files = world_file_paths(&store_paths, "stw_agent_advisory_journal_fail");
+        let journal_path = files.dir.join("post_commit_materialization_events.jsonl");
+        std::fs::create_dir(&journal_path)?;
+
+        commit_advisory_post_advance_materialization(
+            &files,
+            "stw_agent_advisory_journal_fail",
+            "turn_0001",
+            "hook_ledger_promises",
+            || anyhow::bail!("synthetic advisory hook failure"),
+        );
+
+        assert!(journal_path.is_dir());
+        Ok(())
+    }
+
+    #[test]
+    fn hook_ledger_failure_does_not_wedge_commit_agent_turn() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(&seed_path, seed_body("stw_agent_hook_advisory_fail"))?;
+        init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+
+        let pending = enqueue_agent_turn(&AgentSubmitTurnOptions {
+            store_root: Some(store.clone()),
+            world_id: "stw_agent_hook_advisory_fail".to_owned(),
+            input: "1".to_owned(),
+            narrative_level: None,
+        })?;
+        let store_paths = resolve_store_paths(Some(store.as_path()))?;
+        let files = world_file_paths(&store_paths, "stw_agent_hook_advisory_fail");
+        let offered_choice_path = files.dir.join(OFFERED_CHOICE_SETS_FILENAME);
+        std::fs::remove_file(&offered_choice_path)?;
+        std::fs::create_dir(&offered_choice_path)?;
+
+        let committed = commit_agent_turn(&AgentCommitTurnOptions {
+            store_root: Some(store.clone()),
+            world_id: "stw_agent_hook_advisory_fail".to_owned(),
+            response: basic_agent_turn_response(
+                store.as_path(),
+                &pending,
+                "agent-authored scene after advisory hook failure",
+            )?,
+        })?;
+
+        assert_eq!(committed.turn_id, "turn_0001");
+        assert!(Path::new(committed.commit_record_path.as_str()).is_file());
+        assert!(
+            !files
+                .dir
+                .join("agent_bridge")
+                .join("pending_turn.json")
+                .exists()
+        );
+        let materialization_events =
+            std::fs::read_to_string(files.dir.join("post_commit_materialization_events.jsonl"))?;
+        assert!(materialization_events.contains("\"component\":\"hook_ledger_offered_choices\""));
+        assert!(materialization_events.contains("\"status\":\"advisory_failed\""));
         Ok(())
     }
 
