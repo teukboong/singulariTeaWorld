@@ -445,6 +445,14 @@ pub struct PostCommitMaterializationEvent {
     pub recorded_at: String,
 }
 
+#[derive(Debug, Clone)]
+struct AgentTurnAdvanceArtifacts {
+    snapshot: TurnSnapshot,
+    render_packet: crate::models::RenderPacket,
+    snapshot_path: PathBuf,
+    render_packet_path: PathBuf,
+}
+
 /// Queue a player input for local-agent narrative authorship.
 ///
 /// # Errors
@@ -594,7 +602,9 @@ pub fn load_pending_agent_turn(
     let files = world_file_paths(&store_paths, world_id);
     let mut pending: PendingAgentTurn = read_json(&pending_agent_turn_path(&files))?;
     let snapshot: TurnSnapshot = read_json(&files.latest_snapshot)?;
-    pending.selected_choice = selected_choice(pending.player_input.as_str(), &snapshot);
+    if snapshot.turn_id != pending.turn_id {
+        pending.selected_choice = selected_choice(pending.player_input.as_str(), &snapshot);
+    }
     Ok(pending)
 }
 
@@ -757,30 +767,21 @@ pub fn commit_agent_turn(options: &AgentCommitTurnOptions) -> Result<CommittedAg
         &response.extra_contacts,
     )?;
     let before_commit_snapshot: TurnSnapshot = read_json(&files.latest_snapshot)?;
-    let parent_turn_id = before_commit_snapshot.turn_id.clone();
+    let parent_turn_id = parent_turn_id_for_pending_commit(&before_commit_snapshot, &pending)?;
     append_turn_commit_envelope(
         files.dir.as_path(),
         &TurnCommitEnvelope::prepared(&pending, parent_turn_id.as_str(), Utc::now().to_rfc3339()),
     )?;
 
     let commit_result = (|| -> Result<CommittedAgentTurn> {
-        let advanced = advance_turn_without_world_lock_with_authority(
-            &AdvanceTurnOptions {
-                store_root: options.store_root.clone(),
-                world_id: options.world_id.clone(),
-                input: pending.player_input.clone(),
-            },
+        let advanced = load_or_advance_pending_agent_turn(
             &store_paths,
             &files,
+            options,
+            &pending,
+            &before_commit_snapshot,
             event_authority,
         )?;
-        if advanced.snapshot.turn_id != pending.turn_id {
-            bail!(
-                "agent bridge turn mismatch after advance: pending={}, advanced={}",
-                pending.turn_id,
-                advanced.snapshot.turn_id
-            );
-        }
 
         let mut render_packet = advanced.render_packet;
         apply_agent_response_to_render_packet(&mut render_packet, &response);
@@ -1206,6 +1207,150 @@ pub fn commit_agent_turn(options: &AgentCommitTurnOptions) -> Result<CommittedAg
             Err(error)
         }
     }
+}
+
+fn parent_turn_id_for_pending_commit(
+    latest_snapshot: &TurnSnapshot,
+    pending: &PendingAgentTurn,
+) -> Result<String> {
+    if latest_snapshot.turn_id == pending.turn_id {
+        return previous_turn_id(pending.turn_id.as_str());
+    }
+    let expected_pending_turn_id = next_turn_id(latest_snapshot.turn_id.as_str())?;
+    if expected_pending_turn_id != pending.turn_id {
+        bail!(
+            "agent bridge stale pending turn: latest_snapshot={}, expected_pending={}, actual_pending={}",
+            latest_snapshot.turn_id,
+            expected_pending_turn_id,
+            pending.turn_id
+        );
+    }
+    Ok(latest_snapshot.turn_id.clone())
+}
+
+fn load_or_advance_pending_agent_turn(
+    store_paths: &crate::store::StorePaths,
+    files: &WorldFilePaths,
+    options: &AgentCommitTurnOptions,
+    pending: &PendingAgentTurn,
+    before_commit_snapshot: &TurnSnapshot,
+    event_authority: EventAuthority,
+) -> Result<AgentTurnAdvanceArtifacts> {
+    if before_commit_snapshot.turn_id == pending.turn_id {
+        return load_advanced_pending_agent_turn_artifacts(files, pending, before_commit_snapshot);
+    }
+
+    let advanced = advance_turn_without_world_lock_with_authority(
+        &AdvanceTurnOptions {
+            store_root: options.store_root.clone(),
+            world_id: options.world_id.clone(),
+            input: pending.player_input.clone(),
+        },
+        store_paths,
+        files,
+        event_authority,
+    )?;
+    if advanced.snapshot.turn_id != pending.turn_id {
+        bail!(
+            "agent bridge turn mismatch after advance: pending={}, advanced={}",
+            pending.turn_id,
+            advanced.snapshot.turn_id
+        );
+    }
+    Ok(AgentTurnAdvanceArtifacts {
+        snapshot: advanced.snapshot,
+        render_packet: advanced.render_packet,
+        snapshot_path: advanced.snapshot_path,
+        render_packet_path: advanced.render_packet_path,
+    })
+}
+
+fn load_advanced_pending_agent_turn_artifacts(
+    files: &WorldFilePaths,
+    pending: &PendingAgentTurn,
+    latest_snapshot: &TurnSnapshot,
+) -> Result<AgentTurnAdvanceArtifacts> {
+    let snapshot_path = turn_snapshot_path(files, latest_snapshot, pending.turn_id.as_str());
+    let snapshot: TurnSnapshot = read_json(&snapshot_path).with_context(|| {
+        format!(
+            "failed to resume agent commit from advanced pending snapshot: world_id={}, turn_id={}, path={}",
+            pending.world_id,
+            pending.turn_id,
+            snapshot_path.display()
+        )
+    })?;
+    if snapshot.turn_id != pending.turn_id || snapshot.session_id != latest_snapshot.session_id {
+        bail!(
+            "agent bridge advanced pending snapshot mismatch: pending={}/{}, latest_session={}, snapshot={}/{}",
+            pending.world_id,
+            pending.turn_id,
+            latest_snapshot.session_id,
+            snapshot.session_id,
+            snapshot.turn_id
+        );
+    }
+    let render_packet_path =
+        turn_render_packet_path(files, latest_snapshot, pending.turn_id.as_str());
+    let render_packet: crate::models::RenderPacket =
+        read_json(&render_packet_path).with_context(|| {
+            format!(
+                "failed to resume agent commit from advanced pending render packet: world_id={}, turn_id={}, path={}",
+                pending.world_id,
+                pending.turn_id,
+                render_packet_path.display()
+            )
+        })?;
+    if render_packet.turn_id != pending.turn_id {
+        bail!(
+            "agent bridge advanced pending render packet mismatch: pending={}, render_packet={}",
+            pending.turn_id,
+            render_packet.turn_id
+        );
+    }
+    Ok(AgentTurnAdvanceArtifacts {
+        snapshot,
+        render_packet,
+        snapshot_path,
+        render_packet_path,
+    })
+}
+
+fn turn_snapshot_path(
+    files: &WorldFilePaths,
+    latest_snapshot: &TurnSnapshot,
+    turn_id: &str,
+) -> PathBuf {
+    files
+        .dir
+        .join("sessions")
+        .join(latest_snapshot.session_id.as_str())
+        .join("snapshots")
+        .join(format!("{turn_id}.json"))
+}
+
+fn turn_render_packet_path(
+    files: &WorldFilePaths,
+    latest_snapshot: &TurnSnapshot,
+    turn_id: &str,
+) -> PathBuf {
+    files
+        .dir
+        .join("sessions")
+        .join(latest_snapshot.session_id.as_str())
+        .join("render_packets")
+        .join(format!("{turn_id}.json"))
+}
+
+fn previous_turn_id(turn_id: &str) -> Result<String> {
+    let number = turn_id
+        .strip_prefix("turn_")
+        .context("turn_id must start with turn_")?
+        .parse::<u32>()
+        .with_context(|| format!("turn_id has invalid numeric suffix: {turn_id}"))?;
+    let Some(previous) = number.checked_sub(1) else {
+        bail!("turn_id has no previous turn: {turn_id}");
+    };
+    Ok(format!("turn_{previous:04}"))
 }
 
 fn canonical_agent_turn_response(mut response: AgentTurnResponse) -> AgentTurnResponse {
@@ -2124,9 +2269,12 @@ mod tests {
     use crate::scene_pressure::ScenePressurePacket;
     use crate::social_exchange::SocialExchangePacket;
     use crate::store::{
-        InitWorldOptions, init_world, read_json, resolve_store_paths, world_file_paths,
+        InitWorldOptions, init_world, read_json, resolve_store_paths, world_file_paths, write_json,
     };
-    use crate::turn_commit::{TURN_COMMITS_FILENAME, TurnCommitEnvelope, TurnCommitStatus};
+    use crate::turn::{AdvanceTurnOptions, advance_turn};
+    use crate::turn_commit::{
+        TURN_COMMITS_FILENAME, TurnCommitEnvelope, TurnCommitStatus, append_turn_commit_envelope,
+    };
     use crate::turn_retrieval_controller::TurnRetrievalControllerPacket;
     use crate::vn::{BuildVnPacketOptions, build_vn_packet};
     use crate::world_court::{WorldCourtVerdict, WorldCourtVerdictStatus};
@@ -2187,6 +2335,45 @@ premise:
                 intent: "맡긴다. 세부 내용은 선택 후 드러난다.".to_owned(),
             },
         ]
+    }
+
+    fn basic_agent_turn_response(
+        store: &Path,
+        pending: &PendingAgentTurn,
+        visible_text: &str,
+    ) -> anyhow::Result<AgentTurnResponse> {
+        Ok(AgentTurnResponse {
+            schema_version: AGENT_TURN_RESPONSE_SCHEMA_VERSION.to_owned(),
+            world_id: pending.world_id.clone(),
+            turn_id: pending.turn_id.clone(),
+            resolution_proposal: Some(valid_resolution_proposal_for_pending(store, pending)?),
+            scene_director_proposal: None,
+            consequence_proposal: None,
+            social_exchange_proposal: None,
+            encounter_proposal: None,
+            visible_scene: NarrativeScene {
+                schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
+                speaker: None,
+                text_blocks: vec![visible_text.to_owned()],
+                tone_notes: Vec::new(),
+            },
+            adjudication: None,
+            canon_event: None,
+            entity_updates: Vec::new(),
+            relationship_updates: Vec::new(),
+            plot_thread_events: Vec::new(),
+            scene_pressure_events: Vec::new(),
+            world_lore_updates: Vec::new(),
+            character_text_design_updates: Vec::new(),
+            body_resource_events: Vec::new(),
+            location_events: Vec::new(),
+            extra_contacts: Vec::new(),
+            hidden_state_delta: Vec::new(),
+            needs_context: Vec::new(),
+            next_choices: scene_specific_choices(),
+            actor_goal_events: Vec::new(),
+            actor_move_events: Vec::new(),
+        })
     }
 
     fn load_world_court_rejections(
@@ -2735,6 +2922,109 @@ premise:
                 .join("agent_bridge")
                 .join("pending_turn.json")
                 .is_file()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn retries_post_advance_materialization_failure_without_re_advance() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(&seed_path, seed_body("stw_agent_post_advance_retry"))?;
+        init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+
+        let pending = enqueue_agent_turn(&AgentSubmitTurnOptions {
+            store_root: Some(store.clone()),
+            world_id: "stw_agent_post_advance_retry".to_owned(),
+            input: "1".to_owned(),
+            narrative_level: None,
+        })?;
+        let response = basic_agent_turn_response(
+            store.as_path(),
+            &pending,
+            "첫 materialization 실패 뒤 재개되는 장면",
+        )?;
+        let store_paths = resolve_store_paths(Some(store.as_path()))?;
+        let files = world_file_paths(&store_paths, "stw_agent_post_advance_retry");
+        append_turn_commit_envelope(
+            files.dir.as_path(),
+            &TurnCommitEnvelope::prepared(&pending, "turn_0000", "2026-04-30T00:00:00Z".to_owned()),
+        )?;
+        let advanced = advance_turn(&AdvanceTurnOptions {
+            store_root: Some(store.clone()),
+            world_id: "stw_agent_post_advance_retry".to_owned(),
+            input: pending.player_input.clone(),
+        })?;
+        assert_eq!(advanced.snapshot.turn_id, "turn_0001");
+        let mut advanced_snapshot = advanced.snapshot.clone();
+        advanced_snapshot.last_choices = vec![TurnChoice {
+            slot: 1,
+            tag: "잘못된 재해석".to_owned(),
+            intent: "이미 진행된 pending을 latest snapshot 기준으로 다시 해석하면 안 된다"
+                .to_owned(),
+        }];
+        write_json(&advanced.snapshot_path, &advanced_snapshot)?;
+        write_json(&files.latest_snapshot, &advanced_snapshot)?;
+        let resumed_pending =
+            load_pending_agent_turn(Some(store.as_path()), "stw_agent_post_advance_retry")?;
+        assert_eq!(resumed_pending.selected_choice, pending.selected_choice);
+        append_turn_commit_envelope(
+            files.dir.as_path(),
+            &TurnCommitEnvelope::failed(
+                &pending,
+                "turn_0000",
+                "agent_commit_after_prepare",
+                "synthetic failure after advance before commit record".to_owned(),
+                "2026-04-30T00:00:01Z".to_owned(),
+            ),
+        )?;
+
+        let latest_after_failure: TurnSnapshot = read_json(&files.latest_snapshot)?;
+        assert_eq!(latest_after_failure.turn_id, "turn_0001");
+        let pending_path = files.dir.join("agent_bridge").join("pending_turn.json");
+        let commit_record_path = files
+            .dir
+            .join("agent_bridge")
+            .join("committed_turns")
+            .join("turn_0001")
+            .join("commit_record.json");
+        assert!(pending_path.is_file());
+        assert!(!commit_record_path.is_file());
+
+        let committed = commit_agent_turn(&AgentCommitTurnOptions {
+            store_root: Some(store.clone()),
+            world_id: "stw_agent_post_advance_retry".to_owned(),
+            response,
+        })?;
+
+        assert_eq!(committed.turn_id, "turn_0001");
+        let latest_after_retry: TurnSnapshot = read_json(&files.latest_snapshot)?;
+        assert_eq!(latest_after_retry.turn_id, "turn_0001");
+        let turn_0002_path = files
+            .dir
+            .join("sessions")
+            .join(latest_after_retry.session_id.as_str())
+            .join("snapshots")
+            .join("turn_0002.json");
+        assert!(!pending_path.exists());
+        assert!(!turn_0002_path.exists());
+        let raw = std::fs::read_to_string(files.dir.join(TURN_COMMITS_FILENAME))?;
+        let envelopes = raw
+            .lines()
+            .map(serde_json::from_str::<TurnCommitEnvelope>)
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            envelopes
+                .iter()
+                .filter(|envelope| envelope.turn_id == "turn_0001"
+                    && envelope.status == TurnCommitStatus::Committed)
+                .count(),
+            1
         );
         Ok(())
     }
