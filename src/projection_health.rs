@@ -268,7 +268,8 @@ fn turn_commit_health(
     let ledger_path = world_dir.join(TURN_COMMITS_FILENAME);
     let latest_turn = latest_snapshot.map_or("<unknown>", |snapshot| snapshot.turn_id.as_str());
     if !ledger_path.exists() {
-        let status = if latest_turn == "turn_0000" {
+        let agent_bridge_present = world_dir.join("agent_bridge").is_dir();
+        let status = if latest_turn == "turn_0000" || !agent_bridge_present {
             ProjectionHealthStatus::Healthy
         } else {
             ProjectionHealthStatus::Failed
@@ -276,11 +277,13 @@ fn turn_commit_health(
         return ProjectionComponentHealth {
             component: "turn_commit".to_owned(),
             status,
-            detail: format!("ledger absent, latest_turn={latest_turn}"),
+            detail: format!(
+                "ledger absent, latest_turn={latest_turn}, agent_bridge_present={agent_bridge_present}"
+            ),
             warnings: Vec::new(),
             errors: if status == ProjectionHealthStatus::Failed {
                 vec![format!(
-                    "turn commit ledger missing after initial turn: {}",
+                    "agent-authored turn commit ledger missing after initial turn: {}",
                     ledger_path.display()
                 )]
             } else {
@@ -570,6 +573,7 @@ mod tests {
         ProjectionHealthStatus, build_projection_health_report, render_projection_health_report,
     };
     use crate::store::{InitWorldOptions, append_jsonl, init_world, read_json, write_json};
+    use crate::turn::{AdvanceTurnOptions, advance_turn};
     use crate::turn_commit::{
         TURN_COMMIT_ENVELOPE_SCHEMA_VERSION, TurnCommitEnvelope, TurnCommitStatus,
     };
@@ -634,6 +638,67 @@ premise:
                     .errors
                     .iter()
                     .any(|error| error.contains("cannot replay latest snapshot turn"))
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn projection_health_accepts_plain_cli_turn_without_agent_commit_ledger() -> anyhow::Result<()>
+    {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(&seed_path, seed_body())?;
+        init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+        advance_turn(&AdvanceTurnOptions {
+            store_root: Some(store.clone()),
+            world_id: "stw_projection_health".to_owned(),
+            input: "1".to_owned(),
+        })?;
+
+        let report = build_projection_health_report(Some(&store), "stw_projection_health")?;
+
+        assert_eq!(report.status, ProjectionHealthStatus::Healthy);
+        assert!(report.components.iter().any(|component| {
+            component.component == "turn_commit"
+                && component.status == ProjectionHealthStatus::Healthy
+                && component.detail.contains("agent_bridge_present=false")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn projection_health_fails_agent_bridge_world_without_turn_commit_ledger() -> anyhow::Result<()>
+    {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(&seed_path, seed_body())?;
+        let initialized = init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+        advance_turn(&AdvanceTurnOptions {
+            store_root: Some(store.clone()),
+            world_id: "stw_projection_health".to_owned(),
+            input: "1".to_owned(),
+        })?;
+        std::fs::create_dir_all(initialized.world_dir.join("agent_bridge"))?;
+
+        let report = build_projection_health_report(Some(&store), "stw_projection_health")?;
+
+        assert_eq!(report.status, ProjectionHealthStatus::Failed);
+        assert!(report.components.iter().any(|component| {
+            component.component == "turn_commit"
+                && component
+                    .errors
+                    .iter()
+                    .any(|error| error.contains("agent-authored turn commit ledger missing"))
         }));
         Ok(())
     }
