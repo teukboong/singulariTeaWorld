@@ -1,12 +1,12 @@
-use crate::agent_bridge::{CommittedAgentTurn, PendingAgentTurn};
+use crate::agent_bridge::{AgentTurnResponse, CommittedAgentTurn, PendingAgentTurn};
 use crate::models::{
     ADJUDICATION_SCHEMA_VERSION, AdjudicationReport, DashboardSummary,
     NARRATIVE_SCENE_SCHEMA_VERSION, NarrativeScene, RENDER_PACKET_SCHEMA_VERSION, RenderPacket,
-    TurnChoice, TurnSnapshot, VisibleState,
+    TurnChoice, TurnSnapshot, VisibleState, WorldRecord, normalize_turn_choices,
 };
 use crate::store::{
-    acquire_world_commit_lock, append_jsonl_durable, read_json, resolve_store_paths,
-    world_file_paths, write_json,
+    WorldFilePaths, acquire_world_commit_lock, append_jsonl_durable, read_json,
+    resolve_store_paths, world_file_paths, write_json,
 };
 use crate::vn::{BuildVnPacketOptions, VnPacket, build_vn_packet};
 use anyhow::{Context, Result, bail};
@@ -384,22 +384,17 @@ pub fn repair_turn_materializations(
             );
         }
 
-        if !render_packet_path.is_file() {
-            let commit_record = read_json::<CommittedAgentTurn>(&commit_record_path).with_context(
-                || {
-                    format!(
-                        "turn materialization repair cannot rebuild render packet without commit record: turn={}, commit_record={}",
-                        envelope.turn_id,
-                        commit_record_path.display()
-                    )
-                },
-            )?;
-            let render_packet = render_packet_from_committed_vn_packet(&commit_record.packet);
-            write_json(&render_packet_path, &render_packet)?;
-            render_packets_repaired += 1;
-        }
-
         if !commit_record_path.is_file() {
+            if !render_packet_path.is_file() {
+                let response: AgentTurnResponse = read_json(&response_path)?;
+                let render_packet = rebuild_render_packet_from_agent_response(
+                    &files,
+                    envelope.turn_id.as_str(),
+                    &response,
+                )?;
+                write_json(&render_packet_path, &render_packet)?;
+                render_packets_repaired += 1;
+            }
             let packet = build_vn_packet(&BuildVnPacketOptions {
                 store_root: Some(store_paths.root.clone()),
                 world_id: world_id.to_owned(),
@@ -419,6 +414,21 @@ pub fn repair_turn_materializations(
             };
             write_json(&commit_record_path, &committed)?;
             commit_records_repaired += 1;
+        }
+
+        if !render_packet_path.is_file() {
+            let commit_record = read_json::<CommittedAgentTurn>(&commit_record_path).with_context(
+                || {
+                    format!(
+                        "turn materialization repair cannot rebuild render packet without commit record: turn={}, commit_record={}",
+                        envelope.turn_id,
+                        commit_record_path.display()
+                    )
+                },
+            )?;
+            let render_packet = render_packet_from_committed_vn_packet(&commit_record.packet);
+            write_json(&render_packet_path, &render_packet)?;
+            render_packets_repaired += 1;
         }
     }
 
@@ -554,6 +564,103 @@ fn required_envelope_path(envelope: &TurnCommitEnvelope, field: &str) -> Result<
         );
     };
     Ok(PathBuf::from(value))
+}
+
+fn rebuild_render_packet_from_agent_response(
+    files: &WorldFilePaths,
+    turn_id: &str,
+    response: &AgentTurnResponse,
+) -> Result<RenderPacket> {
+    let world: WorldRecord = read_json(&files.world)?;
+    let snapshot = load_turn_snapshot_for_repair(files, turn_id)?;
+    Ok(RenderPacket {
+        schema_version: RENDER_PACKET_SCHEMA_VERSION.to_owned(),
+        world_id: world.world_id,
+        turn_id: turn_id.to_owned(),
+        mode: world.runtime_contract.mode,
+        narrative_contract: "repaired from committed agent response".to_owned(),
+        narrative_scene: Some(response.visible_scene.clone()),
+        visible_state: VisibleState {
+            dashboard: DashboardSummary {
+                phase: snapshot.phase,
+                location: snapshot.protagonist_state.location,
+                anchor_invariant: world.anchor_character.invariant,
+                current_event: snapshot
+                    .current_event
+                    .as_ref()
+                    .map_or_else(|| "none".to_owned(), |event| event.event_id.clone()),
+                status: response
+                    .canon_event
+                    .as_ref()
+                    .map(|event| event.summary.clone())
+                    .or_else(|| {
+                        response
+                            .adjudication
+                            .as_ref()
+                            .map(|adjudication| adjudication.summary.clone())
+                    })
+                    .or_else(|| response.visible_scene.text_blocks.first().cloned())
+                    .unwrap_or_else(|| "repaired committed turn".to_owned()),
+            },
+            scan_targets: Vec::new(),
+            choices: normalize_turn_choices(&response.next_choices),
+        },
+        adjudication: response
+            .adjudication
+            .as_ref()
+            .map(|adjudication| AdjudicationReport {
+                schema_version: ADJUDICATION_SCHEMA_VERSION.to_owned(),
+                world_id: response.world_id.clone(),
+                turn_id: response.turn_id.clone(),
+                outcome: adjudication.outcome.clone(),
+                summary: adjudication.summary.clone(),
+                gates: adjudication.gates.clone(),
+                visible_constraints: adjudication.visible_constraints.clone(),
+                consequences: adjudication.consequences.clone(),
+            }),
+        codex_view: None,
+        canon_delta_refs: response
+            .canon_event
+            .as_ref()
+            .map(|event| vec![event.kind.clone()])
+            .unwrap_or_default(),
+        forbidden_reveals: Vec::new(),
+        style_notes: vec!["repaired_from_committed_agent_response".to_owned()],
+    })
+}
+
+fn load_turn_snapshot_for_repair(files: &WorldFilePaths, turn_id: &str) -> Result<TurnSnapshot> {
+    if let Ok(snapshot) = read_json::<TurnSnapshot>(&files.latest_snapshot)
+        && snapshot.turn_id == turn_id
+    {
+        return Ok(snapshot);
+    }
+    let sessions_dir = files.dir.join("sessions");
+    let entries = fs::read_dir(&sessions_dir)
+        .with_context(|| format!("failed to read sessions dir {}", sessions_dir.display()))?;
+    for entry in entries {
+        let entry = entry.with_context(|| format!("failed to read {}", sessions_dir.display()))?;
+        let path = entry
+            .path()
+            .join("snapshots")
+            .join(format!("{turn_id}.json"));
+        if path.is_file() {
+            let snapshot: TurnSnapshot = read_json(&path)?;
+            if snapshot.turn_id != turn_id {
+                bail!(
+                    "turn materialization repair snapshot turn mismatch: expected={}, actual={}, path={}",
+                    turn_id,
+                    snapshot.turn_id,
+                    path.display()
+                );
+            }
+            return Ok(snapshot);
+        }
+    }
+    bail!(
+        "turn materialization repair could not find snapshot for turn_id={turn_id} under {}",
+        files.dir.display()
+    );
 }
 
 fn render_packet_from_committed_vn_packet(packet: &VnPacket) -> RenderPacket {
@@ -716,6 +823,25 @@ premise:
         std::fs::remove_file(&committed.commit_record_path)?;
         let report = repair_turn_materializations(Some(store.as_path()), "stw_turn_repair")?;
         assert_eq!(report.commit_records_repaired, 1);
+        assert!(Path::new(committed.commit_record_path.as_str()).is_file());
+        Ok(())
+    }
+
+    #[test]
+    fn repair_turn_materializations_rebuilds_render_and_commit_record_together()
+    -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let (_pending, committed) = commit_fixture_turn(store.as_path(), "stw_turn_repair_both")?;
+
+        std::fs::remove_file(&committed.render_packet_path)?;
+        std::fs::remove_file(&committed.commit_record_path)?;
+
+        let report = repair_turn_materializations(Some(store.as_path()), "stw_turn_repair_both")?;
+
+        assert_eq!(report.render_packets_repaired, 1);
+        assert_eq!(report.commit_records_repaired, 1);
+        assert!(Path::new(committed.render_packet_path.as_str()).is_file());
         assert!(Path::new(committed.commit_record_path.as_str()).is_file());
         Ok(())
     }
