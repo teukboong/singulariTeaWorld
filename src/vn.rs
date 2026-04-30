@@ -1,4 +1,7 @@
 use crate::backend_selection::{WorldVisualBackend, load_world_backend_selection};
+use crate::encounter_surface::{
+    EncounterSurfacePacket, encounter_status, load_encounter_surface_state,
+};
 use crate::models::{
     CodexView, DashboardSummary, EntityRecords, FREEFORM_CHOICE_SLOT, GUIDE_CHOICE_SLOT,
     GUIDE_CHOICE_TAG, INITIAL_TURN_ID, PROTAGONIST_CHARACTER_ID, RenderPacket, ScanTarget,
@@ -630,6 +633,15 @@ fn vn_codex_surface(
             ..SocialExchangePacket::default()
         },
     )?;
+    let active_encounter_surface = load_encounter_surface_state(
+        files.dir.as_path(),
+        EncounterSurfacePacket {
+            world_id: world.world_id.clone(),
+            turn_id: packet.turn_id.clone(),
+            scene_id: packet.visible_state.dashboard.location.clone(),
+            ..EncounterSurfacePacket::default()
+        },
+    )?;
     Ok(VnCodexSurface {
         full_markdown: redact_guide_choice_public_hints(&render_packet_markdown(packet)),
         dashboard: player_visible_dashboard(world, &packet.visible_state.dashboard, place_record),
@@ -644,6 +656,7 @@ fn vn_codex_surface(
             place_record,
             protagonist_record,
             &active_social_exchange,
+            &active_encounter_surface,
         ),
         turn_log,
         context_events,
@@ -801,6 +814,7 @@ fn protagonist_status(
     place: Option<&crate::models::PlaceRecord>,
     protagonist: Option<&crate::models::CharacterRecord>,
     active_social_exchange: &SocialExchangePacket,
+    active_encounter_surface: &EncounterSurfacePacket,
 ) -> VnProtagonistStatus {
     let protagonist_name = protagonist
         .map(|character| character.name.visible.as_str())
@@ -856,6 +870,7 @@ fn protagonist_status(
         mind: &mind,
         open_questions: &open_questions,
         active_social_exchange,
+        active_encounter_surface,
     };
     let dashboard_rows = protagonist_status_rows(&status_source);
     VnProtagonistStatus {
@@ -893,6 +908,7 @@ struct VnStatusRowSource<'a> {
     mind: &'a [String],
     open_questions: &'a [String],
     active_social_exchange: &'a SocialExchangePacket,
+    active_encounter_surface: &'a EncounterSurfacePacket,
 }
 
 fn protagonist_status_rows(source: &VnStatusRowSource<'_>) -> Vec<VnStatusRow> {
@@ -1023,6 +1039,11 @@ fn condition_row(source: &VnStatusRowSource<'_>) -> VnStatusRow {
                 consequence_status(source.dashboard.status.as_str(), source.open_questions),
             ),
             status_cell("💬", "대화", dialogue_status(source.active_social_exchange)),
+            status_cell(
+                "🧷",
+                "상호작용",
+                encounter_status(source.active_encounter_surface),
+            ),
             status_cell("🕯️", "희망", hope_status(source.open_questions)),
             status_cell("⚠️", "치명 상태", critical_status(source.body)),
         ],

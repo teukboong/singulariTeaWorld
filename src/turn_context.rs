@@ -92,6 +92,7 @@ mod tests {
     use crate::character_text_design::CharacterTextDesignPacket;
     use crate::consequence_spine::ConsequenceSpinePacket;
     use crate::context_capsule::ContextCapsuleSelection;
+    use crate::encounter_surface::EncounterSurfacePacket;
     use crate::extra_memory::ExtraMemoryPacket;
     use crate::location_graph::LocationGraphPacket;
     use crate::narrative_style_state::NarrativeStyleState;
@@ -138,6 +139,7 @@ mod tests {
                 active_scene_director: SceneDirectorPacket::default(),
                 active_consequence_spine: ConsequenceSpinePacket::default(),
                 active_social_exchange: SocialExchangePacket::default(),
+                active_encounter_surface: EncounterSurfacePacket::default(),
                 active_turn_retrieval_controller: TurnRetrievalControllerPacket::default(),
                 selected_context_capsules: ContextCapsuleSelection::default(),
                 active_autobiographical_index: AutobiographicalIndexPacket::default(),

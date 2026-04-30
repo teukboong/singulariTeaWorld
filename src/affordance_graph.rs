@@ -1,4 +1,8 @@
 use crate::body_resource::{BodyResourcePacket, ResourceItem};
+use crate::encounter_surface::{
+    AffordanceAvailability, EncounterActionKind, EncounterSurface, EncounterSurfaceKind,
+    EncounterSurfacePacket, EncounterSurfaceStatus,
+};
 use crate::location_graph::{LocationGraphPacket, LocationNode};
 use crate::scene_pressure::{ScenePressure, ScenePressureKind, ScenePressurePacket};
 use serde::{Deserialize, Serialize};
@@ -72,7 +76,42 @@ pub fn compile_affordance_graph_packet(
     body_resource: &BodyResourcePacket,
     location_graph: &LocationGraphPacket,
 ) -> AffordanceGraphPacket {
+    compile_affordance_graph_packet_with_encounter(
+        world_id,
+        turn_id,
+        scene_pressure,
+        body_resource,
+        location_graph,
+        None,
+    )
+}
+
+#[must_use]
+pub fn compile_affordance_graph_packet_with_encounter(
+    world_id: &str,
+    turn_id: &str,
+    scene_pressure: &ScenePressurePacket,
+    body_resource: &BodyResourcePacket,
+    location_graph: &LocationGraphPacket,
+    encounter_surface: Option<&EncounterSurfacePacket>,
+) -> AffordanceGraphPacket {
     let pressure_refs = visible_pressure_refs(scene_pressure);
+    if let Some(encounter_surface) = encounter_surface {
+        let encounter_nodes = encounter_affordance_nodes(encounter_surface, &pressure_refs);
+        if encounter_nodes.len() == usize::from(ORDINARY_AFFORDANCE_SLOT_COUNT) {
+            return AffordanceGraphPacket {
+                schema_version: AFFORDANCE_GRAPH_PACKET_SCHEMA_VERSION.to_owned(),
+                world_id: world_id.to_owned(),
+                turn_id: turn_id.to_owned(),
+                ordinary_choice_slots: encounter_nodes,
+                compiler_policy: AffordanceGraphPolicy {
+                    source: "compiled_from_active_encounter_surface_with_visible_fallbacks_v1"
+                        .to_owned(),
+                    ..AffordanceGraphPolicy::default()
+                },
+            };
+        }
+    }
     AffordanceGraphPacket {
         schema_version: AFFORDANCE_GRAPH_PACKET_SCHEMA_VERSION.to_owned(),
         world_id: world_id.to_owned(),
@@ -86,6 +125,120 @@ pub fn compile_affordance_graph_packet(
         ],
         compiler_policy: AffordanceGraphPolicy::default(),
     }
+}
+
+fn encounter_affordance_nodes(
+    encounter_surface: &EncounterSurfacePacket,
+    pressure_refs: &[String],
+) -> Vec<AffordanceNode> {
+    encounter_surface
+        .active_surfaces
+        .iter()
+        .take(usize::from(ORDINARY_AFFORDANCE_SLOT_COUNT))
+        .enumerate()
+        .map(|(index, surface)| encounter_affordance_node(index, surface, pressure_refs))
+        .collect()
+}
+
+fn encounter_affordance_node(
+    index: usize,
+    surface: &EncounterSurface,
+    pressure_refs: &[String],
+) -> AffordanceNode {
+    let slot = u8::try_from(index + 1).unwrap_or(ORDINARY_AFFORDANCE_SLOT_COUNT);
+    let affordance = surface.affordances.first();
+    let mut source_refs = surface.source_refs.clone();
+    if let Some(affordance) = affordance {
+        source_refs.extend(affordance.evidence_refs.clone());
+    }
+    source_refs.sort();
+    source_refs.dedup();
+    let mut linked_pressure_refs = surface.linked_pressure_refs.clone();
+    linked_pressure_refs.extend(pressure_refs.iter().cloned());
+    linked_pressure_refs.sort();
+    linked_pressure_refs.dedup();
+    AffordanceNode {
+        schema_version: AFFORDANCE_NODE_SCHEMA_VERSION.to_owned(),
+        slot,
+        affordance_id: affordance.map_or_else(
+            || format!("affordance:encounter:slot:{slot}"),
+            |affordance| affordance.affordance_id.clone(),
+        ),
+        affordance_kind: affordance_kind_for_encounter(surface, affordance.map(|a| a.action_kind)),
+        label_contract: surface.label.clone(),
+        action_contract: affordance.map_or_else(
+            || surface.summary.clone(),
+            |affordance| affordance.intent_seed.clone(),
+        ),
+        source_refs,
+        pressure_refs: linked_pressure_refs,
+        forbidden_shortcuts: forbidden_shortcuts_for_encounter(
+            surface,
+            affordance.map(|a| a.availability),
+        ),
+    }
+}
+
+fn affordance_kind_for_encounter(
+    surface: &EncounterSurface,
+    action_kind: Option<EncounterActionKind>,
+) -> AffordanceKind {
+    match action_kind {
+        Some(
+            EncounterActionKind::Move | EncounterActionKind::Follow | EncounterActionKind::Bypass,
+        ) => AffordanceKind::Move,
+        Some(
+            EncounterActionKind::Inspect
+            | EncounterActionKind::Listen
+            | EncounterActionKind::Smell
+            | EncounterActionKind::Compare
+            | EncounterActionKind::Mark,
+        ) => AffordanceKind::Observe,
+        Some(
+            EncounterActionKind::TalkAbout
+            | EncounterActionKind::TradeOver
+            | EncounterActionKind::ThreatenWith,
+        ) => AffordanceKind::Contact,
+        Some(
+            EncounterActionKind::Take
+            | EncounterActionKind::Use
+            | EncounterActionKind::Repair
+            | EncounterActionKind::Touch,
+        ) => AffordanceKind::ResourceOrBody,
+        _ => match surface.kind {
+            EncounterSurfaceKind::Exit => AffordanceKind::Move,
+            EncounterSurfaceKind::EvidenceTrace | EncounterSurfaceKind::TimeSensitiveCue => {
+                AffordanceKind::Observe
+            }
+            EncounterSurfaceKind::SocialHandle | EncounterSurfaceKind::AccessController => {
+                AffordanceKind::Contact
+            }
+            EncounterSurfaceKind::UsableTool | EncounterSurfaceKind::Container => {
+                AffordanceKind::ResourceOrBody
+            }
+            _ => AffordanceKind::PressureResponse,
+        },
+    }
+}
+
+fn forbidden_shortcuts_for_encounter(
+    surface: &EncounterSurface,
+    availability: Option<AffordanceAvailability>,
+) -> Vec<String> {
+    let mut shortcuts = vec![
+        "encounter surface 없이 새 해결 대상 발명".to_owned(),
+        "hidden/adjudication-only 원인 노출".to_owned(),
+    ];
+    if matches!(
+        surface.status,
+        EncounterSurfaceStatus::Blocked | EncounterSurfaceStatus::Locked
+    ) || matches!(
+        availability,
+        Some(AffordanceAvailability::Blocked | AffordanceAvailability::RequiresCondition)
+    ) {
+        shortcuts.push("조건을 바꾸지 않고 막힌 표면 통과".to_owned());
+    }
+    shortcuts
 }
 
 fn movement_affordance(
@@ -373,6 +526,83 @@ mod tests {
             graph.ordinary_choice_slots[4]
                 .source_refs
                 .contains(&"pressure:threat:noise".to_owned())
+        );
+    }
+
+    #[test]
+    fn encounter_surface_overrides_generic_affordance_slots() {
+        let encounter = EncounterSurfacePacket {
+            schema_version: crate::encounter_surface::ENCOUNTER_SURFACE_PACKET_SCHEMA_VERSION
+                .to_owned(),
+            world_id: "stw_affordance".to_owned(),
+            turn_id: "turn_0002".to_owned(),
+            scene_id: "place:room".to_owned(),
+            active_surfaces:
+                (1..=5)
+                    .map(|slot| EncounterSurface {
+                        schema_version: crate::encounter_surface::ENCOUNTER_SURFACE_SCHEMA_VERSION
+                            .to_owned(),
+                        surface_id: format!("encounter:surface:{slot}"),
+                        label: format!("표면 {slot}"),
+                        kind: if slot == 2 {
+                            EncounterSurfaceKind::EvidenceTrace
+                        } else {
+                            EncounterSurfaceKind::EnvironmentalFeature
+                        },
+                        status: EncounterSurfaceStatus::Available,
+                        salience: crate::encounter_surface::EncounterSalience::Useful,
+                        summary: format!("표면 {slot}을 건드린다"),
+                        player_visible_signal: format!("표면 {slot}"),
+                        location_ref: Some("place:room".to_owned()),
+                        holder_ref: None,
+                        source_refs: vec![format!("next_choices[slot={slot}]")],
+                        linked_entity_refs: Vec::new(),
+                        linked_pressure_refs: Vec::new(),
+                        linked_social_refs: Vec::new(),
+                        affordances: vec![crate::encounter_surface::EncounterAffordance {
+                            schema_version:
+                                crate::encounter_surface::ENCOUNTER_AFFORDANCE_SCHEMA_VERSION
+                                    .to_owned(),
+                            affordance_id: format!("encounter:surface:{slot}:inspect"),
+                            action_kind: EncounterActionKind::Inspect,
+                            label_seed: format!("표면 {slot}"),
+                            intent_seed: format!("표면 {slot}을 확인한다"),
+                            availability: AffordanceAvailability::Available,
+                            required_refs: Vec::new(),
+                            risk_tags: Vec::new(),
+                            evidence_refs: vec![format!("next_choices[slot={slot}]")],
+                        }],
+                        constraints: Vec::new(),
+                        change_potential: Vec::new(),
+                        lifecycle: crate::encounter_surface::EncounterSurfaceLifecycle {
+                            opened_turn_id: "turn_0002".to_owned(),
+                            last_changed_turn_id: "turn_0002".to_owned(),
+                            persistence:
+                                crate::encounter_surface::EncounterPersistence::CurrentScene,
+                        },
+                    })
+                    .collect(),
+            recent_surface_changes: Vec::new(),
+            blocked_interactions: Vec::new(),
+            required_followups: Vec::new(),
+            compiler_policy: crate::encounter_surface::EncounterSurfacePolicy::default(),
+        };
+        let graph = compile_affordance_graph_packet_with_encounter(
+            "stw_affordance",
+            "turn_0002",
+            &ScenePressurePacket::default(),
+            &BodyResourcePacket::default(),
+            &LocationGraphPacket::default(),
+            Some(&encounter),
+        );
+
+        assert_eq!(
+            graph.compiler_policy.source,
+            "compiled_from_active_encounter_surface_with_visible_fallbacks_v1"
+        );
+        assert_eq!(
+            graph.ordinary_choice_slots[1].affordance_kind,
+            AffordanceKind::Observe
         );
     }
 }

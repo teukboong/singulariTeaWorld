@@ -157,6 +157,45 @@ const AGENT_TURN_RESPONSE_SCHEMA_GUIDE: &str = r#"AgentTurnResponse 스키마:
     "paid_off_or_closed": [],
     "ephemeral_social_notes": []
   },
+  "encounter_proposal": {
+    "schema_version": "singulari.encounter_proposal.v1",
+    "world_id": "<world_id>",
+    "turn_id": "<turn_id>",
+    "mutations": [
+      {
+        "surface_id": "encounter:<turn_id>:scene-specific-id",
+        "label": "플레이어가 알아볼 짧은 표면명",
+        "kind": "barrier|access_controller|evidence_trace|movable_object|usable_tool|container|hazard|exit|hiding_place|social_handle|environmental_feature|time_sensitive_cue",
+        "status": "available|blocked|locked|hidden_but_signaled|degraded|claimed_by_actor|moving|exhausted|resolved|gone",
+        "salience": "background|useful|important|critical",
+        "summary": "이번 장면에서 이 표면이 무엇인지",
+        "player_visible_signal": "플레이어가 이미 볼 수 있는 신호",
+        "location_ref": "현재 장소/ref",
+        "holder_ref": null,
+        "source_refs": ["visible_scene.text_blocks[0] 또는 next_choices[slot=2]"],
+        "linked_entity_refs": [],
+        "linked_pressure_refs": [],
+        "linked_social_refs": [],
+        "affordances": [
+          {
+            "schema_version": "singulari.encounter_affordance.v1",
+            "affordance_id": "encounter:<turn_id>:scene-specific-id:inspect",
+            "action_kind": "inspect|touch|move|open|close|force|repair|break|take|use|talk_about|trade_over|threaten_with|hide_behind|follow|wait|listen|smell|compare|mark|bypass",
+            "label_seed": "선택지 씨앗",
+            "intent_seed": "행동 의도 씨앗",
+            "availability": "available|requires_condition|risky|blocked|unknown_needs_probe",
+            "required_refs": [],
+            "risk_tags": [],
+            "evidence_refs": ["visible_scene.text_blocks[0]"]
+          }
+        ],
+        "constraints": [],
+        "change_potential": [],
+        "persistence": "current_beat|current_scene|until_changed|search_only"
+      }
+    ],
+    "closures": []
+  },
   "visible_scene": {
     "schema_version": "singulari.narrative_scene.v1",
     "text_blocks": ["위 서사 출력 지시와 pending.output_contract.narrative_budget에 맞춘 한국어 VN 본문"],
@@ -314,6 +353,9 @@ const AGENT_TURN_RESPONSE_SCHEMA_GUIDE: &str = r#"AgentTurnResponse 스키마:
 - social_exchange_proposal은 선택(optional)이다. 작성할 경우 이번 대화에서 교환/회피/거절/약속/조건/빚/미해결 질문으로 남은 것만 기록한다.
 - social_exchange_proposal은 대화 트리나 호감도 미터가 아니다. active_social_exchange를 보고 다음 대화의 현재 태도, unresolved_asks 반복 방지, 조건부 약속만 compact하게 갱신한다.
 - social_exchange_proposal의 source_refs/evidence_refs는 prompt_context JSON 안의 player-visible 문자열 ref만 쓴다. hidden motive, adjudication-only truth, 미래 route hint는 summary/signal/condition/ask에 쓰지 않는다.
+- encounter_proposal은 선택(optional)이다. 작성할 경우 이번 턴 visible_scene/next_choices에서 실제로 조작 가능해진 표면만 기록한다.
+- encounter_proposal은 퍼즐 정답이나 물리 엔진이 아니다. active_encounter_surface를 보고 조사/이동/도구/사회적 접근/위험 우회가 다음 턴 선택지에서 무엇을 건드리는지만 compact하게 갱신한다.
+- encounter_proposal의 source_refs/evidence_refs는 prompt_context JSON 안의 player-visible 문자열 ref 또는 이번 응답의 visible_scene.text_blocks/next_choices ref만 쓴다. HiddenButSignaled 표면은 보이는 신호만 적고 숨은 내용은 쓰지 않는다.
 - resolution_proposal의 모든 `target_refs`, `pressure_refs`, `gate_ref`, `grounding_ref`, `process_ref`, `effect.target_ref`는 prompt_context JSON 안에 실제 문자열로 존재하는 ref만 쓴다. 설명용 JSON pointer(`visible_context...`)나 새로 만든 관계/장소/인물 ref는 쓰지 않는다.
 - selected_context_capsules와 selected_memory_items 안의 `source_id`, `edge_id`, `capsule_id`, `entity_id`, `location_id`, `pressure_id`, `affordance_id`처럼 실제 문자열로 들어 있는 ref는 evidence로 쓸 수 있다. 단 rejected_capsules에만 있는 ref는 쓰지 않는다.
 - resolution_proposal의 visible field에는 hidden/adjudication-only 세부 내용을 절대 쓰지 않는다.
@@ -396,6 +438,7 @@ pub(super) fn build_webgpt_turn_prompt(prompt_context: &PromptContextPacket) -> 
 - prompt_context.visible_context.world_process_clock는 보이는 세계 진행 압력이다. 다음 턴으로 넘기면 악화, 완화, 전환, 해소 중 하나가 일어날 수 있음을 문단 압력과 선택지 비용에 반영해라.
 - prompt_context.visible_context.active_scene_director는 장면 박자 권고다. recommended_next_beats/forbidden_repetition/paragraph_budget_hint를 사용해 이번 턴 기능을 바꾸되, beat taxonomy나 Scene Director 용어를 player-visible text에 노출하지 마라. 이 packet은 canon source가 아니며 새 사실, hidden motive, 장소, 결과를 만들 권한이 없다.
 - prompt_context.visible_context.active_social_exchange는 현재 대화 태도와 약속/미해결 질문/대화 leverage 계약이다. 같은 질문을 근거 없이 반복하지 말고, evasive/withholding/bargaining/indebted 같은 stance를 대사 거리와 선택지 모양에 반영하라. 이 packet은 hidden motive를 알려주지 않는다.
+- prompt_context.visible_context.active_encounter_surface는 현재 장면의 조작 가능한 표면 계약이다. next_choices는 가능한 한 active_surfaces의 affordances/status/constraints/change_potential에 닿게 만들고, hidden/adjudication-only 내용을 표면 설명으로 풀지 마라.
 - prompt_context.visible_context.narrative_style_state는 서사 문체와 문단 박자 계약이다. 소재나 설정을 만들지 말고 밀도, 문장 압력, 대사 호흡, 번역체 방지에만 적용해라.
 - prompt_context.visible_context.active_character_text_design은 캐릭터별 화법/어미/어투/제스처/습관/drift 계약이다. 전역 문체와 섞지 말고, 인물이 말하거나 행동할 때만 자연스럽게 반영해라.
 - prompt_context.visible_context.active_change_ledger는 플레이어 행동으로 변한 세계/관계/압력의 요약 장부다. 오래된 원시 사건보다 active_changes의 before/after/cause_turns를 우선해서 현재 장면의 여파로 반영해라.

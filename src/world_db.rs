@@ -8,6 +8,7 @@ use crate::context_capsule::{
     CONTEXT_CAPSULE_DIR, CONTEXT_CAPSULE_INDEX_FILENAME, CONTEXT_CAPSULE_SELECTION_EVENTS_FILENAME,
     ContextCapsuleIndex, ContextCapsuleSelectionEvent,
 };
+use crate::encounter_surface::ENCOUNTER_SURFACE_FILENAME;
 use crate::location_graph::LOCATION_GRAPH_FILENAME;
 use crate::models::{
     ANCHOR_CHARACTER_ID, CanonEvent, CharacterRecord, EntityRecords, EntityUpdateRecord,
@@ -2405,6 +2406,7 @@ fn summarize_materialized_projection(kind: &str, value: &serde_json::Value) -> S
         ),
         "plot_threads" => summarize_count_fields(value, &[("threads", "threads")]),
         "scene_pressure" => summarize_count_fields(value, &[("pressures", "pressures")]),
+        "encounter_surface" => summarize_count_fields(value, &[("active_surfaces", "surfaces")]),
         "visual_asset_graph" => summarize_count_fields(
             value,
             &[
@@ -3406,6 +3408,12 @@ const MATERIALIZED_PROJECTION_FILES: &[MaterializedProjectionFile] = &[
         kind: "social_exchange",
         title: "대화 태도와 교환",
         filename: DIALOGUE_STANCE_FILENAME,
+    },
+    MaterializedProjectionFile {
+        id: "encounter_surface",
+        kind: "encounter_surface",
+        title: "조작 가능한 장면 표면",
+        filename: ENCOUNTER_SURFACE_FILENAME,
     },
     MaterializedProjectionFile {
         id: "visual_asset_graph",

@@ -1,8 +1,11 @@
-use crate::affordance_graph::{AffordanceGraphPacket, compile_affordance_graph_packet};
+use crate::affordance_graph::{
+    AffordanceGraphPacket, compile_affordance_graph_packet_with_encounter,
+};
 use crate::agent_bridge::{AgentOutputContract, PendingAgentTurn};
 use crate::belief_graph::{BeliefGraphPacket, compile_belief_graph_packet};
 use crate::body_resource::BodyResourcePacket;
 use crate::consequence_spine::ConsequenceSpinePacket;
+use crate::encounter_surface::{ENCOUNTER_SURFACE_PACKET_SCHEMA_VERSION, EncounterSurfacePacket};
 use crate::location_graph::LocationGraphPacket;
 use crate::prompt_context_budget::{
     PromptContextBudgetReport, PromptContextBudgetReportSource,
@@ -53,6 +56,7 @@ pub struct PromptVisibleContext {
     pub active_scene_director: Value,
     pub active_consequence_spine: Value,
     pub active_social_exchange: Value,
+    pub active_encounter_surface: Value,
     pub narrative_style_state: Value,
     pub active_character_text_design: Value,
     pub active_change_ledger: Value,
@@ -192,6 +196,7 @@ pub fn assemble_prompt_context_packet(
         active_world_process_clock: &prompt_memory.active_world_process_clock,
         active_player_intent_trace: &prompt_memory.active_player_intent_trace,
         active_social_exchange: &prompt_memory.active_social_exchange,
+        active_encounter_surface: &prompt_memory.active_encounter_surface,
         recent_scene_window: required_path(memory, "/recent_scene_window")?,
         body_resource: &body_resource,
         location_graph: &location_graph,
@@ -249,6 +254,7 @@ struct PromptMemoryValues {
     active_scene_director: Option<SceneDirectorPacket>,
     active_consequence_spine: Value,
     active_social_exchange: Value,
+    active_encounter_surface: Value,
     active_change_ledger: Value,
     active_pattern_debt: Value,
     active_belief_graph: Value,
@@ -301,6 +307,22 @@ fn load_prompt_memory_values(memory: &Value, active_memory: &Value) -> Result<Pr
                     "compiler_policy": SocialExchangePacket::default().compiler_policy
                 })
             }),
+        active_encounter_surface: memory
+            .pointer("/active_encounter_surface")
+            .cloned()
+            .unwrap_or_else(|| {
+                serde_json::json!({
+                    "schema_version": ENCOUNTER_SURFACE_PACKET_SCHEMA_VERSION,
+                    "world_id": "",
+                    "turn_id": "",
+                    "scene_id": "",
+                    "active_surfaces": [],
+                    "recent_surface_changes": [],
+                    "blocked_interactions": [],
+                    "required_followups": [],
+                    "compiler_policy": EncounterSurfacePacket::default().compiler_policy
+                })
+            }),
         active_change_ledger: required_path(memory, "/active_change_ledger")?.clone(),
         active_pattern_debt: required_path(memory, "/active_pattern_debt")?.clone(),
         active_belief_graph: required_path(memory, "/active_belief_graph")?.clone(),
@@ -345,6 +367,7 @@ struct CompileDerivedContextSource<'a> {
     active_world_process_clock: &'a Value,
     active_player_intent_trace: &'a Value,
     active_social_exchange: &'a Value,
+    active_encounter_surface: &'a Value,
     recent_scene_window: &'a Value,
     body_resource: &'a BodyResourcePacket,
     location_graph: &'a LocationGraphPacket,
@@ -354,12 +377,16 @@ struct CompileDerivedContextSource<'a> {
 fn compile_derived_context_packets(
     source: CompileDerivedContextSource<'_>,
 ) -> DerivedContextPackets {
-    let affordance_graph = compile_affordance_graph_packet(
+    let active_encounter_surface =
+        serde_json::from_value::<EncounterSurfacePacket>(source.active_encounter_surface.clone())
+            .ok();
+    let affordance_graph = compile_affordance_graph_packet_with_encounter(
         source.turn_context.world_id.as_str(),
         source.turn_context.turn_id.as_str(),
         source.scene_pressure,
         source.body_resource,
         source.location_graph,
+        active_encounter_surface.as_ref(),
     );
     let belief_graph = compile_belief_graph_packet(
         source.turn_context.world_id.as_str(),
@@ -386,6 +413,7 @@ fn compile_derived_context_packets(
             active_world_process_clock: Some(&world_process_clock_value),
             active_player_intent_trace: Some(source.active_player_intent_trace),
             active_social_exchange: Some(source.active_social_exchange),
+            active_encounter_surface: Some(source.active_encounter_surface),
             recent_scene_window: Some(source.recent_scene_window),
         }),
         source.active_scene_director,
@@ -458,6 +486,7 @@ fn compile_visible_context(source: VisibleContextSource<'_>) -> Result<PromptVis
         active_scene_director: serde_json::to_value(source.scene_director)?,
         active_consequence_spine: source.prompt_memory.active_consequence_spine,
         active_social_exchange: source.prompt_memory.active_social_exchange,
+        active_encounter_surface: source.prompt_memory.active_encounter_surface,
         active_character_text_design: capsule_covered_prompt_projection(
             "active_character_text_design",
             "character_text_design",

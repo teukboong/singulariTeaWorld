@@ -391,6 +391,7 @@ pub fn compile_scene_director_packet(
         active_world_process_clock: None,
         active_player_intent_trace: None,
         active_social_exchange: None,
+        active_encounter_surface: None,
         recent_scene_window: None,
     })
 }
@@ -406,6 +407,7 @@ pub struct SceneDirectorCompileInput<'a> {
     pub active_world_process_clock: Option<&'a Value>,
     pub active_player_intent_trace: Option<&'a Value>,
     pub active_social_exchange: Option<&'a Value>,
+    pub active_encounter_surface: Option<&'a Value>,
     pub recent_scene_window: Option<&'a Value>,
 }
 
@@ -448,6 +450,8 @@ pub fn compile_scene_director_packet_from_input(
         scene_signals.has_active_actor_leverage,
         scene_signals.has_social_dialogue_pressure,
         scene_signals.has_active_process_pressure,
+        scene_signals.has_blocked_encounter_surface,
+        scene_signals.has_probeable_encounter_surface,
         &dominant_pressure_refs,
     );
     let forbidden_repetition = forbidden_repetition(input.active_pattern_debt);
@@ -512,6 +516,8 @@ struct SceneDirectorSignals {
     has_active_actor_leverage: bool,
     has_social_dialogue_pressure: bool,
     has_active_process_pressure: bool,
+    has_blocked_encounter_surface: bool,
+    has_probeable_encounter_surface: bool,
 }
 
 fn collect_scene_director_signals(input: &SceneDirectorCompileInput<'_>) -> SceneDirectorSignals {
@@ -531,6 +537,9 @@ fn collect_scene_director_signals(input: &SceneDirectorCompileInput<'_>) -> Scen
     if let Some(social_exchange) = input.active_social_exchange {
         collect_social_exchange_signals(social_exchange, &mut signals);
     }
+    if let Some(encounter_surface) = input.active_encounter_surface {
+        collect_encounter_surface_signals(encounter_surface, &mut signals);
+    }
     if let Some(recent_scene_window) = input.recent_scene_window {
         collect_recent_scene_signals(recent_scene_window, &mut signals);
     }
@@ -539,6 +548,64 @@ fn collect_scene_director_signals(input: &SceneDirectorCompileInput<'_>) -> Scen
     signals.unresolved_visible_threads.sort();
     signals.unresolved_visible_threads.dedup();
     signals
+}
+
+fn collect_encounter_surface_signals(
+    encounter_surface: &Value,
+    signals: &mut SceneDirectorSignals,
+) {
+    for surface in encounter_surface
+        .get("active_surfaces")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if surface
+            .get("holder_ref")
+            .and_then(Value::as_str)
+            .is_some_and(|holder| holder.starts_with("char:") || holder == "player")
+        {
+            signals.actor_refs.push(
+                surface["holder_ref"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+            );
+        }
+        if surface
+            .get("status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| matches!(status, "blocked" | "locked"))
+        {
+            signals.has_blocked_encounter_surface = true;
+            signals.unresolved_probe_turns = signals.unresolved_probe_turns.saturating_add(1);
+        }
+        if surface
+            .get("kind")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| matches!(kind, "evidence_trace" | "time_sensitive_cue"))
+            || surface
+                .get("status")
+                .and_then(Value::as_str)
+                .is_some_and(|status| status == "hidden_but_signaled")
+        {
+            signals.has_probeable_encounter_surface = true;
+        }
+        if surface
+            .get("salience")
+            .and_then(Value::as_str)
+            .is_some_and(|salience| matches!(salience, "important" | "critical"))
+        {
+            signals.unresolved_probe_turns = signals.unresolved_probe_turns.saturating_add(1);
+        }
+    }
+    if encounter_surface
+        .get("blocked_interactions")
+        .and_then(Value::as_array)
+        .is_some_and(|blocked| !blocked.is_empty())
+    {
+        signals.has_blocked_encounter_surface = true;
+    }
 }
 
 fn collect_social_exchange_signals(social_exchange: &Value, signals: &mut SceneDirectorSignals) {
@@ -883,6 +950,7 @@ fn inferred_recent_beats(
 
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::fn_params_excessive_bools)]
 fn recommendations(
     tension: TensionLevel,
     transition_pressure: TransitionPressure,
@@ -891,6 +959,8 @@ fn recommendations(
     has_active_actor_leverage: bool,
     has_social_dialogue_pressure: bool,
     has_active_process_pressure: bool,
+    has_blocked_encounter_surface: bool,
+    has_probeable_encounter_surface: bool,
     pressure_refs: &[String],
 ) -> Vec<DramaticBeatRecommendation> {
     if matches!(transition_pressure, TransitionPressure::High) {
@@ -945,6 +1015,34 @@ fn recommendations(
             recommendation(
                 DramaticBeatKind::Complicate,
                 "Let the actor pressure change the problem shape without inventing hidden motive.",
+                pressure_refs,
+            ),
+        ];
+    }
+    if has_blocked_encounter_surface {
+        return vec![
+            recommendation(
+                DramaticBeatKind::ChoicePressure,
+                "A blocked encounter surface should force a concrete bypass, cost, or condition instead of another generic inspection.",
+                pressure_refs,
+            ),
+            recommendation(
+                DramaticBeatKind::Complicate,
+                "Let the blocked surface change the action surface without exposing hidden adjudication.",
+                pressure_refs,
+            ),
+        ];
+    }
+    if has_probeable_encounter_surface {
+        return vec![
+            recommendation(
+                DramaticBeatKind::Probe,
+                "A probeable encounter surface is available; answer with a concrete visible detail, narrowed question, or changed affordance.",
+                pressure_refs,
+            ),
+            recommendation(
+                DramaticBeatKind::Reveal,
+                "If the surface has already been probed, reveal one player-visible detail that changes the next choice.",
                 pressure_refs,
             ),
         ];
@@ -1926,6 +2024,16 @@ mod tests {
                 }]
             })),
             active_social_exchange: None,
+            active_encounter_surface: Some(&json!({
+                "active_surfaces": [{
+                    "surface_id": "encounter:turn_0005:trace:mark",
+                    "kind": "evidence_trace",
+                    "status": "hidden_but_signaled",
+                    "salience": "important",
+                    "holder_ref": null
+                }],
+                "blocked_interactions": []
+            })),
             recent_scene_window: Some(&json!(["표식을 살핀다.", "다시 묻는다."])),
         });
 

@@ -7,6 +7,7 @@ use crate::backend_selection::{
     save_world_backend_selection,
 };
 use crate::consequence_spine::ACTIVE_CONSEQUENCES_FILENAME;
+use crate::encounter_surface::ENCOUNTER_SURFACE_FILENAME;
 use crate::host_supervisor::{HostSupervisorPlan, build_host_supervisor_plan};
 use crate::job_ledger::{
     ReadWorldJobsOptions, WorldJob, WorldJobKind, WorldJobStatus, read_world_jobs,
@@ -254,6 +255,7 @@ struct VnRuntimeDetails {
     scene_director: Option<serde_json::Value>,
     consequence_spine: Option<serde_json::Value>,
     social_exchange: Option<serde_json::Value>,
+    encounter_surface: Option<serde_json::Value>,
     world_jobs: Vec<WorldJob>,
     projection_health: ProjectionHealthReport,
     host_supervisor: HostSupervisorPlan,
@@ -827,6 +829,11 @@ fn runtime_status(state: &VnServerState) -> Result<VnRuntimeStatusResponse> {
                 state,
                 world_id.as_str(),
                 DIALOGUE_STANCE_FILENAME,
+            )?,
+            encounter_surface: materialized_runtime_details(
+                state,
+                world_id.as_str(),
+                ENCOUNTER_SURFACE_FILENAME,
             )?,
             world_jobs,
             projection_health,

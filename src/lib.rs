@@ -14,6 +14,7 @@ pub mod chat;
 pub mod codex_view;
 pub mod consequence_spine;
 pub mod context_capsule;
+pub mod encounter_surface;
 pub mod entity_update;
 pub mod extra_memory;
 pub mod host_supervisor;
@@ -73,7 +74,7 @@ pub use adjudication::{AdjudicationInput, adjudicate_turn};
 pub use affordance_graph::{
     AFFORDANCE_GRAPH_PACKET_SCHEMA_VERSION, AFFORDANCE_NODE_SCHEMA_VERSION, AffordanceGraphPacket,
     AffordanceGraphPolicy, AffordanceKind, AffordanceNode, ORDINARY_AFFORDANCE_SLOT_COUNT,
-    compile_affordance_graph_packet,
+    compile_affordance_graph_packet, compile_affordance_graph_packet_with_encounter,
 };
 pub use agent_bridge::{
     AGENT_COMMIT_RECORD_SCHEMA_VERSION, AGENT_PENDING_TURN_SCHEMA_VERSION,
@@ -156,6 +157,21 @@ pub use context_capsule::{
     ContextCapsuleSelectionEvent, ContextCapsuleSelectionInput, ContextCapsuleSelectionReason,
     ContextCapsuleVisibility, RejectedContextCapsule, SelectedContextCapsule,
     rebuild_context_capsule_registry, select_context_capsules,
+};
+pub use encounter_surface::{
+    AffordanceAvailability, BlockedInteraction, ENCOUNTER_AFFORDANCE_SCHEMA_VERSION,
+    ENCOUNTER_CHANGE_POTENTIAL_SCHEMA_VERSION, ENCOUNTER_CONSTRAINT_SCHEMA_VERSION,
+    ENCOUNTER_PROPOSAL_SCHEMA_VERSION, ENCOUNTER_SURFACE_EVENT_SCHEMA_VERSION,
+    ENCOUNTER_SURFACE_EVENTS_FILENAME, ENCOUNTER_SURFACE_FILENAME,
+    ENCOUNTER_SURFACE_PACKET_SCHEMA_VERSION, ENCOUNTER_SURFACE_SCHEMA_VERSION, EncounterActionKind,
+    EncounterAffordance, EncounterChangeKind, EncounterChangePotential, EncounterClosureKind,
+    EncounterConstraint, EncounterConstraintKind, EncounterPersistence, EncounterProposal,
+    EncounterSalience, EncounterSurface, EncounterSurfaceChange, EncounterSurfaceClosure,
+    EncounterSurfaceEventPlan, EncounterSurfaceEventRecord, EncounterSurfaceKind,
+    EncounterSurfaceLifecycle, EncounterSurfaceMutation, EncounterSurfacePacket,
+    EncounterSurfacePolicy, EncounterSurfaceStatus, append_encounter_surface_event_plan,
+    compile_encounter_surface_packet, derive_resolution_gate_mutations, encounter_status,
+    load_encounter_surface_state, prepare_encounter_surface_event_plan, rebuild_encounter_surface,
 };
 pub use entity_update::{EntityUpdateInput, apply_structured_entity_updates};
 pub use extra_memory::{

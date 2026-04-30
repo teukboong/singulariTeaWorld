@@ -1,6 +1,7 @@
 use crate::body_resource::BODY_RESOURCE_STATE_FILENAME;
 use crate::character_text_design::CHARACTER_TEXT_DESIGN_FILENAME;
 use crate::consequence_spine::ACTIVE_CONSEQUENCES_FILENAME;
+use crate::encounter_surface::ENCOUNTER_SURFACE_FILENAME;
 use crate::location_graph::LOCATION_GRAPH_FILENAME;
 use crate::models::{
     CanonEvent, EntityRecords, HiddenState, PlayerKnowledge, TurnSnapshot, WorldRecord,
@@ -407,6 +408,15 @@ const DOC_PROJECTION_FILES: &[DocProjectionFile] = &[
             ("active_commitments", "active commitments"),
             ("unresolved_asks", "unresolved asks"),
             ("leverage", "conversation leverage"),
+        ],
+    },
+    DocProjectionFile {
+        title: "Encounter Surface",
+        filename: ENCOUNTER_SURFACE_FILENAME,
+        summary_fields: &[
+            ("active_surfaces", "active surfaces"),
+            ("blocked_interactions", "blocked interactions"),
+            ("required_followups", "required followups"),
         ],
     },
     DocProjectionFile {
