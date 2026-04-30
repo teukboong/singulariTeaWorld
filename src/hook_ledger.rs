@@ -304,6 +304,16 @@ pub struct OfferedChoice {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OfferedChoiceEchoProfile {
+    pub slot: u8,
+    pub omission_profile: OmissionProfile,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+    #[serde(default)]
+    pub anchor_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UnchosenEcho {
     pub schema_version: String,
     pub echo_id: String,
@@ -548,8 +558,9 @@ pub fn record_offered_choice_set_and_echo(
     scene_id: &str,
     choices: &[TurnChoice],
     selected_slot: Option<u8>,
+    echo_profiles: &[OfferedChoiceEchoProfile],
 ) -> Result<HookPacket> {
-    let offered = offered_choice_set(world_id, turn_id, scene_id, choices);
+    let offered = offered_choice_set(world_id, turn_id, scene_id, choices, echo_profiles);
     append_jsonl(&world_dir.join(OFFERED_CHOICE_SETS_FILENAME), &offered)?;
     if let Some(echo) = create_unchosen_echo(&offered, selected_slot) {
         let mut echo_state =
@@ -616,11 +627,12 @@ pub fn rebuild_hook_packet(world_dir: &Path, world_id: &str, turn_id: &str) -> R
 /// evidence, opener, or payoff contract, or when too many promise events are
 /// submitted for one turn.
 pub fn accepted_agent_hook_events(events: &[AgentHookEvent]) -> Result<Vec<AgentHookEvent>> {
-    if events.len() > usize::from(HookLedgerPolicy::default().max_new_promises_per_turn) {
-        bail!(
-            "hook ledger accepts at most one new promise event per turn: actual={}",
-            events.len()
-        );
+    let opened_count = events
+        .iter()
+        .filter(|event| event.event_kind == HookEventKind::Opened)
+        .count();
+    if opened_count > usize::from(HookLedgerPolicy::default().max_new_promises_per_turn) {
+        bail!("hook ledger accepts at most one new promise event per turn: actual={opened_count}");
     }
     let mut accepted = Vec::new();
     for event in events {
@@ -646,13 +658,34 @@ pub fn accepted_agent_hook_events(events: &[AgentHookEvent]) -> Result<Vec<Agent
                 event.hook_id
             );
         }
-        if event.payoff_contract.owed_payoff.is_empty()
-            || event.payoff_contract.possible_resolutions.is_empty()
-        {
-            bail!(
-                "hook event missing payoff contract: hook_id={}",
-                event.hook_id
-            );
+        match event.event_kind {
+            HookEventKind::Opened => {
+                if event.payoff_contract.owed_payoff.is_empty()
+                    || event.payoff_contract.possible_resolutions.is_empty()
+                {
+                    bail!(
+                        "opened hook event missing payoff contract: hook_id={}",
+                        event.hook_id
+                    );
+                }
+            }
+            HookEventKind::PaidOff => {
+                if event.summary.trim().is_empty() {
+                    bail!(
+                        "paid_off hook event missing payoff summary: hook_id={}",
+                        event.hook_id
+                    );
+                }
+            }
+            HookEventKind::Suppressed => {
+                if event.summary.trim().is_empty() {
+                    bail!(
+                        "suppressed hook event missing suppression reason: hook_id={}",
+                        event.hook_id
+                    );
+                }
+            }
+            HookEventKind::Progressed | HookEventKind::PayoffDue => {}
         }
         accepted.push(event.clone());
     }
@@ -667,7 +700,7 @@ pub fn omission_profile_for_choice(
     risk_tags: &[String],
     evidence_refs: &[String],
 ) -> OmissionProfile {
-    if !(1..=5).contains(&slot) || evidence_refs.is_empty() {
+    if !(1..=5).contains(&slot) || evidence_refs.is_empty() || risk_tags.is_empty() {
         return OmissionProfile::default();
     }
     let text = format!("{label} {intent}").to_lowercase();
@@ -679,8 +712,6 @@ pub fn omission_profile_for_choice(
         visible_stakes.push("살피지 않은 표면이 장면의 미결로 남을 수 있다.".to_owned());
     } else if !risk_tags.is_empty() {
         visible_stakes.push("이 선택지는 장면 압력과 연결되어 있다.".to_owned());
-    } else {
-        visible_stakes.push("선택하지 않은 행동의 결이 약하게 남을 수 있다.".to_owned());
     }
     let echo_weight = if risk_tags.is_empty() { 4 } else { 7 };
     OmissionProfile {
@@ -698,27 +729,32 @@ fn offered_choice_set(
     turn_id: &str,
     scene_id: &str,
     choices: &[TurnChoice],
+    echo_profiles: &[OfferedChoiceEchoProfile],
 ) -> OfferedChoiceSet {
     let choices = choices
         .iter()
         .filter(|choice| (1..=5).contains(&choice.slot))
         .map(|choice| {
-            let evidence_refs = vec![
-                format!("turn:{turn_id}:choice:{}", choice.slot),
-                format!("choice:{}", choice.slot),
-            ];
+            let profile = echo_profiles
+                .iter()
+                .find(|profile| profile.slot == choice.slot);
+            let evidence_refs = profile.map_or_else(
+                || {
+                    vec![
+                        format!("turn:{turn_id}:choice:{}", choice.slot),
+                        format!("choice:{}", choice.slot),
+                    ]
+                },
+                |profile| profile.evidence_refs.clone(),
+            );
             OfferedChoice {
                 choice_id: format!("choice:{}", choice.slot),
                 slot: choice.slot,
                 visible_label: choice.tag.clone(),
                 visible_intent: choice.player_visible_intent().to_owned(),
-                omission_profile: omission_profile_for_choice(
-                    choice.slot,
-                    choice.tag.as_str(),
-                    choice.player_visible_intent(),
-                    &[],
-                    &evidence_refs,
-                ),
+                omission_profile: profile
+                    .map(|profile| profile.omission_profile.clone())
+                    .unwrap_or_default(),
                 evidence_refs,
             }
         })
@@ -738,10 +774,11 @@ fn create_unchosen_echo(
     offered: &OfferedChoiceSet,
     selected_slot: Option<u8>,
 ) -> Option<UnchosenEcho> {
+    let selected_slot = selected_slot.filter(|slot| (1..=5).contains(slot))?;
     offered
         .choices
         .iter()
-        .filter(|choice| Some(choice.slot) != selected_slot)
+        .filter(|choice| choice.slot != selected_slot)
         .filter(|choice| choice.omission_profile.can_create_echo)
         .filter(|choice| choice.omission_profile.non_punitive)
         .filter(|choice| !choice.omission_profile.visible_stakes.is_empty())
@@ -1030,6 +1067,24 @@ mod tests {
         ]
     }
 
+    fn echo_profile(slot: u8, weight: u8) -> OfferedChoiceEchoProfile {
+        OfferedChoiceEchoProfile {
+            slot,
+            omission_profile: OmissionProfile {
+                can_create_echo: true,
+                echo_weight: weight,
+                omission_meaning: OmissionMeaning::UnaskedQuestion,
+                visible_stakes: vec![
+                    "말하지 않은 질문이 다음 접촉의 거리감을 바꿀 수 있다.".to_owned(),
+                ],
+                return_conditions: vec![TouchCondition::SceneContact],
+                non_punitive: true,
+            },
+            evidence_refs: vec![format!("next_choices[slot={slot}]")],
+            anchor_refs: vec!["place:north_gate".to_owned()],
+        }
+    }
+
     #[test]
     fn records_at_most_one_unchosen_echo_from_displayed_slots() -> anyhow::Result<()> {
         let temp = tempdir()?;
@@ -1042,6 +1097,7 @@ mod tests {
             "place:north_gate",
             &choices(),
             Some(2),
+            &[echo_profile(1, 7), echo_profile(2, 5)],
         )?;
 
         assert_eq!(packet.active_echoes.len(), 1);
@@ -1066,6 +1122,55 @@ mod tests {
                 intent: "6 뒤에 행동을 쓴다".to_owned(),
             }],
             Some(6),
+            &[],
+        )?;
+
+        assert!(packet.active_echoes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn freeform_or_guide_selection_does_not_create_echoes() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        initialize_hook_ledger_files(temp.path(), "stw_hook", "turn_0000")?;
+
+        let freeform_packet = record_offered_choice_set_and_echo(
+            temp.path(),
+            "stw_hook",
+            "turn_0001",
+            "place:north_gate",
+            &choices(),
+            None,
+            &[echo_profile(1, 7), echo_profile(2, 5)],
+        )?;
+        assert!(freeform_packet.active_echoes.is_empty());
+
+        let guide_packet = record_offered_choice_set_and_echo(
+            temp.path(),
+            "stw_hook",
+            "turn_0002",
+            "place:north_gate",
+            &choices(),
+            Some(7),
+            &[echo_profile(1, 7), echo_profile(2, 5)],
+        )?;
+        assert!(guide_packet.active_echoes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn low_stakes_choice_without_profile_does_not_create_echo() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        initialize_hook_ledger_files(temp.path(), "stw_hook", "turn_0000")?;
+
+        let packet = record_offered_choice_set_and_echo(
+            temp.path(),
+            "stw_hook",
+            "turn_0001",
+            "place:north_gate",
+            &choices(),
+            Some(2),
+            &[],
         )?;
 
         assert!(packet.active_echoes.is_empty());
@@ -1092,5 +1197,49 @@ mod tests {
             Ok(_) => panic!("missing evidence should fail"),
             Err(err) => assert!(err.to_string().contains("missing evidence_refs")),
         }
+    }
+
+    #[test]
+    fn hook_lifecycle_validation_is_event_kind_specific() -> anyhow::Result<()> {
+        let paid_off = AgentHookEvent {
+            schema_version: HOOK_EVENT_SCHEMA_VERSION.to_owned(),
+            event_kind: HookEventKind::PaidOff,
+            hook_id: "hook:north_gate".to_owned(),
+            kind: HookKind::Mystery,
+            visible_promise: "북문 안쪽 걸쇠의 의미가 드러났다.".to_owned(),
+            anchor_refs: vec!["place:north_gate".to_owned()],
+            evidence_refs: vec!["current_turn".to_owned()],
+            opened_by_event: "current_turn".to_owned(),
+            payoff_contract: PayoffContract {
+                owed_payoff: Vec::new(),
+                minimum_progress_interval: 0,
+                max_teases_without_progress: 0,
+                possible_resolutions: Vec::new(),
+            },
+            return_rights: HookReturnRights::default(),
+            summary: "걸쇠는 안쪽에서 급히 잠긴 흔적이었다.".to_owned(),
+        };
+
+        assert_eq!(accepted_agent_hook_events(&[paid_off])?.len(), 1);
+
+        let suppressed = AgentHookEvent {
+            schema_version: HOOK_EVENT_SCHEMA_VERSION.to_owned(),
+            event_kind: HookEventKind::Suppressed,
+            hook_id: "hook:north_gate".to_owned(),
+            kind: HookKind::Mystery,
+            visible_promise: "북문 안쪽 걸쇠는 더 추적하지 않는다.".to_owned(),
+            anchor_refs: vec!["place:north_gate".to_owned()],
+            evidence_refs: vec!["current_turn".to_owned()],
+            opened_by_event: "current_turn".to_owned(),
+            payoff_contract: PayoffContract::default(),
+            return_rights: HookReturnRights::default(),
+            summary: String::new(),
+        };
+        let result = accepted_agent_hook_events(&[suppressed]);
+        match result {
+            Ok(_) => panic!("suppressed hook without reason should fail"),
+            Err(err) => assert!(err.to_string().contains("suppression reason")),
+        }
+        Ok(())
     }
 }

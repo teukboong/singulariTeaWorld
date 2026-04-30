@@ -469,13 +469,7 @@ pub fn compile_encounter_surface_packet(
     surfaces.extend(location_surfaces(turn_id, scene_id, location_graph));
     surfaces.extend(body_constraint_surfaces(turn_id, scene_id, body_resource));
     surfaces.extend(resource_surfaces(turn_id, scene_id, body_resource));
-    surfaces.sort_by(|left, right| {
-        right
-            .salience
-            .cmp(&left.salience)
-            .then(left.surface_id.cmp(&right.surface_id))
-    });
-    surfaces.truncate(ACTIVE_SURFACE_BUDGET);
+    surfaces = budget_active_surfaces(surfaces);
     let choice_contracts = compile_choice_contracts(&surfaces);
     EncounterSurfacePacket {
         schema_version: ENCOUNTER_SURFACE_PACKET_SCHEMA_VERSION.to_owned(),
@@ -698,13 +692,7 @@ pub fn rebuild_encounter_surface(
             )
         })
         .collect::<Vec<_>>();
-    active_surfaces.sort_by(|left, right| {
-        right
-            .salience
-            .cmp(&left.salience)
-            .then(left.surface_id.cmp(&right.surface_id))
-    });
-    active_surfaces.truncate(ACTIVE_SURFACE_BUDGET);
+    active_surfaces = budget_active_surfaces(active_surfaces);
     changes.reverse();
     changes.truncate(RECENT_CHANGE_BUDGET);
     blocked.reverse();
@@ -955,6 +943,48 @@ fn compile_choice_contracts(surfaces: &[EncounterSurface]) -> Vec<ChoiceContract
                 .map(|affordance| choice_contract_from_affordance(surface, affordance))
         })
         .collect()
+}
+
+fn budget_active_surfaces(mut surfaces: Vec<EncounterSurface>) -> Vec<EncounterSurface> {
+    surfaces.sort_by(|left, right| {
+        right
+            .salience
+            .cmp(&left.salience)
+            .then(left.surface_id.cmp(&right.surface_id))
+    });
+    let mut choice_surfaces = surfaces
+        .iter()
+        .filter(|surface| is_choice_surface(surface))
+        .take(5)
+        .cloned()
+        .collect::<Vec<_>>();
+    let remaining_budget = ACTIVE_SURFACE_BUDGET.saturating_sub(choice_surfaces.len());
+    let mut remaining = surfaces
+        .into_iter()
+        .filter(|surface| !is_choice_surface(surface))
+        .take(remaining_budget)
+        .collect::<Vec<_>>();
+    choice_surfaces.append(&mut remaining);
+    choice_surfaces.sort_by(|left, right| {
+        right
+            .salience
+            .cmp(&left.salience)
+            .then(left.surface_id.cmp(&right.surface_id))
+    });
+    choice_surfaces
+}
+
+fn is_choice_surface(surface: &EncounterSurface) -> bool {
+    surface
+        .source_refs
+        .iter()
+        .chain(
+            surface
+                .physical_anchors
+                .iter()
+                .flat_map(|anchor| anchor.evidence_refs.iter()),
+        )
+        .any(|source_ref| choice_slot_from_ref(source_ref).is_some())
 }
 
 fn choice_contract_from_affordance(
@@ -2079,6 +2109,54 @@ mod tests {
                 .iter()
                 .any(|outcome| outcome == "reveal_hidden_truth_directly")
         );
+    }
+
+    #[test]
+    fn active_surface_budget_preserves_visible_choice_surfaces() {
+        let choices = (1..=5)
+            .map(|slot| TurnChoice {
+                slot,
+                tag: format!("선택 {slot}"),
+                intent: "보이는 선택지를 유지한다".to_owned(),
+            })
+            .collect::<Vec<_>>();
+        let packet = compile_encounter_surface_packet(
+            "world",
+            "turn_0002",
+            "place:gate",
+            &choices,
+            &ScenePressurePacket::default(),
+            &LocationGraphPacket {
+                known_nearby_locations: (0..12)
+                    .map(|index| crate::location_graph::LocationNode {
+                        schema_version: crate::location_graph::LOCATION_NODE_SCHEMA_VERSION
+                            .to_owned(),
+                        location_id: format!("place:nearby_{index}"),
+                        name: format!("근처 {index}"),
+                        knowledge_state: crate::location_graph::LocationKnowledgeState::Known,
+                        notes: Vec::new(),
+                        source_refs: vec![format!(
+                            "location_graph.known_nearby_locations[{index}]"
+                        )],
+                    })
+                    .collect(),
+                ..LocationGraphPacket::default()
+            },
+            &BodyResourcePacket::default(),
+            &SocialExchangePacket::default(),
+        );
+
+        for slot in 1..=5 {
+            assert!(
+                packet.active_surfaces.iter().any(|surface| {
+                    surface
+                        .source_refs
+                        .iter()
+                        .any(|source_ref| source_ref == &format!("next_choices[slot={slot}]"))
+                }),
+                "slot {slot} choice surface should survive active surface budget"
+            );
+        }
     }
 
     #[test]

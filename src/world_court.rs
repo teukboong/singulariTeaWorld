@@ -303,7 +303,37 @@ fn audit_hook_events(
         ));
         return;
     }
+    let reference_index = match court_reference_index(input.context) {
+        Ok(index) => index,
+        Err(error) => {
+            violations.push(domain_violation(
+                WorldCourtLayer::ProjectionHook,
+                "hook_event_visible_ref_index",
+                format!("failed to index visible refs for hook event audit: {error:#}").as_str(),
+                "hook_events",
+                "repair visible context packets before accepting hook events",
+            ));
+            return;
+        }
+    };
     for event in input.hook_events {
+        for item_ref in event
+            .evidence_refs
+            .iter()
+            .chain(event.anchor_refs.iter())
+            .chain(std::iter::once(&event.opened_by_event))
+        {
+            if !reference_index.all.contains(item_ref) {
+                violations.push(domain_violation(
+                    WorldCourtLayer::ProjectionHook,
+                    "hook_event_visible_ref",
+                    format!("hook event ref is not present in player-visible context: {item_ref}")
+                        .as_str(),
+                    event.hook_id.as_str(),
+                    "use only player-visible evidence_refs, opened_by_event, and anchor_refs",
+                ));
+            }
+        }
         for needle in &input
             .context
             .pre_turn_simulation
@@ -328,6 +358,12 @@ fn audit_hook_events(
         .any(|violation| violation.check == "hook_event_hidden_leak")
     {
         accepted_checks.push("hook_event_visibility".to_owned());
+    }
+    if !violations
+        .iter()
+        .any(|violation| violation.check == "hook_event_visible_ref")
+    {
+        accepted_checks.push("hook_event_visible_refs".to_owned());
     }
     accepted_checks.push("hook_event_contract".to_owned());
 }
@@ -1861,9 +1897,9 @@ mod tests {
             hook_id: "hook:sealed_letter".to_owned(),
             kind: HookKind::Mystery,
             visible_promise: "자루 안의 밀서는 아직 설명되지 않았다.".to_owned(),
-            anchor_refs: vec!["item:bag".to_owned()],
+            anchor_refs: vec!["current_turn".to_owned()],
             evidence_refs: vec!["current_turn".to_owned()],
-            opened_by_event: "event:bag_signal".to_owned(),
+            opened_by_event: "current_turn".to_owned(),
             payoff_contract: PayoffContract::default(),
             return_rights: HookReturnRights::default(),
             summary: String::new(),
@@ -1879,6 +1915,39 @@ mod tests {
         assert_eq!(verdict.status, WorldCourtVerdictStatus::Reject);
         assert_eq!(verdict.violations[0].layer, WorldCourtLayer::Visibility);
         assert_eq!(verdict.violations[0].check, "hook_event_hidden_leak");
+    }
+
+    #[test]
+    fn rejects_hook_event_evidence_ref_outside_visible_context() {
+        let context = minimal_context(false);
+        let hook_event = AgentHookEvent {
+            schema_version: HOOK_EVENT_SCHEMA_VERSION.to_owned(),
+            event_kind: HookEventKind::Opened,
+            hook_id: "hook:unknown".to_owned(),
+            kind: HookKind::Mystery,
+            visible_promise: "낯선 흔적은 아직 설명되지 않았다.".to_owned(),
+            anchor_refs: vec!["current_turn".to_owned()],
+            evidence_refs: vec!["hidden:adjudication_only".to_owned()],
+            opened_by_event: "current_turn".to_owned(),
+            payoff_contract: PayoffContract::default(),
+            return_rights: HookReturnRights::default(),
+            summary: String::new(),
+        };
+
+        let verdict = adjudicate_world_changes(&WorldCourtInput {
+            context: &context,
+            resolution_proposal: None,
+            next_choices: &[],
+            hook_events: &[hook_event],
+        });
+
+        assert_eq!(verdict.status, WorldCourtVerdictStatus::Reject);
+        assert!(
+            verdict
+                .violations
+                .iter()
+                .any(|violation| violation.check == "hook_event_visible_ref")
+        );
     }
 
     #[test]

@@ -206,12 +206,12 @@ pub use hook_ledger::{
     AgentHookEvent, DecayMode, EchoLedgerState, EchoStatus, HOOK_EVENTS_FILENAME,
     HOOK_LEDGER_PACKET_SCHEMA_VERSION, HOOK_THREADS_FILENAME, HookChoiceBias, HookEventKind,
     HookKind, HookLedgerPolicy, HookLedgerState, HookPacket, HookReturnRights, HookStatus,
-    HookThread, OFFERED_CHOICE_SETS_FILENAME, OfferedChoice, OfferedChoiceSet, OmissionMeaning,
-    OmissionProfile, PayoffContract, PayoffKind, ResolutionMode, SESSION_RECEIPT_FILENAME,
-    SessionReceipt, TeaRecap, TouchCondition, UNCHOSEN_ECHOES_FILENAME, UnchosenEcho,
-    accepted_agent_hook_events, append_agent_hook_events, initialize_hook_ledger_files,
-    load_hook_packet_state, omission_profile_for_choice, rebuild_hook_packet,
-    record_offered_choice_set_and_echo,
+    HookThread, OFFERED_CHOICE_SETS_FILENAME, OfferedChoice, OfferedChoiceEchoProfile,
+    OfferedChoiceSet, OmissionMeaning, OmissionProfile, PayoffContract, PayoffKind, ResolutionMode,
+    SESSION_RECEIPT_FILENAME, SessionReceipt, TeaRecap, TouchCondition, UNCHOSEN_ECHOES_FILENAME,
+    UnchosenEcho, accepted_agent_hook_events, append_agent_hook_events,
+    initialize_hook_ledger_files, load_hook_packet_state, omission_profile_for_choice,
+    rebuild_hook_packet, record_offered_choice_set_and_echo,
 };
 pub use host_supervisor::{
     HOST_SUPERVISOR_PLAN_SCHEMA_VERSION, HostSupervisorLaneKind, HostSupervisorLanePlan,

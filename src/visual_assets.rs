@@ -317,8 +317,11 @@ pub struct VisualCanonAudit {
 #[serde(rename_all = "snake_case")]
 pub enum VisualCanonAuditStatus {
     PendingReview,
+    /// File, destination, and display policy passed; generated pixels are not canon-approved facts.
     AcceptedDisplayOnly,
+    /// File, destination, and reference policy passed; generated pixels are not canon-approved facts.
     AcceptedReferenceOnly,
+    /// Reserved for a future explicit reviewer workflow; current code does not auto-transition here.
     ManualReviewRequired,
     RejectedPolicyViolation,
 }

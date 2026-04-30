@@ -42,8 +42,8 @@ use crate::extra_memory::{
     retrieve_extra_memory_packet,
 };
 use crate::hook_ledger::{
-    AgentHookEvent, HookPacket, append_agent_hook_events, load_hook_packet_state,
-    record_offered_choice_set_and_echo,
+    AgentHookEvent, HookPacket, OfferedChoiceEchoProfile, append_agent_hook_events,
+    load_hook_packet_state, record_offered_choice_set_and_echo,
 };
 use crate::location_graph::{
     LocationEvent, LocationGraphPacket, append_location_event_plan, compile_location_graph_packet,
@@ -801,7 +801,7 @@ pub fn commit_agent_turn(options: &AgentCommitTurnOptions) -> Result<CommittedAg
             &advanced.snapshot,
             &response.next_choices,
         )?;
-        commit_post_advance_materialization(
+        commit_advisory_post_advance_materialization(
             &files,
             options.world_id.as_str(),
             pending.turn_id.as_str(),
@@ -814,12 +814,15 @@ pub fn commit_agent_turn(options: &AgentCommitTurnOptions) -> Result<CommittedAg
                     before_commit_snapshot.protagonist_state.location.as_str(),
                     &before_commit_snapshot.last_choices,
                     pending.selected_choice.as_ref().map(|choice| choice.slot),
+                    &echo_profiles_from_encounter_surface(
+                        &pending.visible_context.active_encounter_surface,
+                    ),
                 )?;
                 Ok(())
             },
         )?;
         if !response.hook_events.is_empty() {
-            commit_post_advance_materialization(
+            commit_advisory_post_advance_materialization(
                 &files,
                 options.world_id.as_str(),
                 pending.turn_id.as_str(),
@@ -1402,6 +1405,39 @@ fn canonical_agent_turn_response(mut response: AgentTurnResponse) -> AgentTurnRe
     response
 }
 
+fn echo_profiles_from_encounter_surface(
+    surface_packet: &EncounterSurfacePacket,
+) -> Vec<OfferedChoiceEchoProfile> {
+    surface_packet
+        .choice_contracts
+        .iter()
+        .filter_map(|contract| {
+            let slot = contract
+                .evidence_refs
+                .iter()
+                .find_map(|source_ref| choice_slot_from_ref(source_ref))?;
+            let omission_profile = contract.omission_profile.clone()?;
+            if !omission_profile.can_create_echo {
+                return None;
+            }
+            Some(OfferedChoiceEchoProfile {
+                slot,
+                omission_profile,
+                evidence_refs: contract.evidence_refs.clone(),
+                anchor_refs: vec![contract.target_ref.clone()],
+            })
+        })
+        .collect()
+}
+
+fn choice_slot_from_ref(source_ref: &str) -> Option<u8> {
+    source_ref
+        .strip_prefix("next_choices[slot=")?
+        .strip_suffix(']')?
+        .parse::<u8>()
+        .ok()
+}
+
 fn commit_post_advance_materialization(
     files: &WorldFilePaths,
     world_id: &str,
@@ -1445,6 +1481,32 @@ fn commit_post_advance_materialization(
             );
         }
     }
+}
+
+fn commit_advisory_post_advance_materialization(
+    files: &WorldFilePaths,
+    world_id: &str,
+    turn_id: &str,
+    component: &str,
+    materialize: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let (status, error) = match materialize() {
+        Ok(()) => ("committed", None),
+        Err(error) => ("advisory_failed", Some(format!("{error:#}"))),
+    };
+    let event = PostCommitMaterializationEvent {
+        schema_version: POST_COMMIT_MATERIALIZATION_EVENT_SCHEMA_VERSION.to_owned(),
+        world_id: world_id.to_owned(),
+        turn_id: turn_id.to_owned(),
+        component: component.to_owned(),
+        status: status.to_owned(),
+        error,
+        recorded_at: Utc::now().to_rfc3339(),
+    };
+    append_jsonl_durable(
+        &files.dir.join(POST_COMMIT_MATERIALIZATION_EVENTS_FILENAME),
+        &event,
+    )
 }
 
 fn validate_agent_response(pending: &PendingAgentTurn, response: &AgentTurnResponse) -> Result<()> {
@@ -2284,7 +2346,10 @@ mod tests {
         validate_agent_response,
     };
     use crate::actor_agency::ActorAgencyPacket;
-    use crate::agent_bridge::{commit_agent_turn, commit_post_advance_materialization};
+    use crate::agent_bridge::{
+        commit_advisory_post_advance_materialization, commit_agent_turn,
+        commit_post_advance_materialization,
+    };
     use crate::autobiographical_index::AutobiographicalIndexPacket;
     use crate::belief_graph::BeliefGraphPacket;
     use crate::body_resource::BodyResourcePacket;
@@ -3088,6 +3153,38 @@ premise:
             std::fs::read_to_string(files.dir.join("post_commit_materialization_events.jsonl"))?;
         assert!(materialization_events.contains("\"status\":\"failed\""));
         assert!(materialization_events.contains("synthetic materialization failure"));
+        Ok(())
+    }
+
+    #[test]
+    fn advisory_hook_materialization_failure_does_not_abort_commit_path() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(
+            &seed_path,
+            seed_body("stw_agent_advisory_materialization_fail"),
+        )?;
+        init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+        let store_paths = resolve_store_paths(Some(store.as_path()))?;
+        let files = world_file_paths(&store_paths, "stw_agent_advisory_materialization_fail");
+
+        commit_advisory_post_advance_materialization(
+            &files,
+            "stw_agent_advisory_materialization_fail",
+            "turn_0001",
+            "hook_ledger_promises",
+            || anyhow::bail!("synthetic advisory hook failure"),
+        )?;
+
+        let materialization_events =
+            std::fs::read_to_string(files.dir.join("post_commit_materialization_events.jsonl"))?;
+        assert!(materialization_events.contains("\"status\":\"advisory_failed\""));
+        assert!(materialization_events.contains("synthetic advisory hook failure"));
         Ok(())
     }
 
