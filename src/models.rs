@@ -1206,8 +1206,12 @@ pub fn normalize_turn_choices(choices: &[TurnChoice]) -> Vec<TurnChoice> {
         .cloned()
         .unwrap_or_else(default_freeform_choice);
     freeform.slot = FREEFORM_CHOICE_SLOT;
+    FREEFORM_CHOICE_TAG.clone_into(&mut freeform.tag);
     if freeform.intent.contains("7 뒤에") {
         freeform.intent = freeform.intent.replace("7 뒤에", "6 뒤에");
+    }
+    if !freeform.intent.contains("직접") {
+        freeform.intent = default_freeform_choice().intent;
     }
     normalized.push(freeform);
 
@@ -1384,7 +1388,8 @@ mod tests {
     use super::{
         CharacterVoiceAnchor, FREEFORM_CHOICE_SLOT, FREEFORM_CHOICE_TAG,
         GUIDE_CHOICE_REDACTED_INTENT, GUIDE_CHOICE_SLOT, GUIDE_CHOICE_TAG, LEGACY_GUIDE_CHOICE_TAG,
-        TurnChoice, normalize_turn_choices, redact_guide_choice_public_hints,
+        TurnChoice, default_freeform_choice, normalize_turn_choices,
+        redact_guide_choice_public_hints,
     };
 
     #[test]
@@ -1457,5 +1462,51 @@ mod tests {
         assert_eq!(normalized[6].slot, GUIDE_CHOICE_SLOT);
         assert_eq!(normalized[6].tag, GUIDE_CHOICE_TAG);
         assert_eq!(normalized[6].intent, GUIDE_CHOICE_REDACTED_INTENT);
+    }
+
+    #[test]
+    fn normalizes_webgpt_freeform_rewording_to_fixed_contract() {
+        let normalized = normalize_turn_choices(&[
+            TurnChoice {
+                slot: 1,
+                tag: "흐름".to_owned(),
+                intent: "정적이 밀리는 방향을 느껴 본다.".to_owned(),
+            },
+            TurnChoice {
+                slot: 2,
+                tag: "움직임".to_owned(),
+                intent: "발끝 앞의 빈칸으로 한 걸음 나아간다.".to_owned(),
+            },
+            TurnChoice {
+                slot: 3,
+                tag: "살핌".to_owned(),
+                intent: "가까운 흔적부터 살핀다.".to_owned(),
+            },
+            TurnChoice {
+                slot: 4,
+                tag: "접촉".to_owned(),
+                intent: "기척을 향해 짧게 말을 건다.".to_owned(),
+            },
+            TurnChoice {
+                slot: 5,
+                tag: "기록".to_owned(),
+                intent: "현재 알려진 세계 기록을 연다.".to_owned(),
+            },
+            TurnChoice {
+                slot: 6,
+                tag: FREEFORM_CHOICE_TAG.to_owned(),
+                intent: "플레이어가 원하는 행동, 말, 시선, 망설임을 자유롭게 쓴다.".to_owned(),
+            },
+            TurnChoice {
+                slot: 7,
+                tag: GUIDE_CHOICE_TAG.to_owned(),
+                intent: GUIDE_CHOICE_REDACTED_INTENT.to_owned(),
+            },
+        ]);
+
+        let default = default_freeform_choice();
+        assert_eq!(normalized[5].slot, default.slot);
+        assert_eq!(normalized[5].tag, default.tag);
+        assert_eq!(normalized[5].intent, default.intent);
     }
 }

@@ -648,14 +648,14 @@ fn affordance_slot_for_grounding_ref(
 }
 
 fn shorthand_affordance_ref_slot(item_ref: &str, turn_id: &str) -> Option<u8> {
-    if !item_ref.starts_with("encounter:") || !item_ref.ends_with("::affordance") {
+    if !item_ref.starts_with("encounter:") || !item_ref.ends_with(":affordance") {
         return None;
     }
     if !turn_id.is_empty() && !item_ref.starts_with(format!("encounter:{turn_id}:slot:").as_str()) {
         return None;
     }
     let (_, slot_tail) = item_ref.split_once(":slot:")?;
-    let slot = slot_tail.strip_suffix("::affordance")?;
+    let slot = slot_tail.split(':').next()?;
     slot.parse().ok()
 }
 
@@ -766,6 +766,7 @@ fn require_evidence(
 fn collect_visible_refs(context: &PromptContextPacket) -> Result<BTreeSet<String>> {
     let visible = &context.visible_context;
     let mut refs = BTreeSet::new();
+    refs.insert(context.turn_id.clone());
     refs.insert(format!("turn:{}", context.turn_id));
     refs.insert("current_turn".to_owned());
     refs.insert("visible_scene".to_owned());
@@ -1097,6 +1098,20 @@ mod tests {
     }
 
     #[test]
+    fn accepts_current_turn_id_as_visible_resolution_ref() {
+        let context = sample_context();
+        let mut proposal = sample_proposal();
+        proposal
+            .interpreted_intent
+            .target_refs
+            .push(context.turn_id.clone());
+
+        if let Err(critique) = audit_resolution_proposal(&context, &proposal) {
+            panic!("current turn id should pass visible ref audit: {critique:?}");
+        }
+    }
+
+    #[test]
     fn rejects_visible_hidden_truth_leak() {
         let context = sample_context();
         let mut proposal = sample_proposal();
@@ -1190,6 +1205,12 @@ mod tests {
             "encounter:turn_0004:slot:5::affordance".to_owned();
         proposal.next_choice_plan[4].grounding_ref =
             "encounter:turn_0004:slot:1::affordance".to_owned();
+        proposal.next_choice_plan[1].grounding_ref =
+            "encounter:turn_0004:slot:2:_:affordance".to_owned();
+        proposal.next_choice_plan[2].grounding_ref =
+            "encounter:turn_0004:slot:3:__:affordance".to_owned();
+        proposal.next_choice_plan[3].grounding_ref =
+            "encounter:turn_0004:slot:4:___:affordance".to_owned();
 
         if let Err(critique) = audit_resolution_proposal(&context, &proposal) {
             panic!("current-turn shorthand encounter affordance refs should pass: {critique:?}");

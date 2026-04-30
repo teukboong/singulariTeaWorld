@@ -788,6 +788,7 @@ struct CourtReferenceIndex {
 fn court_reference_index(context: &PromptContextPacket) -> Result<CourtReferenceIndex> {
     let mut refs = CourtReferenceIndex::default();
     refs.insert_all("current_turn");
+    refs.insert_all(&context.turn_id);
     for source_ref in &context.pre_turn_simulation.source_refs {
         refs.insert_all(source_ref);
     }

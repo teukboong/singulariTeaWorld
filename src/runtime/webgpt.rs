@@ -326,8 +326,8 @@ pub(super) fn dispatch_pending_agent_turn_via_webgpt(
         None,
     )?;
 
-    let mut dispatch_result = dispatcher.run(paths)?;
-    let mut mcp_completed_at = Utc::now();
+    let dispatch_result = dispatcher.run(paths)?;
+    let mcp_completed_at = Utc::now();
     if let Some(raw_conversation_id) = dispatch_result.raw_conversation_id.as_deref() {
         save_webgpt_conversation_binding(
             store_root,
@@ -337,19 +337,17 @@ pub(super) fn dispatch_pending_agent_turn_via_webgpt(
         )?;
     }
 
-    let mut final_paths = paths;
-    let mut commit_result = commit_webgpt_dispatch_if_success(
+    let commit_result = commit_webgpt_dispatch_if_success(
         store_root,
         pending,
         response_path.as_path(),
         &dispatch_result,
     );
-    let mut repair_attempts = 0;
+    let mut repair_prompt_for_operator = None;
     if let Some(error) = commit_result.error.as_deref()
         && dispatch_result.success
         && is_repairable_webgpt_commit_error(error)
     {
-        repair_attempts = 1;
         write_webgpt_repair_prompt(
             prompt_path.as_path(),
             prompt_context_path.as_path(),
@@ -357,46 +355,20 @@ pub(super) fn dispatch_pending_agent_turn_via_webgpt(
             error,
             repair_prompt_path.as_path(),
         )?;
-        final_paths = WebGptTurnPaths {
-            world_id: pending.world_id.as_str(),
-            turn_id: pending.turn_id.as_str(),
-            prompt_path: repair_prompt_path.as_path(),
-            prompt_context_path: prompt_context_path.as_path(),
-            response_path: repair_response_path.as_path(),
-            result_path: repair_result_path.as_path(),
-            stdout_path: repair_stdout_path.as_path(),
-            stderr_path: repair_stderr_path.as_path(),
-        };
-        dispatch_result = dispatcher.run(final_paths)?;
-        mcp_completed_at = Utc::now();
-        if let Some(raw_conversation_id) = dispatch_result.raw_conversation_id.as_deref() {
-            save_webgpt_conversation_binding(
-                store_root,
-                pending.world_id.as_str(),
-                WebGptConversationLane::Text,
-                raw_conversation_id,
-            )?;
-        }
-        commit_result = commit_webgpt_dispatch_if_success(
-            store_root,
-            pending,
-            repair_response_path.as_path(),
-            &dispatch_result,
-        );
+        repair_prompt_for_operator = Some(repair_prompt_path.display().to_string());
     }
 
     let record = webgpt_dispatch_record(
         pending,
         &dispatcher,
-        final_paths,
+        paths,
         record_path.as_path(),
         dispatch_result,
         commit_result,
         WebGptRepairRecord {
-            attempts: repair_attempts,
-            prompt_path: (repair_attempts > 0).then(|| repair_prompt_path.display().to_string()),
-            response_path: (repair_attempts > 0)
-                .then(|| repair_response_path.display().to_string()),
+            attempts: 0,
+            prompt_path: repair_prompt_for_operator,
+            response_path: None,
         },
         WebGptDispatchTiming {
             dispatched_at,
@@ -441,13 +413,7 @@ fn try_commit_existing_webgpt_response(
     let status = existing.get("status").and_then(Value::as_str);
     let retryable_dispatching =
         matches!(status, Some("dispatching")) && dispatch_record_is_stale(&existing)?;
-    let retryable_commit_failed = matches!(status, Some("commit_failed"))
-        && existing
-            .get("repair_attempts")
-            .and_then(Value::as_u64)
-            .unwrap_or(0)
-            == 0;
-    if !retryable_dispatching && !retryable_commit_failed {
+    if !retryable_dispatching {
         return Ok(None);
     }
 
@@ -462,15 +428,6 @@ fn try_commit_existing_webgpt_response(
         paths.response_path,
         &dispatch_result,
     );
-    if repair.attempts == 0
-        && commit_result
-            .error
-            .as_deref()
-            .is_some_and(is_repairable_webgpt_commit_error)
-    {
-        return Ok(None);
-    }
-
     let dispatched_at = existing_record_time(&existing, "dispatched_at").unwrap_or_else(Utc::now);
     let mcp_completed_at =
         existing_record_time(&existing, "mcp_completed_at").unwrap_or_else(Utc::now);
@@ -675,6 +632,8 @@ fn is_repairable_webgpt_commit_error(error: &str) -> bool {
         "consequence mutation",
         "consequence payoff",
         "agent response next_choices",
+        "agent response slot 6",
+        "agent response slot 7",
         "actor agency update",
         "failed to parse",
         "missing field",
@@ -2197,13 +2156,12 @@ fn normalize_plot_thread_events(response: &mut serde_json::Map<String, Value>) {
             continue;
         };
         move_string_field(event, "thread_ref", "thread_id");
-        if !event.contains_key("change") {
-            let change = event
-                .get("kind")
-                .and_then(Value::as_str)
-                .map_or("advanced", normalize_plot_thread_change);
-            event.insert("change".to_owned(), Value::String(change.to_owned()));
-        }
+        let change = event
+            .get("change")
+            .or_else(|| event.get("kind"))
+            .and_then(Value::as_str)
+            .map_or("advanced", normalize_plot_thread_change);
+        event.insert("change".to_owned(), Value::String(change.to_owned()));
         ensure_string_field(event, "status_after", "active");
         ensure_string_field(event, "urgency_after", "soon");
     }
@@ -2427,13 +2385,13 @@ fn normalize_choice_plan_kind(value: &str) -> &'static str {
 }
 
 fn normalize_plot_thread_change(value: &str) -> &'static str {
-    match value {
+    match value.trim().to_ascii_lowercase().as_str() {
         "complicated" => "complicated",
         "softened" | "preserve" | "preserved" => "softened",
-        "blocked" => "blocked",
-        "resolved" => "resolved",
-        "failed" => "failed",
-        "retired" => "retired",
+        "blocked" | "block" => "blocked",
+        "resolved" | "resolve" => "resolved",
+        "failed" | "failure" => "failed",
+        "retired" | "retire" => "retired",
         _ => "advanced",
     }
 }
@@ -2508,16 +2466,9 @@ pub(super) fn existing_dispatch_is_retryable(path: &Path) -> Result<bool> {
         .get("error")
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
-    let repair_attempts = value
-        .get("repair_attempts")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
     Ok(
         (matches!(status, Some("failed")) && !is_webgpt_timeout_signal(error))
-            || (matches!(status, Some("dispatching")) && dispatch_record_is_stale(&value)?)
-            || (matches!(status, Some("commit_failed"))
-                && repair_attempts == 0
-                && is_repairable_webgpt_commit_error(error)),
+            || (matches!(status, Some("dispatching")) && dispatch_record_is_stale(&value)?),
     )
 }
 
@@ -2660,7 +2611,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_claim_replaces_repairable_commit_failed_record() -> anyhow::Result<()> {
+    fn dispatch_claim_does_not_replace_commit_failed_record() -> anyhow::Result<()> {
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("turn_0001-webgpt.json");
         fs::write(
@@ -2680,15 +2631,15 @@ mod tests {
             "attempt": "retry",
         });
 
-        assert!(write_dispatch_claim(&path, &claim)?);
+        assert!(!write_dispatch_claim(&path, &claim)?);
         let value: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
-        assert_eq!(value["status"], serde_json::json!("dispatching"));
-        assert_eq!(value["attempt"], serde_json::json!("retry"));
+        assert_eq!(value["status"], serde_json::json!("commit_failed"));
+        assert!(value.get("attempt").is_none());
         Ok(())
     }
 
     #[test]
-    fn parse_schema_commit_failures_are_repairable() -> anyhow::Result<()> {
+    fn commit_failures_are_not_auto_reprompted() -> anyhow::Result<()> {
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("turn_0002-webgpt.json");
         fs::write(
@@ -2701,7 +2652,7 @@ mod tests {
             }))?,
         )?;
 
-        assert!(existing_dispatch_is_retryable(&path)?);
+        assert!(!existing_dispatch_is_retryable(&path)?);
         Ok(())
     }
 
@@ -3338,6 +3289,12 @@ premise:
                 "event_kind": "opened",
                 "summary": "test",
                 "evidence_refs": ["player_input"]
+            }],
+            "plot_thread_events": [{
+                "thread_id": "thread:open_question:00",
+                "change": "surfaced",
+                "summary": "test",
+                "evidence_refs": ["latest_snapshot.open_questions[0]"]
             }]
         });
 
@@ -3367,6 +3324,10 @@ premise:
             value["scene_pressure_events"][1]["change"],
             serde_json::json!("resolved")
         );
+        assert_eq!(
+            value["plot_thread_events"][0]["change"],
+            serde_json::json!("advanced")
+        );
         let parsed = serde_json::from_value::<AgentTurnResponse>(value)?;
         assert_eq!(
             serde_json::to_value(parsed.scene_pressure_events[0].change)?,
@@ -3379,6 +3340,10 @@ premise:
         assert_eq!(
             serde_json::to_value(parsed.location_events[0].event_kind)?,
             serde_json::json!("discovered")
+        );
+        assert_eq!(
+            serde_json::to_value(parsed.plot_thread_events[0].change)?,
+            serde_json::json!("advanced")
         );
         Ok(())
     }

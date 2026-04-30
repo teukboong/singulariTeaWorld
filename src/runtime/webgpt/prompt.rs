@@ -22,6 +22,7 @@ resolution_proposal 필수:
 - gate_results 항목: gate_kind, gate_ref, visibility, status, reason, evidence_refs. gate_kind는 body/resource/location/social_permission/knowledge/time_pressure/hidden_constraint/world_law/affordance 중 하나다. visibility는 player_visible 또는 adjudication_only만 쓴다. hidden/private/internal은 허용값이 아니다. status는 passed/softened/blocked/cost_imposed/unknown_needs_probe 중 하나다.
 - proposed_effects 항목: effect_kind, target_ref, visibility, summary, evidence_refs. effect_kind는 scene_pressure_delta/body_resource_delta/location_delta/relationship_delta/belief_delta/world_lore_delta/pattern_debt/player_intent_trace 중 하나다. affordance, scene_opened 같은 별칭은 허용값이 아니다. visibility는 player_visible 또는 adjudication_only만 쓴다.
 - process_ticks 항목: process_ref, cause, visibility, summary, evidence_refs. cause는 player_action_touched_process/visible_time_passage/scene_pressure_changed/next_tick_condition_met/hidden_reveal_condition_satisfied 중 하나다. visibility는 player_visible 또는 adjudication_only만 쓴다.
+- plot_thread_events를 쓸 때는 thread_id, change, status_after, urgency_after, summary, evidence_refs를 포함한다. change는 advanced/complicated/softened/blocked/resolved/failed/retired 중 하나다. surfaced 같은 별칭은 허용값이 아니다.
 - scene_pressure_events를 쓸 때는 pressure_id, change, intensity_after, urgency_after, summary, evidence_refs를 포함한다. change는 surfaced/increased/softened/redirected/resolved 중 하나다. pressure_ref, event_kind, satisfied, preserved 같은 별칭은 허용값이 아니다.
 - location_events를 쓸 때는 location_id, event_kind, name, knowledge_state, summary, evidence_refs를 포함한다. event_kind는 discovered/visited/updated/route_opened/route_blocked 중 하나다. location_ref, opened 같은 별칭은 허용값이 아니다.
 - pressure_noop_reasons: narrative_turn_packet.pre_turn_simulation.pressure_obligations의 각 pressure_id를 움직이지 않으면 반드시 pressure_ref/evidence_refs로 설명
@@ -35,7 +36,7 @@ visible_scene:
 
 next_choices:
 - slot 1..5는 이번 visible_scene에서 곧바로 이어지는 구체 행동
-- slot 6 tag="자유서술"
+- slot 6 tag="자유서술", intent="6 뒤에 직접 행동, 말, 내면 판단을 이어서 서술한다"
 - slot 7 tag="판단 위임", intent="맡긴다. 세부 내용은 선택 후 드러난다."
 
 엄격 규칙:
@@ -99,7 +100,7 @@ pub(super) fn build_webgpt_turn_prompt(prompt_context: &PromptContextPacket) -> 
 - 매 턴 survival/social/material/threat/mystery/desire/moral_cost/time_pressure 중 최소 하나의 장면 압력을 visible_scene과 next_choices에 반영한다. 편향을 지우더라도 무미건조한 로그로 쓰지 마라.
 - `anchor_character` 저장 필드는 호환용이다. 시드나 visible canon이 명시하지 않으면 구체 인물, 배후 구조, 정해진 역할로 해석하지 마라. 장면 초점은 visible evidence가 만든다.
 - slot 7은 항상 판단 위임이고 preview는 숨긴다: "맡긴다. 세부 내용은 선택 후 드러난다."
-- slot 6은 항상 자유서술이며 inline prose를 요구하는 선택지로 둔다.
+- slot 6은 항상 자유서술이며 inline prose를 요구하는 선택지로 둔다. tag와 intent는 고정값 그대로 유지한다.
 - 이 WebGPT conversation의 이전 turn들은 말맛, 직전 감정선, 장면 리듬을 잇는 working context다.
 - ChatGPT Project의 새 세션이나 기존 conversation history는 세계 상태 저장소가 아니다. 세계 연속성은 narrative_turn_packet으로만 복원한다.
 - narrative_turn_packet.visible_context.active_scene_pressure는 이번 턴 선택지와 문단 박자를 누르는 압력 계약이다.
@@ -372,6 +373,28 @@ fn json_array_field(source: &Value, key: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use singulari_world::{
+        ChoicePlanKind, GateKind, GateStatus, LocationEventKind, PlotThreadChange,
+        ProcessTickCause, ProposedEffectKind, ResolutionOutcomeKind, ResolutionVisibility,
+        ScenePressureChange,
+    };
+
+    fn serialized_values<T: serde::Serialize>(values: &[T]) -> anyhow::Result<Vec<String>> {
+        values
+            .iter()
+            .map(|value| {
+                let value = serde_json::to_value(value)?;
+                let Some(serialized) = value.as_str() else {
+                    anyhow::bail!("enum did not serialize as string: {value}");
+                };
+                Ok(serialized.to_owned())
+            })
+            .collect()
+    }
+
+    fn slash_join(values: &[String]) -> String {
+        values.join("/")
+    }
 
     #[test]
     fn prompt_safe_projection_caps_repeated_refs_and_keeps_latest_event() {
@@ -426,5 +449,138 @@ mod tests {
         assert!(evidence_refs.contains(&Value::String(
             "plot_thread_event:plot_thread_event:turn_0001:06".to_owned()
         )));
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "schema guide regression intentionally keeps all response enum contracts together"
+    )]
+    fn compact_response_schema_guide_matches_rust_enum_values() -> anyhow::Result<()> {
+        let outcome_kinds = serialized_values(&[
+            ResolutionOutcomeKind::Success,
+            ResolutionOutcomeKind::PartialSuccess,
+            ResolutionOutcomeKind::Blocked,
+            ResolutionOutcomeKind::CostlySuccess,
+            ResolutionOutcomeKind::Delayed,
+            ResolutionOutcomeKind::Escalated,
+        ])?;
+        assert!(
+            COMPACT_AGENT_TURN_RESPONSE_SCHEMA_GUIDE
+                .contains(&format!("kind는 {} 중 하나다", slash_join(&outcome_kinds)))
+        );
+
+        let gate_kinds = serialized_values(&[
+            GateKind::Body,
+            GateKind::Resource,
+            GateKind::Location,
+            GateKind::SocialPermission,
+            GateKind::Knowledge,
+            GateKind::TimePressure,
+            GateKind::HiddenConstraint,
+            GateKind::WorldLaw,
+            GateKind::Affordance,
+        ])?;
+        assert!(COMPACT_AGENT_TURN_RESPONSE_SCHEMA_GUIDE.contains(&format!(
+            "gate_kind는 {} 중 하나다",
+            slash_join(&gate_kinds)
+        )));
+
+        let gate_statuses = serialized_values(&[
+            GateStatus::Passed,
+            GateStatus::Softened,
+            GateStatus::Blocked,
+            GateStatus::CostImposed,
+            GateStatus::UnknownNeedsProbe,
+        ])?;
+        assert!(COMPACT_AGENT_TURN_RESPONSE_SCHEMA_GUIDE.contains(&format!(
+            "status는 {} 중 하나다",
+            slash_join(&gate_statuses)
+        )));
+
+        let effect_kinds = serialized_values(&[
+            ProposedEffectKind::ScenePressureDelta,
+            ProposedEffectKind::BodyResourceDelta,
+            ProposedEffectKind::LocationDelta,
+            ProposedEffectKind::RelationshipDelta,
+            ProposedEffectKind::BeliefDelta,
+            ProposedEffectKind::WorldLoreDelta,
+            ProposedEffectKind::PatternDebt,
+            ProposedEffectKind::PlayerIntentTrace,
+        ])?;
+        assert!(COMPACT_AGENT_TURN_RESPONSE_SCHEMA_GUIDE.contains(&format!(
+            "effect_kind는 {} 중 하나다",
+            slash_join(&effect_kinds)
+        )));
+
+        let visibility_values = serialized_values(&[
+            ResolutionVisibility::PlayerVisible,
+            ResolutionVisibility::AdjudicationOnly,
+        ])?;
+        assert!(COMPACT_AGENT_TURN_RESPONSE_SCHEMA_GUIDE.contains(&format!(
+            "visibility는 {}만 쓴다",
+            visibility_values.join(" 또는 ")
+        )));
+
+        let process_tick_causes = serialized_values(&[
+            ProcessTickCause::PlayerActionTouchedProcess,
+            ProcessTickCause::VisibleTimePassage,
+            ProcessTickCause::ScenePressureChanged,
+            ProcessTickCause::NextTickConditionMet,
+            ProcessTickCause::HiddenRevealConditionSatisfied,
+        ])?;
+        assert!(COMPACT_AGENT_TURN_RESPONSE_SCHEMA_GUIDE.contains(&format!(
+            "cause는 {} 중 하나다",
+            slash_join(&process_tick_causes)
+        )));
+
+        let plot_thread_changes = serialized_values(&[
+            PlotThreadChange::Advanced,
+            PlotThreadChange::Complicated,
+            PlotThreadChange::Softened,
+            PlotThreadChange::Blocked,
+            PlotThreadChange::Resolved,
+            PlotThreadChange::Failed,
+            PlotThreadChange::Retired,
+        ])?;
+        assert!(COMPACT_AGENT_TURN_RESPONSE_SCHEMA_GUIDE.contains(&format!(
+            "change는 {} 중 하나다",
+            slash_join(&plot_thread_changes)
+        )));
+
+        let pressure_changes = serialized_values(&[
+            ScenePressureChange::Surfaced,
+            ScenePressureChange::Increased,
+            ScenePressureChange::Softened,
+            ScenePressureChange::Redirected,
+            ScenePressureChange::Resolved,
+        ])?;
+        assert!(COMPACT_AGENT_TURN_RESPONSE_SCHEMA_GUIDE.contains(&format!(
+            "change는 {} 중 하나다",
+            slash_join(&pressure_changes)
+        )));
+
+        let location_event_kinds = serialized_values(&[
+            LocationEventKind::Discovered,
+            LocationEventKind::Visited,
+            LocationEventKind::Updated,
+            LocationEventKind::RouteOpened,
+            LocationEventKind::RouteBlocked,
+        ])?;
+        assert!(COMPACT_AGENT_TURN_RESPONSE_SCHEMA_GUIDE.contains(&format!(
+            "event_kind는 {} 중 하나다",
+            slash_join(&location_event_kinds)
+        )));
+
+        let choice_plan_kinds = serialized_values(&[
+            ChoicePlanKind::OrdinaryAffordance,
+            ChoicePlanKind::Freeform,
+            ChoicePlanKind::DelegatedJudgment,
+        ])?;
+        assert!(COMPACT_AGENT_TURN_RESPONSE_SCHEMA_GUIDE.contains(&format!(
+            "slot 1..5 plan_kind={}, slot 6 plan_kind={}, slot 7 plan_kind={}",
+            choice_plan_kinds[0], choice_plan_kinds[1], choice_plan_kinds[2]
+        )));
+        Ok(())
     }
 }
