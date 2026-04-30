@@ -13,7 +13,9 @@ use crate::job_ledger::{
     ReadWorldJobsOptions, WorldJob, WorldJobKind, WorldJobStatus, read_world_jobs,
 };
 use crate::models::FREEFORM_CHOICE_SLOT;
-use crate::projection_health::{ProjectionHealthReport, build_projection_health_report};
+use crate::projection_health::{
+    ProjectionComponentHealth, ProjectionHealthReport, build_projection_health_report,
+};
 use crate::repair_extra_memory_projection;
 use crate::scene_director::SCENE_DIRECTOR_FILENAME;
 use crate::social_exchange::DIALOGUE_STANCE_FILENAME;
@@ -844,9 +846,11 @@ fn runtime_status(state: &VnServerState) -> Result<VnRuntimeStatusResponse> {
     let pending = load_pending_agent_turn(state.store_root.as_deref(), world_id.as_str()).ok();
     let latest_text_dispatch = latest_text_dispatch_record(state, world_id.as_str())?;
     let latest_visual_dispatch = latest_visual_dispatch_record(state, world_id.as_str())?;
-    let host_supervisor =
+    let mut host_supervisor =
         build_host_supervisor_plan(state.store_root.as_deref(), world_id.as_str())?;
-    let projection_health = host_supervisor.projection_health.clone();
+    let projection_health =
+        player_safe_projection_health(host_supervisor.projection_health.clone());
+    host_supervisor.projection_health = projection_health.clone();
     let packet = current_packet(state)?;
     let extra_visual_jobs = visual_runtime_extra_jobs(state, &packet)?;
     let world_jobs = read_world_jobs(&ReadWorldJobsOptions {
@@ -956,14 +960,49 @@ fn materialized_runtime_details(
     read_json(path.as_path()).with_context(|| format!("failed to read {}", path.display()))
 }
 
+fn player_safe_projection_health(mut report: ProjectionHealthReport) -> ProjectionHealthReport {
+    for component in &mut report.components {
+        if component.component == "advisory_warnings" {
+            mask_advisory_warning_component(component);
+        }
+    }
+    report
+}
+
+fn mask_advisory_warning_component(component: &mut ProjectionComponentHealth) {
+    if component.detail != "warnings=0" {
+        let count = component
+            .detail
+            .split(',')
+            .next()
+            .filter(|value| value.trim().starts_with("warnings="))
+            .unwrap_or("warnings=unknown");
+        component.detail = format!("{count}, latest=operator-only");
+    }
+    if !component.warnings.is_empty() {
+        component.warnings = vec![
+            "advisory warning recorded; details are available in operator projection health"
+                .to_owned(),
+        ];
+    }
+    if !component.errors.is_empty() {
+        component.errors = vec![
+            "advisory warning health check needs operator review; details are not shown here"
+                .to_owned(),
+        ];
+    }
+}
+
 fn repair_world_db_for_active_world(state: &VnServerState) -> Result<VnWorldDbRepairResponse> {
     let world_id = state.world_id()?;
     let store_paths = resolve_store_paths(state.store_root.as_deref())?;
     let files = world_file_paths(&store_paths, world_id.as_str());
     let repair = repair_world_db(&files.dir, world_id.as_str())?;
     crate::world_docs::refresh_world_docs(&files.dir)?;
-    let projection_health =
-        build_projection_health_report(state.store_root.as_deref(), world_id.as_str())?;
+    let projection_health = player_safe_projection_health(build_projection_health_report(
+        state.store_root.as_deref(),
+        world_id.as_str(),
+    )?);
     Ok(VnWorldDbRepairResponse {
         schema_version: "singulari.vn_world_db_repair.v1".to_owned(),
         world_id,
@@ -979,8 +1018,10 @@ fn repair_extra_memory_for_active_world(
     let store_paths = resolve_store_paths(state.store_root.as_deref())?;
     let files = world_file_paths(&store_paths, world_id.as_str());
     let repair = repair_extra_memory_projection(&files.dir, world_id.as_str())?;
-    let projection_health =
-        build_projection_health_report(state.store_root.as_deref(), world_id.as_str())?;
+    let projection_health = player_safe_projection_health(build_projection_health_report(
+        state.store_root.as_deref(),
+        world_id.as_str(),
+    )?);
     Ok(VnExtraMemoryRepairResponse {
         schema_version: "singulari.vn_extra_memory_repair.v1".to_owned(),
         world_id,
@@ -994,8 +1035,10 @@ fn recover_turn_commit_journal_for_active_world(
 ) -> Result<VnTurnCommitJournalRecoveryResponse> {
     let world_id = state.world_id()?;
     let recovery = recover_turn_commit_journal(state.store_root.as_deref(), world_id.as_str())?;
-    let projection_health =
-        build_projection_health_report(state.store_root.as_deref(), world_id.as_str())?;
+    let projection_health = player_safe_projection_health(build_projection_health_report(
+        state.store_root.as_deref(),
+        world_id.as_str(),
+    )?);
     Ok(VnTurnCommitJournalRecoveryResponse {
         schema_version: "singulari.vn_turn_commit_journal_recovery.v1".to_owned(),
         world_id,
@@ -2136,9 +2179,10 @@ mod tests {
         load_world_response, new_world, read_world_asset, repair_world_db_response, route_request,
         runtime_status, save_request_body, save_world_response, validate_vn_input, world_list,
     };
+    use crate::agent_bridge::{ADVISORY_WARNING_EVENT_SCHEMA_VERSION, AdvisoryWarningEvent};
     use crate::backend_selection::{WorldTextBackend, WorldVisualBackend};
     use crate::job_ledger::{WorldJobKind, WorldJobStatus};
-    use crate::store::{InitWorldOptions, init_world};
+    use crate::store::{InitWorldOptions, append_jsonl, init_world};
     use crate::transfer::{ExportWorldOptions, export_world};
     use crate::turn::{AdvanceTurnOptions, advance_turn};
     use crate::visual_assets::{STAGE_BACKGROUND_FILENAME, VN_ASSETS_DIR};
@@ -2467,6 +2511,69 @@ premise:
             status.narrative.label.as_str(),
             "서사 연결됨" | "WebGPT 서사 연결됨"
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_status_masks_advisory_warning_messages() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(
+            &seed_path,
+            r#"
+schema_version: singulari.world_seed.v1
+world_id: stw_vn_advisory_mask
+title: "경고 마스킹 세계"
+premise:
+  genre: "중세 판타지"
+  protagonist: "변경 순찰자, 남자 주인공"
+"#,
+        )?;
+        let initialized = init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+        let warning_path = initialized
+            .world_dir
+            .join("agent_bridge")
+            .join("advisory_warnings.jsonl");
+        let Some(warning_dir) = warning_path.parent() else {
+            anyhow::bail!("advisory warning path has no parent");
+        };
+        std::fs::create_dir_all(warning_dir)?;
+        append_jsonl(
+            &warning_path,
+            &AdvisoryWarningEvent {
+                schema_version: ADVISORY_WARNING_EVENT_SCHEMA_VERSION.to_owned(),
+                world_id: "stw_vn_advisory_mask".to_owned(),
+                turn_id: "turn_0001".to_owned(),
+                component: "hook_ledger_promises".to_owned(),
+                warning_kind: "advisory_journal_append_failed".to_owned(),
+                message: "sensitive operator-only append error".to_owned(),
+                recorded_at: "2026-04-30T00:00:00Z".to_owned(),
+            },
+        )?;
+        let state = VnServerState {
+            store_root: Some(store),
+            world_id: Mutex::new("stw_vn_advisory_mask".to_owned()),
+            vn_token: "test-vn-token".to_owned(),
+        };
+
+        let status = runtime_status(&state)?;
+        let body = serde_json::to_string(&status)?;
+
+        assert_eq!(
+            status.details.projection_health.status.to_string(),
+            "degraded"
+        );
+        assert!(body.contains("advisory warning recorded"));
+        assert!(body.contains("latest=operator-only"));
+        assert!(!body.contains("sensitive operator-only append error"));
+        assert!(!body.contains("latest_component=hook_ledger_promises"));
+        assert!(!body.contains("latest_kind=advisory_journal_append_failed"));
+        assert!(!body.contains("latest advisory warning"));
         Ok(())
     }
 
