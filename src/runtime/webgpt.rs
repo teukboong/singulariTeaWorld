@@ -3312,7 +3312,7 @@ premise:
     }
 
     #[test]
-    fn normalizes_webgpt_event_aliases_before_schema_parse() -> anyhow::Result<()> {
+    fn observed_webgpt_event_alias_corpus_deserializes_after_normalization() -> anyhow::Result<()> {
         let mut value = serde_json::json!({
             "schema_version": "singulari.agent_turn_response.v1",
             "world_id": "stw_alias",
@@ -3325,6 +3325,11 @@ premise:
             "scene_pressure_events": [{
                 "pressure_ref": "pressure:open_questions",
                 "event_kind": "preserved",
+                "summary": "test",
+                "evidence_refs": ["player_input"]
+            }, {
+                "pressure_ref": "pressure:player_free_input",
+                "event_kind": "satisfied",
                 "summary": "test",
                 "evidence_refs": ["player_input"]
             }],
@@ -3354,10 +3359,22 @@ premise:
             value["scene_pressure_events"][0]["change"],
             serde_json::json!("softened")
         );
+        assert_eq!(
+            value["scene_pressure_events"][1]["pressure_id"],
+            serde_json::json!("pressure:player_free_input")
+        );
+        assert_eq!(
+            value["scene_pressure_events"][1]["change"],
+            serde_json::json!("resolved")
+        );
         let parsed = serde_json::from_value::<AgentTurnResponse>(value)?;
         assert_eq!(
             serde_json::to_value(parsed.scene_pressure_events[0].change)?,
             serde_json::json!("softened")
+        );
+        assert_eq!(
+            serde_json::to_value(parsed.scene_pressure_events[1].change)?,
+            serde_json::json!("resolved")
         );
         assert_eq!(
             serde_json::to_value(parsed.location_events[0].event_kind)?,
