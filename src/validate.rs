@@ -1,4 +1,4 @@
-use crate::event_ledger::WorldEventLedgerChainStatus;
+use crate::event_ledger::{WorldEventLedgerChainStatus, replay_world_event_semantics};
 use crate::models::{
     ANCHOR_CHARACTER_ID, ANCHOR_CHARACTER_INVARIANT, CanonEvent, DEFAULT_CHOICE_COUNT,
     ENTITY_RECORDS_SCHEMA_VERSION, EntityRecords, FREEFORM_CHOICE_SLOT, FREEFORM_CHOICE_TAG,
@@ -354,17 +354,32 @@ fn validate_world_event_ledger(
     errors: &mut Vec<String>,
     warnings: &mut Vec<String>,
 ) {
-    match crate::event_ledger::verify_world_events(world_id, events) {
+    let ledger_valid = match crate::event_ledger::verify_world_events(world_id, events) {
         Ok(report) if report.chain_status == WorldEventLedgerChainStatus::LegacyUnchained => {
             warnings.push(
                 "canon_events.jsonl is a legacy unchained ledger; new appends will add event hashes"
                     .to_owned(),
             );
+            true
         }
-        Ok(_) => {}
+        Ok(_) => true,
         Err(error) => {
             errors.push(format!("world event ledger invalid: {error:#}"));
+            false
         }
+    };
+    if !ledger_valid {
+        return;
+    }
+    match replay_world_event_semantics(world_id, events) {
+        Ok(report) if report.legacy_only_event_count > 0 => {
+            warnings.push(format!(
+                "canon_events.jsonl has {} legacy-only events without typed event_kind semantics",
+                report.legacy_only_event_count
+            ));
+        }
+        Ok(_) => {}
+        Err(error) => errors.push(format!("world event semantic replay invalid: {error:#}")),
     }
 }
 

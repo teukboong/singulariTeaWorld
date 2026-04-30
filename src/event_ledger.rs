@@ -1,4 +1,4 @@
-use crate::models::{CANON_EVENT_SCHEMA_VERSION, CanonEvent};
+use crate::models::{CANON_EVENT_SCHEMA_VERSION, CanonEvent, WorldEventKind};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -9,6 +9,8 @@ use std::path::Path;
 pub const WORLD_EVENT_LEDGER_SCHEMA_VERSION: &str = "singulari.world_event_ledger.v1";
 pub const WORLD_EVENT_HASH_VERSION: &str = "singulari.world_event_hash.v1";
 pub const WORLD_EVENT_HASH_ALGORITHM: &str = "sha256";
+pub const WORLD_EVENT_SEMANTIC_REPLAY_SCHEMA_VERSION: &str =
+    "singulari.world_event_semantic_replay.v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorldEventLedgerAppendReport {
@@ -54,6 +56,25 @@ pub struct WorldEventLedgerChainReport {
     pub first_hashed_event_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_event_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorldEventSemanticReplayReport {
+    pub schema_version: String,
+    pub world_id: String,
+    pub event_count: usize,
+    pub semantic_event_count: usize,
+    pub legacy_only_event_count: usize,
+    pub action_attempts: usize,
+    pub action_successes: usize,
+    pub action_failures: usize,
+    pub process_ticks: usize,
+    pub knowledge_events: usize,
+    pub relationship_events: usize,
+    pub body_resource_events: usize,
+    pub location_events: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_turn_id: Option<String>,
 }
 
 pub(crate) fn append_world_event(
@@ -186,6 +207,83 @@ pub(crate) fn verify_world_events(
     })
 }
 
+/// Replay event semantics into a small deterministic summary.
+///
+/// This is not a full world-state reducer yet; it proves that every modern
+/// hashed event carries enough typed meaning for downstream reducers to build on
+/// without treating prose as source of truth.
+///
+/// # Errors
+///
+/// Returns an error when event shape validation fails.
+pub fn replay_world_event_semantics(
+    expected_world_id: &str,
+    events: &[CanonEvent],
+) -> Result<WorldEventSemanticReplayReport> {
+    let mut report = WorldEventSemanticReplayReport {
+        schema_version: WORLD_EVENT_SEMANTIC_REPLAY_SCHEMA_VERSION.to_owned(),
+        world_id: expected_world_id.to_owned(),
+        event_count: events.len(),
+        semantic_event_count: 0,
+        legacy_only_event_count: 0,
+        action_attempts: 0,
+        action_successes: 0,
+        action_failures: 0,
+        process_ticks: 0,
+        knowledge_events: 0,
+        relationship_events: 0,
+        body_resource_events: 0,
+        location_events: 0,
+        current_turn_id: events.last().map(|event| event.turn_id.clone()),
+    };
+    for event in events {
+        validate_event_shape(event, Some(expected_world_id))?;
+        let event_kind = event
+            .event_kind
+            .or_else(|| WorldEventKind::from_legacy_kind(event.kind.as_str()));
+        let Some(event_kind) = event_kind else {
+            report.legacy_only_event_count += 1;
+            continue;
+        };
+        report.semantic_event_count += 1;
+        match event_kind {
+            WorldEventKind::PlayerActionAttempted => report.action_attempts += 1,
+            WorldEventKind::ActionSucceeded => report.action_successes += 1,
+            WorldEventKind::ActionFailed => report.action_failures += 1,
+            WorldEventKind::ProcessTicked => report.process_ticks += 1,
+            WorldEventKind::KnowledgeObserved | WorldEventKind::KnowledgeInferred => {
+                report.knowledge_events += 1;
+            }
+            WorldEventKind::RelationshipChanged | WorldEventKind::DialogueExchange => {
+                report.relationship_events += 1;
+            }
+            WorldEventKind::BodyStateChanged
+            | WorldEventKind::ResourceChanged
+            | WorldEventKind::ItemAcquired
+            | WorldEventKind::ItemConsumed => {
+                report.body_resource_events += 1;
+            }
+            WorldEventKind::EntityMoved | WorldEventKind::LocationAccessChanged => {
+                report.location_events += 1;
+            }
+            WorldEventKind::WorldInitialized
+            | WorldEventKind::NumericChoice
+            | WorldEventKind::GuideChoice
+            | WorldEventKind::FreeformAction
+            | WorldEventKind::CodexQuery
+            | WorldEventKind::MacroTimeFlow
+            | WorldEventKind::CcCanvas
+            | WorldEventKind::Observation
+            | WorldEventKind::RepairRebuild
+            | WorldEventKind::UnclassifiedLegacy
+            | WorldEventKind::ConsequenceOpened
+            | WorldEventKind::ConsequenceResolved
+            | WorldEventKind::SurfaceStateChanged => {}
+        }
+    }
+    Ok(report)
+}
+
 fn ensure_event_can_append(
     path: &Path,
     existing_events: &[CanonEvent],
@@ -260,6 +358,13 @@ fn validate_event_shape(event: &CanonEvent, expected_world_id: Option<&str>) -> 
             event.event_id
         );
     }
+    if event.event_hash.is_some() && event.event_kind.is_none() {
+        bail!(
+            "world event ledger hashed event missing semantic event_kind: event_id={}, kind={}",
+            event.event_id,
+            event.kind
+        );
+    }
     if let Some(event_kind) = event.event_kind
         && !event_kind.matches_legacy_kind(event.kind.as_str())
     {
@@ -283,6 +388,13 @@ fn chain_event_for_append(
         .and_then(|previous| previous.event_hash.clone());
     let mut event_to_append = event.clone();
     event_to_append.previous_event_hash = previous_event_hash;
+    if event_to_append.event_kind.is_none() {
+        event_to_append.event_kind = Some(
+            WorldEventKind::from_legacy_kind(event_to_append.kind.as_str())
+                .unwrap_or(WorldEventKind::UnclassifiedLegacy),
+        );
+    }
+    validate_event_shape(&event_to_append, Some(event_to_append.world_id.as_str()))?;
     event_to_append.event_hash = Some(compute_event_hash(&event_to_append)?);
     Ok(event_to_append)
 }
@@ -534,7 +646,7 @@ fn hex_lower(bytes: &[u8]) -> String {
 mod tests {
     use super::{
         WorldEventLedgerChainStatus, append_world_event, load_world_events,
-        verify_world_event_ledger, verify_world_events,
+        replay_world_event_semantics, verify_world_event_ledger, verify_world_events,
     };
     use crate::models::{
         CANON_EVENT_SCHEMA_VERSION, CanonEvent, EventAuthority, EventEvidence, WorldEventKind,
@@ -675,6 +787,52 @@ mod tests {
         let report = verify_world_events("stw_event_ledger", &[event])?;
 
         assert_eq!(report.event_count, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn replays_semantic_event_counts() -> anyhow::Result<()> {
+        let mut success = event("evt_000001", "turn_0001", "numeric_choice");
+        success.event_kind = Some(WorldEventKind::ActionSucceeded);
+        let mut process = event("evt_000002", "turn_0002", "macro_time_flow");
+        process.event_kind = Some(WorldEventKind::ProcessTicked);
+        let mut knowledge = event("evt_000003", "turn_0003", "codex_query");
+        knowledge.event_kind = Some(WorldEventKind::KnowledgeObserved);
+
+        let report =
+            replay_world_event_semantics("stw_event_ledger", &[success, process, knowledge])?;
+
+        assert_eq!(report.event_count, 3);
+        assert_eq!(report.semantic_event_count, 3);
+        assert_eq!(report.legacy_only_event_count, 0);
+        assert_eq!(report.action_successes, 1);
+        assert_eq!(report.process_ticks, 1);
+        assert_eq!(report.knowledge_events, 1);
+        assert_eq!(report.current_turn_id.as_deref(), Some("turn_0003"));
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_hashed_event_without_semantic_event_kind() {
+        let mut event = event("evt_000001", "turn_0001", "numeric_choice");
+        event.event_kind = None;
+        event.event_hash = Some("sha256:not-a-real-event-hash".to_owned());
+
+        let Err(error) = verify_world_events("stw_event_ledger", &[event]) else {
+            panic!("hashed event without semantic event_kind should be rejected");
+        };
+        assert!(format!("{error:#}").contains("missing semantic event_kind"));
+    }
+
+    #[test]
+    fn replays_unknown_legacy_kind_as_legacy_only() -> anyhow::Result<()> {
+        let mut event = event("evt_000001", "turn_0001", "custom_legacy_kind");
+        event.event_kind = None;
+
+        let report = replay_world_event_semantics("stw_event_ledger", &[event])?;
+
+        assert_eq!(report.semantic_event_count, 0);
+        assert_eq!(report.legacy_only_event_count, 1);
         Ok(())
     }
 

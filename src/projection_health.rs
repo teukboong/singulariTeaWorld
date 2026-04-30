@@ -1,4 +1,6 @@
-use crate::event_ledger::{WorldEventLedgerChainStatus, verify_world_event_ledger};
+use crate::event_ledger::{
+    WorldEventLedgerChainStatus, replay_world_event_semantics, verify_world_event_ledger,
+};
 use crate::extra_memory::{
     failed_projection_records_after_latest_repair, load_extra_memory_projection_records,
     load_remembered_extras,
@@ -247,13 +249,44 @@ fn event_ledger_replay_health(
             snapshot.turn_id
         ));
     }
+    let semantic_detail = if let Some(events) = canon_events.value.as_ref() {
+        match replay_world_event_semantics(world_id, events) {
+            Ok(semantic_report) => {
+                if semantic_report.legacy_only_event_count > 0 {
+                    warnings.push(format!(
+                        "event ledger contains {} legacy-only events without typed semantics; replay summary inferred where possible",
+                        semantic_report.legacy_only_event_count
+                    ));
+                }
+                format!(
+                    ", semantic_events={}, legacy_only={}, action_successes={}, action_failures={}, process_ticks={}, current_turn={}",
+                    semantic_report.semantic_event_count,
+                    semantic_report.legacy_only_event_count,
+                    semantic_report.action_successes,
+                    semantic_report.action_failures,
+                    semantic_report.process_ticks,
+                    semantic_report
+                        .current_turn_id
+                        .as_deref()
+                        .unwrap_or("<none>")
+                )
+            }
+            Err(error) => {
+                errors.push(format!("event semantic replay failed: {error:#}"));
+                String::new()
+            }
+        }
+    } else {
+        String::new()
+    };
     component_from_errors(
         "event_ledger_replay",
         format!(
-            "canon_events={}, chain_status={:?}, last_event_hash={}",
+            "canon_events={}, chain_status={:?}, last_event_hash={}{}",
             report.event_count,
             report.chain_status,
-            report.last_event_hash.as_deref().unwrap_or("<none>")
+            report.last_event_hash.as_deref().unwrap_or("<none>"),
+            semantic_detail
         ),
         warnings,
         errors,

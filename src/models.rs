@@ -419,8 +419,8 @@ impl WorldEventKind {
             | Self::MacroTimeFlow
             | Self::CcCanvas
             | Self::Observation
-            | Self::RepairRebuild
-            | Self::UnclassifiedLegacy => false,
+            | Self::RepairRebuild => false,
+            Self::UnclassifiedLegacy => Self::from_legacy_kind(kind).is_none(),
             Self::KnowledgeObserved | Self::KnowledgeInferred => {
                 matches!(
                     kind,
