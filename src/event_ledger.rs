@@ -667,6 +667,17 @@ mod tests {
         assert!(format!("{error:#}").contains("kind mismatch"));
     }
 
+    #[test]
+    fn accepts_semantic_event_kind_sidecar_for_legacy_turn_kind() -> anyhow::Result<()> {
+        let mut event = event("evt_000001", "turn_0001", "numeric_choice");
+        event.event_kind = Some(WorldEventKind::ActionSucceeded);
+
+        let report = verify_world_events("stw_event_ledger", &[event])?;
+
+        assert_eq!(report.event_count, 1);
+        Ok(())
+    }
+
     fn event(event_id: &str, turn_id: &str, kind: &str) -> CanonEvent {
         CanonEvent {
             schema_version: CANON_EVENT_SCHEMA_VERSION.to_owned(),

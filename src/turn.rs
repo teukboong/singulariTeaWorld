@@ -511,7 +511,10 @@ fn build_canon_event(
         occurred_at_world_time: format!("after {}", previous.turn_id),
         visibility: "player_visible".to_owned(),
         kind: input.kind.as_wire().to_owned(),
-        event_kind: Some(WorldEventKind::from_turn_input_kind(input.kind)),
+        event_kind: Some(WorldEventKind::from_turn_resolution(
+            input.kind,
+            adjudication.outcome.as_str(),
+        )),
         authority: Some(authority),
         previous_event_hash: None,
         event_hash: None,
@@ -739,7 +742,7 @@ premise:
         assert_eq!(turn.canon_event.kind, TurnInputKind::GuideChoice.as_wire());
         assert_eq!(
             turn.canon_event.event_kind,
-            Some(WorldEventKind::GuideChoice)
+            Some(WorldEventKind::ActionSucceeded)
         );
         assert_eq!(
             turn.canon_event.authority,
@@ -757,6 +760,35 @@ premise:
         );
         let report = validate_world(Some(&store), "stw_turn")?;
         assert_eq!(report.status, ValidationStatus::Passed);
+        Ok(())
+    }
+
+    #[test]
+    fn blocked_turn_records_failed_action_event_kind() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(&seed_path, seed_body())?;
+        init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+
+        let turn = advance_turn(&AdvanceTurnOptions {
+            store_root: Some(store),
+            world_id: "stw_turn".to_owned(),
+            input: "6 허리춤에서 검을 뽑아 든다".to_owned(),
+        })?;
+
+        assert_eq!(
+            turn.canon_event.kind,
+            TurnInputKind::FreeformAction.as_wire()
+        );
+        assert_eq!(
+            turn.canon_event.event_kind,
+            Some(WorldEventKind::ActionFailed)
+        );
         Ok(())
     }
 

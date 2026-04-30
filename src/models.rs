@@ -291,6 +291,23 @@ pub enum WorldEventKind {
     Observation,
     RepairRebuild,
     UnclassifiedLegacy,
+    PlayerActionAttempted,
+    ActionSucceeded,
+    ActionFailed,
+    EntityMoved,
+    ItemAcquired,
+    ItemConsumed,
+    BodyStateChanged,
+    ResourceChanged,
+    RelationshipChanged,
+    KnowledgeObserved,
+    KnowledgeInferred,
+    LocationAccessChanged,
+    ProcessTicked,
+    ConsequenceOpened,
+    ConsequenceResolved,
+    SurfaceStateChanged,
+    DialogueExchange,
 }
 
 impl WorldEventKind {
@@ -307,6 +324,23 @@ impl WorldEventKind {
             Self::Observation => "observation",
             Self::RepairRebuild => "repair_rebuild",
             Self::UnclassifiedLegacy => "unclassified_legacy",
+            Self::PlayerActionAttempted => "player_action_attempted",
+            Self::ActionSucceeded => "action_succeeded",
+            Self::ActionFailed => "action_failed",
+            Self::EntityMoved => "entity_moved",
+            Self::ItemAcquired => "item_acquired",
+            Self::ItemConsumed => "item_consumed",
+            Self::BodyStateChanged => "body_state_changed",
+            Self::ResourceChanged => "resource_changed",
+            Self::RelationshipChanged => "relationship_changed",
+            Self::KnowledgeObserved => "knowledge_observed",
+            Self::KnowledgeInferred => "knowledge_inferred",
+            Self::LocationAccessChanged => "location_access_changed",
+            Self::ProcessTicked => "process_ticked",
+            Self::ConsequenceOpened => "consequence_opened",
+            Self::ConsequenceResolved => "consequence_resolved",
+            Self::SurfaceStateChanged => "surface_state_changed",
+            Self::DialogueExchange => "dialogue_exchange",
         }
     }
 
@@ -323,6 +357,21 @@ impl WorldEventKind {
     }
 
     #[must_use]
+    pub fn from_turn_resolution(kind: TurnInputKind, adjudication_outcome: &str) -> Self {
+        if adjudication_outcome == "blocked" {
+            return Self::ActionFailed;
+        }
+        match kind {
+            TurnInputKind::CodexQuery => Self::KnowledgeObserved,
+            TurnInputKind::MacroTimeFlow => Self::ProcessTicked,
+            TurnInputKind::CcCanvas => Self::Observation,
+            TurnInputKind::NumericChoice
+            | TurnInputKind::GuideChoice
+            | TurnInputKind::FreeformAction => Self::ActionSucceeded,
+        }
+    }
+
+    #[must_use]
     pub fn from_legacy_kind(kind: &str) -> Option<Self> {
         match kind {
             "note" => Some(Self::WorldInitialized),
@@ -335,13 +384,76 @@ impl WorldEventKind {
             "observation" => Some(Self::Observation),
             "repair_rebuild" => Some(Self::RepairRebuild),
             "unclassified_legacy" => Some(Self::UnclassifiedLegacy),
+            "player_action_attempted" => Some(Self::PlayerActionAttempted),
+            "action_succeeded" => Some(Self::ActionSucceeded),
+            "action_failed" => Some(Self::ActionFailed),
+            "entity_moved" => Some(Self::EntityMoved),
+            "item_acquired" => Some(Self::ItemAcquired),
+            "item_consumed" => Some(Self::ItemConsumed),
+            "body_state_changed" => Some(Self::BodyStateChanged),
+            "resource_changed" => Some(Self::ResourceChanged),
+            "relationship_changed" => Some(Self::RelationshipChanged),
+            "knowledge_observed" => Some(Self::KnowledgeObserved),
+            "knowledge_inferred" => Some(Self::KnowledgeInferred),
+            "location_access_changed" => Some(Self::LocationAccessChanged),
+            "process_ticked" => Some(Self::ProcessTicked),
+            "consequence_opened" => Some(Self::ConsequenceOpened),
+            "consequence_resolved" => Some(Self::ConsequenceResolved),
+            "surface_state_changed" => Some(Self::SurfaceStateChanged),
+            "dialogue_exchange" => Some(Self::DialogueExchange),
             _ => None,
         }
     }
 
     #[must_use]
     pub fn matches_legacy_kind(self, kind: &str) -> bool {
-        self.as_legacy_kind() == kind
+        if self.as_legacy_kind() == kind {
+            return true;
+        }
+        match self {
+            Self::WorldInitialized
+            | Self::NumericChoice
+            | Self::GuideChoice
+            | Self::FreeformAction
+            | Self::CodexQuery
+            | Self::MacroTimeFlow
+            | Self::CcCanvas
+            | Self::Observation
+            | Self::RepairRebuild
+            | Self::UnclassifiedLegacy => false,
+            Self::KnowledgeObserved | Self::KnowledgeInferred => {
+                matches!(
+                    kind,
+                    "codex_query" | "numeric_choice" | "guide_choice" | "freeform_action"
+                )
+            }
+            Self::ProcessTicked => {
+                matches!(
+                    kind,
+                    "macro_time_flow" | "numeric_choice" | "guide_choice" | "freeform_action"
+                )
+            }
+            Self::BodyStateChanged | Self::ResourceChanged | Self::ItemConsumed => {
+                matches!(kind, "numeric_choice" | "guide_choice" | "freeform_action")
+            }
+            Self::LocationAccessChanged | Self::EntityMoved => {
+                matches!(
+                    kind,
+                    "numeric_choice" | "guide_choice" | "freeform_action" | "macro_time_flow"
+                )
+            }
+            Self::PlayerActionAttempted
+            | Self::ActionSucceeded
+            | Self::ActionFailed
+            | Self::ItemAcquired
+            | Self::RelationshipChanged
+            | Self::ConsequenceOpened
+            | Self::ConsequenceResolved
+            | Self::SurfaceStateChanged
+            | Self::DialogueExchange => {
+                matches!(kind, "numeric_choice" | "guide_choice" | "freeform_action")
+            }
+        }
     }
 }
 
