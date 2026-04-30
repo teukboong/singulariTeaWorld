@@ -3,15 +3,15 @@ use crate::codex_view::{BuildCodexViewOptions, build_codex_view};
 use crate::entity_update::{EntityUpdateInput, apply_structured_entity_updates};
 use crate::models::{
     ANCHOR_CHARACTER_ID, CANON_EVENT_SCHEMA_VERSION, CanonEvent, CurrentEvent, DashboardSummary,
-    EntityRecords, EventEvidence, FREEFORM_CHOICE_SLOT, FREEFORM_CHOICE_TAG, HiddenState,
-    PROTAGONIST_CHARACTER_ID, RENDER_PACKET_SCHEMA_VERSION, RenderPacket, ScanTarget,
+    EntityRecords, EventAuthority, EventEvidence, FREEFORM_CHOICE_SLOT, FREEFORM_CHOICE_TAG,
+    HiddenState, PROTAGONIST_CHARACTER_ID, RENDER_PACKET_SCHEMA_VERSION, RenderPacket, ScanTarget,
     TURN_LOG_ENTRY_SCHEMA_VERSION, TurnChoice, TurnInputKind, TurnLogEntry, TurnSnapshot,
-    VisibleState, WorldRecord, default_freeform_choice, default_turn_choices, is_guide_choice_tag,
-    normalize_turn_choices,
+    VisibleState, WorldEventKind, WorldRecord, default_freeform_choice, default_turn_choices,
+    is_guide_choice_tag, normalize_turn_choices,
 };
 use crate::store::{
-    TURN_LOG_FILENAME, WorldFilePaths, append_canon_event, append_jsonl, read_json,
-    resolve_store_paths, world_file_paths, write_json,
+    StorePaths, TURN_LOG_FILENAME, WorldFilePaths, acquire_world_commit_lock, append_canon_event,
+    append_jsonl, read_json, resolve_store_paths, world_file_paths, write_json,
 };
 use crate::world_db::RecordTurnDbInput;
 use crate::world_db::record_turn_in_world_db;
@@ -72,12 +72,35 @@ struct PersistTurnInput<'a> {
 /// Returns an error when world files cannot be loaded, the current snapshot is
 /// terminal, input is empty, or any turn artifact cannot be written.
 pub fn advance_turn(options: &AdvanceTurnOptions) -> Result<AdvancedTurn> {
+    let store_paths = resolve_store_paths(options.store_root.as_deref())?;
+    let files = world_file_paths(&store_paths, options.world_id.as_str());
+    let _world_lock = acquire_world_commit_lock(&files.dir, "advance_turn")?;
+    advance_turn_without_world_lock(options, &store_paths, &files)
+}
+
+pub(crate) fn advance_turn_without_world_lock(
+    options: &AdvanceTurnOptions,
+    store_paths: &StorePaths,
+    files: &WorldFilePaths,
+) -> Result<AdvancedTurn> {
+    advance_turn_without_world_lock_with_authority(
+        options,
+        store_paths,
+        files,
+        EventAuthority::TurnReducer,
+    )
+}
+
+pub(crate) fn advance_turn_without_world_lock_with_authority(
+    options: &AdvanceTurnOptions,
+    store_paths: &StorePaths,
+    files: &WorldFilePaths,
+    event_authority: EventAuthority,
+) -> Result<AdvancedTurn> {
     let input = options.input.trim();
     if input.is_empty() {
         bail!("turn input must not be empty");
     }
-    let store_paths = resolve_store_paths(options.store_root.as_deref())?;
-    let files = world_file_paths(&store_paths, options.world_id.as_str());
     let world: WorldRecord = read_json(&files.world)?;
     let previous_snapshot: TurnSnapshot = read_json(&files.latest_snapshot)?;
     ensure_world_is_not_terminal(&world, &previous_snapshot)?;
@@ -88,7 +111,7 @@ pub fn advance_turn(options: &AdvanceTurnOptions) -> Result<AdvancedTurn> {
     let turn_id = format!("turn_{turn_number:04}");
     let event_id = format!("evt_{turn_number:06}");
     let created_at = Utc::now().to_rfc3339();
-    let artifact_paths = build_turn_artifact_paths(&files, &previous_snapshot, &turn_id);
+    let artifact_paths = build_turn_artifact_paths(files, &previous_snapshot, &turn_id);
 
     let snapshot = build_next_snapshot(&world, &previous_snapshot, &turn_id, &classified);
     let adjudication = adjudicate_turn(&AdjudicationInput {
@@ -107,6 +130,7 @@ pub fn advance_turn(options: &AdvanceTurnOptions) -> Result<AdvancedTurn> {
         &turn_id,
         &classified,
         &adjudication,
+        event_authority,
     );
     let structured_updates = apply_structured_entity_updates(EntityUpdateInput {
         entities: &mut entities,
@@ -148,7 +172,7 @@ pub fn advance_turn(options: &AdvanceTurnOptions) -> Result<AdvancedTurn> {
     };
 
     persist_turn_artifacts(&PersistTurnInput {
-        files: &files,
+        files,
         world: &world,
         entities: &entities,
         snapshot: &snapshot,
@@ -476,6 +500,7 @@ fn build_canon_event(
     turn_id: &str,
     input: &ClassifiedInput,
     adjudication: &crate::models::AdjudicationReport,
+    authority: EventAuthority,
 ) -> CanonEvent {
     CanonEvent {
         schema_version: CANON_EVENT_SCHEMA_VERSION.to_owned(),
@@ -485,6 +510,8 @@ fn build_canon_event(
         occurred_at_world_time: format!("after {}", previous.turn_id),
         visibility: "player_visible".to_owned(),
         kind: input.kind.as_wire().to_owned(),
+        event_kind: Some(WorldEventKind::from_turn_input_kind(input.kind)),
+        authority: Some(authority),
         summary: event_summary(input),
         entities: vec![
             PROTAGONIST_CHARACTER_ID.to_owned(),
@@ -628,10 +655,12 @@ fn next_turn_number(turn_id: &str) -> Result<u32> {
 mod tests {
     use super::{AdvanceTurnOptions, advance_turn};
     use crate::models::{
-        FREEFORM_CHOICE_SLOT, GUIDE_CHOICE_SLOT, GUIDE_CHOICE_TAG, TurnChoice, TurnInputKind,
+        EventAuthority, FREEFORM_CHOICE_SLOT, GUIDE_CHOICE_SLOT, GUIDE_CHOICE_TAG, TurnChoice,
+        TurnInputKind, WorldEventKind,
     };
     use crate::store::{
-        InitWorldOptions, init_world, read_json, resolve_store_paths, world_file_paths, write_json,
+        InitWorldOptions, acquire_world_commit_lock, init_world, read_json, resolve_store_paths,
+        world_file_paths, write_json,
     };
     use crate::validate::{ValidationStatus, validate_world};
     use tempfile::tempdir;
@@ -705,6 +734,14 @@ premise:
         })?;
         assert_eq!(turn.snapshot.turn_id, "turn_0001");
         assert_eq!(turn.canon_event.kind, TurnInputKind::GuideChoice.as_wire());
+        assert_eq!(
+            turn.canon_event.event_kind,
+            Some(WorldEventKind::GuideChoice)
+        );
+        assert_eq!(
+            turn.canon_event.authority,
+            Some(EventAuthority::TurnReducer)
+        );
         assert_eq!(turn.render_packet.visible_state.choices.len(), 7);
         assert!(
             turn.render_packet
@@ -717,6 +754,36 @@ premise:
         );
         let report = validate_world(Some(&store), "stw_turn")?;
         assert_eq!(report.status, ValidationStatus::Passed);
+        Ok(())
+    }
+
+    #[test]
+    fn advance_turn_refuses_existing_world_commit_lock() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(&seed_path, seed_body())?;
+        init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+        let store_paths = resolve_store_paths(Some(store.as_path()))?;
+        let files = world_file_paths(&store_paths, "stw_turn");
+        let _lock = acquire_world_commit_lock(&files.dir, "test_holder")?;
+
+        let result = advance_turn(&AdvanceTurnOptions {
+            store_root: Some(store),
+            world_id: "stw_turn".to_owned(),
+            input: "1".to_owned(),
+        });
+
+        let Err(error) = result else {
+            anyhow::bail!("advance turn should fail when a world commit lock is already held");
+        };
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("world commit lock already held"));
+        assert!(rendered.contains("test_holder"));
         Ok(())
     }
 

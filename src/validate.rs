@@ -1,9 +1,9 @@
 use crate::models::{
-    ANCHOR_CHARACTER_ID, ANCHOR_CHARACTER_INVARIANT, CANON_EVENT_SCHEMA_VERSION, CanonEvent,
-    DEFAULT_CHOICE_COUNT, ENTITY_RECORDS_SCHEMA_VERSION, EntityRecords, FREEFORM_CHOICE_SLOT,
-    FREEFORM_CHOICE_TAG, GUIDE_CHOICE_SLOT, HIDDEN_STATE_SCHEMA_VERSION, HiddenState,
-    PLAYER_KNOWLEDGE_SCHEMA_VERSION, PlayerKnowledge, SINGULARI_WORLD_SCHEMA_VERSION,
-    TURN_SNAPSHOT_SCHEMA_VERSION, TurnSnapshot, WorldRecord, is_guide_choice_tag,
+    ANCHOR_CHARACTER_ID, ANCHOR_CHARACTER_INVARIANT, CanonEvent, DEFAULT_CHOICE_COUNT,
+    ENTITY_RECORDS_SCHEMA_VERSION, EntityRecords, FREEFORM_CHOICE_SLOT, FREEFORM_CHOICE_TAG,
+    GUIDE_CHOICE_SLOT, HIDDEN_STATE_SCHEMA_VERSION, HiddenState, PLAYER_KNOWLEDGE_SCHEMA_VERSION,
+    PlayerKnowledge, SINGULARI_WORLD_SCHEMA_VERSION, TURN_SNAPSHOT_SCHEMA_VERSION, TurnSnapshot,
+    WorldRecord, is_guide_choice_tag,
 };
 use crate::store::{read_json, resolve_store_paths, world_file_paths};
 use crate::world_db::validate_world_db;
@@ -146,6 +146,7 @@ pub fn validate_world(store_root: Option<&Path>, world_id: &str) -> Result<Valid
         check_world_id("latest_snapshot", &snapshot.world_id, world_id, &mut errors);
         validate_snapshot_choices(snapshot, &mut errors);
     }
+    validate_world_event_ledger(world_id, &canon_events, &mut errors);
     if let Some(entities) = &entities {
         validate_canon_events(world_id, &canon_events, entities, &mut errors);
     }
@@ -320,29 +321,13 @@ fn validate_entities(entities: &EntityRecords, errors: &mut Vec<String>) {
 }
 
 fn validate_canon_events(
-    world_id: &str,
+    _world_id: &str,
     events: &[CanonEvent],
     entities: &EntityRecords,
     errors: &mut Vec<String>,
 ) {
     let known_refs = known_entity_refs(entities);
-    let mut seen_event_ids = BTreeSet::new();
     for event in events {
-        check_schema(
-            format!("canon event {}", event.event_id).as_str(),
-            &event.schema_version,
-            CANON_EVENT_SCHEMA_VERSION,
-            errors,
-        );
-        check_world_id(
-            format!("canon event {}", event.event_id).as_str(),
-            &event.world_id,
-            world_id,
-            errors,
-        );
-        if !seen_event_ids.insert(event.event_id.clone()) {
-            errors.push(format!("duplicate canon event id: {}", event.event_id));
-        }
         for entity_ref in &event.entities {
             if !known_refs.contains(entity_ref) {
                 errors.push(format!(
@@ -359,6 +344,12 @@ fn validate_canon_events(
                 event.event_id, location
             ));
         }
+    }
+}
+
+fn validate_world_event_ledger(world_id: &str, events: &[CanonEvent], errors: &mut Vec<String>) {
+    if let Err(error) = crate::event_ledger::verify_world_events(world_id, events) {
+        errors.push(format!("world event ledger invalid: {error:#}"));
     }
 }
 

@@ -9,6 +9,7 @@ const DEFAULT_ORIGIN_KV_KEY = "origin";
 const DEFAULT_ALLOWED_ORIGIN_SUFFIXES = "trycloudflare.com,ts.net,loca.lt";
 const ADMIN_ORIGIN_PATH = "/_singulari/origin";
 const HEALTH_PATH = "/_singulari/healthz";
+const PROXY_PATH_PREFIX = "/mcp";
 
 function jsonResponse(value, init = {}) {
   return new Response(JSON.stringify(value), {
@@ -104,6 +105,10 @@ function unavailable(reason) {
   return jsonResponse({ ok: false, error: "upstream_unavailable", reason }, { status: 503 });
 }
 
+function isProxyablePath(pathname) {
+  return pathname === PROXY_PATH_PREFIX || pathname.startsWith(`${PROXY_PATH_PREFIX}/`);
+}
+
 async function proxyToOrigin(request, env, key) {
   const origin = (await env.SINGULARI_WORLD_KV.get(key)) || "";
   if (!origin) {
@@ -167,6 +172,9 @@ export default {
         mcp: "/mcp",
         health: HEALTH_PATH,
       });
+    }
+    if (!isProxyablePath(incoming.pathname)) {
+      return textResponse("not_found", { status: 404 });
     }
 
     return proxyToOrigin(request, env, key);

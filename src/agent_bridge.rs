@@ -46,9 +46,10 @@ use crate::location_graph::{
     load_location_graph_state, prepare_location_event_plan, rebuild_location_graph,
 };
 use crate::models::{
-    AdjudicationGate, CharacterVoiceAnchor, FREEFORM_CHOICE_SLOT, GUIDE_CHOICE_SLOT, HiddenState,
-    NARRATIVE_SCENE_SCHEMA_VERSION, NarrativeScene, TurnChoice, TurnSnapshot,
-    default_freeform_choice, default_turn_choices, is_guide_choice_tag, normalize_turn_choices,
+    AdjudicationGate, CharacterVoiceAnchor, EventAuthority, FREEFORM_CHOICE_SLOT,
+    GUIDE_CHOICE_SLOT, HiddenState, NARRATIVE_SCENE_SCHEMA_VERSION, NarrativeScene, TurnChoice,
+    TurnSnapshot, default_freeform_choice, default_turn_choices, is_guide_choice_tag,
+    normalize_turn_choices,
 };
 use crate::narrative_style_state::{
     NarrativeStyleState, append_narrative_style_event_plan, compile_narrative_style_state,
@@ -75,9 +76,7 @@ use crate::relationship_graph::{
     prepare_relationship_graph_event_plan, rebuild_relationship_graph,
 };
 use crate::render::{RenderPacketLoadOptions, load_render_packet};
-use crate::resolution::{
-    ResolutionCritique, ResolutionProposal, audit_resolution_choices, audit_resolution_proposal,
-};
+use crate::resolution::ResolutionProposal;
 use crate::response_context::{
     AgentCharacterTextDesignUpdate, AgentContextEventInput, AgentEntityUpdate,
     AgentHiddenStateDelta, AgentRelationshipUpdate, AgentWorldLoreUpdate,
@@ -102,14 +101,19 @@ use crate::social_exchange::{
     rebuild_social_exchange,
 };
 use crate::store::{
-    WorldFilePaths, append_jsonl, read_json, resolve_store_paths, world_file_paths, write_json,
+    WorldFilePaths, acquire_world_commit_lock, append_jsonl, read_json, resolve_store_paths,
+    world_file_paths, write_json, write_json_new,
 };
-use crate::turn::{AdvanceTurnOptions, advance_turn};
+use crate::turn::{AdvanceTurnOptions, advance_turn_without_world_lock_with_authority};
 use crate::turn_commit::{TurnCommitEnvelope, append_turn_commit_envelope};
 use crate::turn_retrieval_controller::{
     TurnRetrievalCompileInput, TurnRetrievalControllerPacket, compile_turn_retrieval_controller,
 };
 use crate::vn::{BuildVnPacketOptions, VnPacket, build_vn_packet};
+use crate::world_court::{
+    WorldCourtInput, WorldCourtVerdict, WorldCourtVerdictStatus, adjudicate_world_changes,
+    render_world_court_verdict,
+};
 use crate::world_db::latest_chapter_summaries;
 use crate::world_lore::{
     WorldLorePacket, append_world_lore_update_plan, compile_world_lore_from_projection,
@@ -130,6 +134,7 @@ use std::path::{Path, PathBuf};
 pub const AGENT_PENDING_TURN_SCHEMA_VERSION: &str = "singulari.agent_pending_turn.v1";
 pub const AGENT_TURN_RESPONSE_SCHEMA_VERSION: &str = "singulari.agent_turn_response.v1";
 pub const AGENT_COMMIT_RECORD_SCHEMA_VERSION: &str = "singulari.agent_commit_record.v1";
+pub const WORLD_COURT_REJECTION_RECORD_SCHEMA_VERSION: &str = "singulari.world_court_rejection.v1";
 pub const POST_COMMIT_MATERIALIZATION_EVENT_SCHEMA_VERSION: &str =
     "singulari.post_commit_materialization_event.v1";
 
@@ -137,6 +142,8 @@ const AGENT_BRIDGE_DIR: &str = "agent_bridge";
 const PENDING_AGENT_TURN_FILENAME: &str = "pending_turn.json";
 const COMMITTED_AGENT_TURNS_DIR: &str = "committed_turns";
 const AGENT_COMMIT_RECORD_FILENAME: &str = "commit_record.json";
+const WORLD_COURT_VERDICT_FILENAME: &str = "world_court_verdict.json";
+const WORLD_COURT_REJECTIONS_FILENAME: &str = "world_court_rejections.jsonl";
 const POST_COMMIT_MATERIALIZATION_EVENTS_FILENAME: &str =
     "post_commit_materialization_events.jsonl";
 
@@ -410,8 +417,20 @@ pub struct CommittedAgentTurn {
     pub render_packet_path: String,
     pub response_path: String,
     pub commit_record_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub world_court_verdict_path: Option<String>,
     pub committed_at: String,
     pub packet: VnPacket,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorldCourtRejectionRecord {
+    pub schema_version: String,
+    pub world_id: String,
+    pub turn_id: String,
+    pub pending_ref: String,
+    pub verdict: WorldCourtVerdict,
+    pub rejected_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -497,7 +516,7 @@ pub fn enqueue_agent_turn(options: &AgentSubmitTurnOptions) -> Result<PendingAge
         created_at: Utc::now().to_rfc3339(),
     };
     ensure_parent_dir(&pending_path)?;
-    write_json(&pending_path, &pending)?;
+    write_json_new(&pending_path, &pending)?;
     Ok(pending)
 }
 
@@ -589,12 +608,19 @@ pub fn load_pending_agent_turn(
 pub fn commit_agent_turn(options: &AgentCommitTurnOptions) -> Result<CommittedAgentTurn> {
     let store_paths = resolve_store_paths(options.store_root.as_deref())?;
     let files = world_file_paths(&store_paths, options.world_id.as_str());
+    let _world_lock = acquire_world_commit_lock(&files.dir, "agent_commit_turn")?;
     let pending_path = pending_agent_turn_path(&files);
     let pending =
         load_pending_agent_turn(options.store_root.as_deref(), options.world_id.as_str())?;
     let response = canonical_agent_turn_response(options.response.clone());
     validate_agent_response(&pending, &response)?;
-    audit_agent_resolution_proposal(options.store_root.as_deref(), &pending, &response)?;
+    let world_court_verdict = audit_agent_world_court(
+        files.dir.as_path(),
+        options.store_root.as_deref(),
+        &pending,
+        &response,
+    )?;
+    let event_authority = event_authority_for_agent_commit(&response, &world_court_verdict);
     audit_agent_scene_director_proposal(options.store_root.as_deref(), &pending, &response)?;
     let context_event_plan = prepare_agent_context_event_plan(
         options.world_id.as_str(),
@@ -731,422 +757,455 @@ pub fn commit_agent_turn(options: &AgentCommitTurnOptions) -> Result<CommittedAg
         &response.extra_contacts,
     )?;
     let before_commit_snapshot: TurnSnapshot = read_json(&files.latest_snapshot)?;
+    let parent_turn_id = before_commit_snapshot.turn_id.clone();
     append_turn_commit_envelope(
         files.dir.as_path(),
-        &TurnCommitEnvelope::prepared(
-            &pending,
-            before_commit_snapshot.turn_id.as_str(),
-            Utc::now().to_rfc3339(),
-        ),
+        &TurnCommitEnvelope::prepared(&pending, parent_turn_id.as_str(), Utc::now().to_rfc3339()),
     )?;
 
-    let advanced = advance_turn(&AdvanceTurnOptions {
-        store_root: options.store_root.clone(),
-        world_id: options.world_id.clone(),
-        input: pending.player_input.clone(),
-    })?;
-    if advanced.snapshot.turn_id != pending.turn_id {
-        bail!(
-            "agent bridge turn mismatch after advance: pending={}, advanced={}",
-            pending.turn_id,
-            advanced.snapshot.turn_id
-        );
-    }
+    let commit_result = (|| -> Result<CommittedAgentTurn> {
+        let advanced = advance_turn_without_world_lock_with_authority(
+            &AdvanceTurnOptions {
+                store_root: options.store_root.clone(),
+                world_id: options.world_id.clone(),
+                input: pending.player_input.clone(),
+            },
+            &store_paths,
+            &files,
+            event_authority,
+        )?;
+        if advanced.snapshot.turn_id != pending.turn_id {
+            bail!(
+                "agent bridge turn mismatch after advance: pending={}, advanced={}",
+                pending.turn_id,
+                advanced.snapshot.turn_id
+            );
+        }
 
-    let mut render_packet = advanced.render_packet;
-    apply_agent_response_to_render_packet(&mut render_packet, &response);
-    write_json(&advanced.render_packet_path, &render_packet)?;
+        let mut render_packet = advanced.render_packet;
+        apply_agent_response_to_render_packet(&mut render_packet, &response);
+        write_json(&advanced.render_packet_path, &render_packet)?;
 
-    persist_agent_next_choices(
-        &files,
-        &advanced.snapshot_path,
-        &advanced.snapshot,
-        &response.next_choices,
-    )?;
+        persist_agent_next_choices(
+            &files,
+            &advanced.snapshot_path,
+            &advanced.snapshot,
+            &response.next_choices,
+        )?;
 
-    let committed_at = Utc::now().to_rfc3339();
-    let turn_dir = committed_agent_turn_dir(&files, pending.turn_id.as_str());
-    fs::create_dir_all(&turn_dir)
-        .with_context(|| format!("failed to create {}", turn_dir.display()))?;
-    let response_path = turn_dir.join("agent_response.json");
-    write_json(&response_path, &response)?;
-    commit_post_advance_materialization(
-        &files,
-        options.world_id.as_str(),
-        pending.turn_id.as_str(),
-        "agent_context_projection",
-        || {
-            append_agent_context_event_plan(files.dir.as_path(), &context_event_plan)?;
-            rebuild_agent_context_projection(files.dir.as_path())?;
-            Ok(())
-        },
-    )?;
-    commit_post_advance_materialization(
-        &files,
-        options.world_id.as_str(),
-        pending.turn_id.as_str(),
-        "relationship_graph",
-        || {
-            append_relationship_graph_event_plan(
+        let committed_at = Utc::now().to_rfc3339();
+        let turn_dir = committed_agent_turn_dir(&files, pending.turn_id.as_str());
+        fs::create_dir_all(&turn_dir)
+            .with_context(|| format!("failed to create {}", turn_dir.display()))?;
+        let response_path = turn_dir.join("agent_response.json");
+        let world_court_verdict_path = turn_dir.join(WORLD_COURT_VERDICT_FILENAME);
+        write_json(&response_path, &response)?;
+        write_json(&world_court_verdict_path, &world_court_verdict)?;
+        commit_post_advance_materialization(
+            &files,
+            options.world_id.as_str(),
+            pending.turn_id.as_str(),
+            "agent_context_projection",
+            || {
+                append_agent_context_event_plan(files.dir.as_path(), &context_event_plan)?;
+                rebuild_agent_context_projection(files.dir.as_path())?;
+                Ok(())
+            },
+        )?;
+        commit_post_advance_materialization(
+            &files,
+            options.world_id.as_str(),
+            pending.turn_id.as_str(),
+            "relationship_graph",
+            || {
+                append_relationship_graph_event_plan(
+                    files.dir.as_path(),
+                    &relationship_graph_event_plan,
+                )?;
+                rebuild_relationship_graph(
+                    files.dir.as_path(),
+                    &RelationshipGraphPacket {
+                        world_id: options.world_id.clone(),
+                        turn_id: pending.turn_id.clone(),
+                        ..RelationshipGraphPacket::default()
+                    },
+                )?;
+                Ok(())
+            },
+        )?;
+        commit_post_advance_materialization(
+            &files,
+            options.world_id.as_str(),
+            pending.turn_id.as_str(),
+            "actor_agency",
+            || {
+                append_actor_agency_event_plan(files.dir.as_path(), &actor_agency_event_plan)?;
+                rebuild_actor_agency_packet(
+                    files.dir.as_path(),
+                    &ActorAgencyPacket {
+                        world_id: options.world_id.clone(),
+                        turn_id: pending.turn_id.clone(),
+                        ..ActorAgencyPacket::default()
+                    },
+                )?;
+                Ok(())
+            },
+        )?;
+        commit_post_advance_materialization(
+            &files,
+            options.world_id.as_str(),
+            pending.turn_id.as_str(),
+            "world_lore",
+            || {
+                append_world_lore_update_plan(files.dir.as_path(), &world_lore_update_plan)?;
+                rebuild_world_lore(
+                    files.dir.as_path(),
+                    &WorldLorePacket {
+                        world_id: options.world_id.clone(),
+                        turn_id: pending.turn_id.clone(),
+                        ..WorldLorePacket::default()
+                    },
+                )?;
+                Ok(())
+            },
+        )?;
+        commit_post_advance_materialization(
+            &files,
+            options.world_id.as_str(),
+            pending.turn_id.as_str(),
+            "character_text_design",
+            || {
+                append_character_text_design_event_plan(
+                    files.dir.as_path(),
+                    &character_text_design_event_plan,
+                )?;
+                rebuild_character_text_design(
+                    files.dir.as_path(),
+                    &pending.visible_context.active_character_text_design,
+                )?;
+                Ok(())
+            },
+        )?;
+        commit_post_advance_materialization(
+            &files,
+            options.world_id.as_str(),
+            pending.turn_id.as_str(),
+            "context_capsules",
+            || {
+                let active_world_lore = load_world_lore_state(
+                    files.dir.as_path(),
+                    WorldLorePacket {
+                        world_id: options.world_id.clone(),
+                        turn_id: pending.turn_id.clone(),
+                        ..WorldLorePacket::default()
+                    },
+                )?;
+                let active_relationship_graph = load_relationship_graph_state(
+                    files.dir.as_path(),
+                    RelationshipGraphPacket {
+                        world_id: options.world_id.clone(),
+                        turn_id: pending.turn_id.clone(),
+                        ..RelationshipGraphPacket::default()
+                    },
+                )?;
+                let active_character_text_design = load_character_text_design_state(
+                    files.dir.as_path(),
+                    pending.visible_context.active_character_text_design.clone(),
+                )?;
+                rebuild_context_capsule_registry(&ContextCapsuleBuildInput {
+                    world_dir: files.dir.as_path(),
+                    world_id: options.world_id.as_str(),
+                    turn_id: pending.turn_id.as_str(),
+                    active_world_lore: &active_world_lore,
+                    active_relationship_graph: &active_relationship_graph,
+                    active_character_text_design: &active_character_text_design,
+                })?;
+                Ok(())
+            },
+        )?;
+        commit_post_advance_materialization(
+            &files,
+            options.world_id.as_str(),
+            pending.turn_id.as_str(),
+            "change_ledger",
+            || {
+                append_change_event_plan(files.dir.as_path(), &change_event_plan)?;
+                rebuild_change_ledger(
+                    files.dir.as_path(),
+                    &ChangeLedgerPacket {
+                        world_id: options.world_id.clone(),
+                        turn_id: pending.turn_id.clone(),
+                        ..ChangeLedgerPacket::default()
+                    },
+                )?;
+                Ok(())
+            },
+        )?;
+        commit_post_advance_materialization(
+            &files,
+            options.world_id.as_str(),
+            pending.turn_id.as_str(),
+            "belief_graph",
+            || {
+                append_belief_event_plan(files.dir.as_path(), &belief_event_plan)?;
+                rebuild_belief_graph(
+                    files.dir.as_path(),
+                    &BeliefGraphPacket {
+                        world_id: options.world_id.clone(),
+                        turn_id: pending.turn_id.clone(),
+                        ..BeliefGraphPacket::default()
+                    },
+                )?;
+                Ok(())
+            },
+        )?;
+        commit_post_advance_materialization(
+            &files,
+            options.world_id.as_str(),
+            pending.turn_id.as_str(),
+            "world_process_clock",
+            || {
+                append_world_process_event_plan(files.dir.as_path(), &world_process_event_plan)?;
+                rebuild_world_process_clock(
+                    files.dir.as_path(),
+                    &pending.visible_context.active_world_process_clock,
+                )?;
+                Ok(())
+            },
+        )?;
+        commit_post_advance_materialization(
+            &files,
+            options.world_id.as_str(),
+            pending.turn_id.as_str(),
+            "player_intent_trace",
+            || {
+                append_player_intent_event_plan(files.dir.as_path(), &player_intent_event_plan)?;
+                rebuild_player_intent_trace(
+                    files.dir.as_path(),
+                    &PlayerIntentTracePacket {
+                        world_id: options.world_id.clone(),
+                        turn_id: pending.turn_id.clone(),
+                        ..PlayerIntentTracePacket::default()
+                    },
+                )?;
+                Ok(())
+            },
+        )?;
+        commit_post_advance_materialization(
+            &files,
+            options.world_id.as_str(),
+            pending.turn_id.as_str(),
+            "narrative_style_state",
+            || {
+                append_narrative_style_event_plan(
+                    files.dir.as_path(),
+                    &narrative_style_event_plan,
+                )?;
+                rebuild_narrative_style_state(
+                    files.dir.as_path(),
+                    &pending.visible_context.active_narrative_style_state,
+                )?;
+                Ok(())
+            },
+        )?;
+        commit_post_advance_materialization(
+            &files,
+            options.world_id.as_str(),
+            pending.turn_id.as_str(),
+            "pattern_debt",
+            || {
+                append_pattern_debt_event_plan(files.dir.as_path(), &pattern_debt_event_plan)?;
+                rebuild_pattern_debt(
+                    files.dir.as_path(),
+                    &PatternDebtPacket {
+                        world_id: options.world_id.clone(),
+                        turn_id: pending.turn_id.clone(),
+                        ..PatternDebtPacket::default()
+                    },
+                )?;
+                Ok(())
+            },
+        )?;
+        commit_post_advance_materialization(
+            &files,
+            options.world_id.as_str(),
+            pending.turn_id.as_str(),
+            "plot_threads",
+            || {
+                append_plot_thread_event_plan(files.dir.as_path(), &plot_thread_event_plan)?;
+                rebuild_plot_threads(
+                    files.dir.as_path(),
+                    &pending.visible_context.active_plot_threads,
+                )?;
+                Ok(())
+            },
+        )?;
+        commit_post_advance_materialization(
+            &files,
+            options.world_id.as_str(),
+            pending.turn_id.as_str(),
+            "scene_pressure",
+            || {
+                append_scene_pressure_event_plan(files.dir.as_path(), &scene_pressure_event_plan)?;
+                rebuild_active_scene_pressures(
+                    files.dir.as_path(),
+                    &pending.visible_context.active_scene_pressure,
+                )?;
+                Ok(())
+            },
+        )?;
+        commit_post_advance_materialization(
+            &files,
+            options.world_id.as_str(),
+            pending.turn_id.as_str(),
+            "scene_director",
+            || {
+                append_scene_director_event_plan(files.dir.as_path(), &scene_director_event_plan)?;
+                rebuild_scene_director(files.dir.as_path(), &active_scene_director)?;
+                Ok(())
+            },
+        )?;
+        commit_post_advance_materialization(
+            &files,
+            options.world_id.as_str(),
+            pending.turn_id.as_str(),
+            "consequence_spine",
+            || {
+                append_consequence_event_plan(files.dir.as_path(), &consequence_event_plan)?;
+                rebuild_consequence_spine(
+                    files.dir.as_path(),
+                    &ConsequenceSpinePacket {
+                        world_id: options.world_id.clone(),
+                        turn_id: pending.turn_id.clone(),
+                        ..pending.visible_context.active_consequence_spine.clone()
+                    },
+                )?;
+                Ok(())
+            },
+        )?;
+        commit_post_advance_materialization(
+            &files,
+            options.world_id.as_str(),
+            pending.turn_id.as_str(),
+            "social_exchange",
+            || {
+                append_social_exchange_event_plan(
+                    files.dir.as_path(),
+                    &social_exchange_event_plan,
+                )?;
+                rebuild_social_exchange(
+                    files.dir.as_path(),
+                    &SocialExchangePacket {
+                        world_id: options.world_id.clone(),
+                        turn_id: pending.turn_id.clone(),
+                        ..pending.visible_context.active_social_exchange.clone()
+                    },
+                )?;
+                Ok(())
+            },
+        )?;
+        commit_post_advance_materialization(
+            &files,
+            options.world_id.as_str(),
+            pending.turn_id.as_str(),
+            "encounter_surface",
+            || {
+                append_encounter_surface_event_plan(
+                    files.dir.as_path(),
+                    &encounter_surface_event_plan,
+                )?;
+                rebuild_encounter_surface(
+                    files.dir.as_path(),
+                    &EncounterSurfacePacket {
+                        world_id: options.world_id.clone(),
+                        turn_id: pending.turn_id.clone(),
+                        ..pending.visible_context.active_encounter_surface.clone()
+                    },
+                )?;
+                Ok(())
+            },
+        )?;
+        commit_post_advance_materialization(
+            &files,
+            options.world_id.as_str(),
+            pending.turn_id.as_str(),
+            "body_resource",
+            || {
+                append_body_resource_event_plan(files.dir.as_path(), &body_resource_event_plan)?;
+                rebuild_body_resource_state(
+                    files.dir.as_path(),
+                    &pending.visible_context.active_body_resource_state,
+                )?;
+                Ok(())
+            },
+        )?;
+        commit_post_advance_materialization(
+            &files,
+            options.world_id.as_str(),
+            pending.turn_id.as_str(),
+            "location_graph",
+            || {
+                append_location_event_plan(files.dir.as_path(), &location_event_plan)?;
+                rebuild_location_graph(
+                    files.dir.as_path(),
+                    &pending.visible_context.active_location_graph,
+                )?;
+                Ok(())
+            },
+        )?;
+
+        let packet = build_vn_packet(&BuildVnPacketOptions {
+            store_root: options.store_root.clone(),
+            world_id: options.world_id.clone(),
+            turn_id: Some(pending.turn_id.clone()),
+            scene_image_url: None,
+        })?;
+        let commit_record_path = turn_dir.join(AGENT_COMMIT_RECORD_FILENAME);
+        let committed = CommittedAgentTurn {
+            schema_version: AGENT_COMMIT_RECORD_SCHEMA_VERSION.to_owned(),
+            world_id: options.world_id.clone(),
+            turn_id: pending.turn_id.clone(),
+            render_packet_path: advanced.render_packet_path.display().to_string(),
+            response_path: response_path.display().to_string(),
+            commit_record_path: commit_record_path.display().to_string(),
+            world_court_verdict_path: Some(world_court_verdict_path.display().to_string()),
+            committed_at,
+            packet,
+        };
+        write_json(&commit_record_path, &committed)?;
+        append_turn_commit_envelope(
+            files.dir.as_path(),
+            &TurnCommitEnvelope::committed(&pending, parent_turn_id.as_str(), &committed),
+        )?;
+        commit_extra_memory_projection_terminal(&extra_memory_projection)?;
+        fs::remove_file(&pending_path)
+            .with_context(|| format!("failed to remove {}", pending_path.display()))?;
+        Ok(committed)
+    })();
+
+    match commit_result {
+        Ok(committed) => Ok(committed),
+        Err(error) => {
+            let rendered = format!("{error:#}");
+            append_turn_commit_envelope(
                 files.dir.as_path(),
-                &relationship_graph_event_plan,
-            )?;
-            rebuild_relationship_graph(
-                files.dir.as_path(),
-                &RelationshipGraphPacket {
-                    world_id: options.world_id.clone(),
-                    turn_id: pending.turn_id.clone(),
-                    ..RelationshipGraphPacket::default()
-                },
-            )?;
-            Ok(())
-        },
-    )?;
-    commit_post_advance_materialization(
-        &files,
-        options.world_id.as_str(),
-        pending.turn_id.as_str(),
-        "actor_agency",
-        || {
-            append_actor_agency_event_plan(files.dir.as_path(), &actor_agency_event_plan)?;
-            rebuild_actor_agency_packet(
-                files.dir.as_path(),
-                &ActorAgencyPacket {
-                    world_id: options.world_id.clone(),
-                    turn_id: pending.turn_id.clone(),
-                    ..ActorAgencyPacket::default()
-                },
-            )?;
-            Ok(())
-        },
-    )?;
-    commit_post_advance_materialization(
-        &files,
-        options.world_id.as_str(),
-        pending.turn_id.as_str(),
-        "world_lore",
-        || {
-            append_world_lore_update_plan(files.dir.as_path(), &world_lore_update_plan)?;
-            rebuild_world_lore(
-                files.dir.as_path(),
-                &WorldLorePacket {
-                    world_id: options.world_id.clone(),
-                    turn_id: pending.turn_id.clone(),
-                    ..WorldLorePacket::default()
-                },
-            )?;
-            Ok(())
-        },
-    )?;
-    commit_post_advance_materialization(
-        &files,
-        options.world_id.as_str(),
-        pending.turn_id.as_str(),
-        "character_text_design",
-        || {
-            append_character_text_design_event_plan(
-                files.dir.as_path(),
-                &character_text_design_event_plan,
-            )?;
-            rebuild_character_text_design(
-                files.dir.as_path(),
-                &pending.visible_context.active_character_text_design,
-            )?;
-            Ok(())
-        },
-    )?;
-    commit_post_advance_materialization(
-        &files,
-        options.world_id.as_str(),
-        pending.turn_id.as_str(),
-        "context_capsules",
-        || {
-            let active_world_lore = load_world_lore_state(
-                files.dir.as_path(),
-                WorldLorePacket {
-                    world_id: options.world_id.clone(),
-                    turn_id: pending.turn_id.clone(),
-                    ..WorldLorePacket::default()
-                },
-            )?;
-            let active_relationship_graph = load_relationship_graph_state(
-                files.dir.as_path(),
-                RelationshipGraphPacket {
-                    world_id: options.world_id.clone(),
-                    turn_id: pending.turn_id.clone(),
-                    ..RelationshipGraphPacket::default()
-                },
-            )?;
-            let active_character_text_design = load_character_text_design_state(
-                files.dir.as_path(),
-                pending.visible_context.active_character_text_design.clone(),
-            )?;
-            rebuild_context_capsule_registry(&ContextCapsuleBuildInput {
-                world_dir: files.dir.as_path(),
-                world_id: options.world_id.as_str(),
-                turn_id: pending.turn_id.as_str(),
-                active_world_lore: &active_world_lore,
-                active_relationship_graph: &active_relationship_graph,
-                active_character_text_design: &active_character_text_design,
+                &TurnCommitEnvelope::failed(
+                    &pending,
+                    parent_turn_id.as_str(),
+                    "agent_commit_after_prepare",
+                    rendered.clone(),
+                    Utc::now().to_rfc3339(),
+                ),
+            )
+            .with_context(|| {
+                format!(
+                    "failed to append failed turn commit envelope after commit error: world_id={}, turn_id={}, error={rendered}",
+                    pending.world_id, pending.turn_id
+                )
             })?;
-            Ok(())
-        },
-    )?;
-    commit_post_advance_materialization(
-        &files,
-        options.world_id.as_str(),
-        pending.turn_id.as_str(),
-        "change_ledger",
-        || {
-            append_change_event_plan(files.dir.as_path(), &change_event_plan)?;
-            rebuild_change_ledger(
-                files.dir.as_path(),
-                &ChangeLedgerPacket {
-                    world_id: options.world_id.clone(),
-                    turn_id: pending.turn_id.clone(),
-                    ..ChangeLedgerPacket::default()
-                },
-            )?;
-            Ok(())
-        },
-    )?;
-    commit_post_advance_materialization(
-        &files,
-        options.world_id.as_str(),
-        pending.turn_id.as_str(),
-        "belief_graph",
-        || {
-            append_belief_event_plan(files.dir.as_path(), &belief_event_plan)?;
-            rebuild_belief_graph(
-                files.dir.as_path(),
-                &BeliefGraphPacket {
-                    world_id: options.world_id.clone(),
-                    turn_id: pending.turn_id.clone(),
-                    ..BeliefGraphPacket::default()
-                },
-            )?;
-            Ok(())
-        },
-    )?;
-    commit_post_advance_materialization(
-        &files,
-        options.world_id.as_str(),
-        pending.turn_id.as_str(),
-        "world_process_clock",
-        || {
-            append_world_process_event_plan(files.dir.as_path(), &world_process_event_plan)?;
-            rebuild_world_process_clock(
-                files.dir.as_path(),
-                &pending.visible_context.active_world_process_clock,
-            )?;
-            Ok(())
-        },
-    )?;
-    commit_post_advance_materialization(
-        &files,
-        options.world_id.as_str(),
-        pending.turn_id.as_str(),
-        "player_intent_trace",
-        || {
-            append_player_intent_event_plan(files.dir.as_path(), &player_intent_event_plan)?;
-            rebuild_player_intent_trace(
-                files.dir.as_path(),
-                &PlayerIntentTracePacket {
-                    world_id: options.world_id.clone(),
-                    turn_id: pending.turn_id.clone(),
-                    ..PlayerIntentTracePacket::default()
-                },
-            )?;
-            Ok(())
-        },
-    )?;
-    commit_post_advance_materialization(
-        &files,
-        options.world_id.as_str(),
-        pending.turn_id.as_str(),
-        "narrative_style_state",
-        || {
-            append_narrative_style_event_plan(files.dir.as_path(), &narrative_style_event_plan)?;
-            rebuild_narrative_style_state(
-                files.dir.as_path(),
-                &pending.visible_context.active_narrative_style_state,
-            )?;
-            Ok(())
-        },
-    )?;
-    commit_post_advance_materialization(
-        &files,
-        options.world_id.as_str(),
-        pending.turn_id.as_str(),
-        "pattern_debt",
-        || {
-            append_pattern_debt_event_plan(files.dir.as_path(), &pattern_debt_event_plan)?;
-            rebuild_pattern_debt(
-                files.dir.as_path(),
-                &PatternDebtPacket {
-                    world_id: options.world_id.clone(),
-                    turn_id: pending.turn_id.clone(),
-                    ..PatternDebtPacket::default()
-                },
-            )?;
-            Ok(())
-        },
-    )?;
-    commit_post_advance_materialization(
-        &files,
-        options.world_id.as_str(),
-        pending.turn_id.as_str(),
-        "plot_threads",
-        || {
-            append_plot_thread_event_plan(files.dir.as_path(), &plot_thread_event_plan)?;
-            rebuild_plot_threads(
-                files.dir.as_path(),
-                &pending.visible_context.active_plot_threads,
-            )?;
-            Ok(())
-        },
-    )?;
-    commit_post_advance_materialization(
-        &files,
-        options.world_id.as_str(),
-        pending.turn_id.as_str(),
-        "scene_pressure",
-        || {
-            append_scene_pressure_event_plan(files.dir.as_path(), &scene_pressure_event_plan)?;
-            rebuild_active_scene_pressures(
-                files.dir.as_path(),
-                &pending.visible_context.active_scene_pressure,
-            )?;
-            Ok(())
-        },
-    )?;
-    commit_post_advance_materialization(
-        &files,
-        options.world_id.as_str(),
-        pending.turn_id.as_str(),
-        "scene_director",
-        || {
-            append_scene_director_event_plan(files.dir.as_path(), &scene_director_event_plan)?;
-            rebuild_scene_director(files.dir.as_path(), &active_scene_director)?;
-            Ok(())
-        },
-    )?;
-    commit_post_advance_materialization(
-        &files,
-        options.world_id.as_str(),
-        pending.turn_id.as_str(),
-        "consequence_spine",
-        || {
-            append_consequence_event_plan(files.dir.as_path(), &consequence_event_plan)?;
-            rebuild_consequence_spine(
-                files.dir.as_path(),
-                &ConsequenceSpinePacket {
-                    world_id: options.world_id.clone(),
-                    turn_id: pending.turn_id.clone(),
-                    ..pending.visible_context.active_consequence_spine.clone()
-                },
-            )?;
-            Ok(())
-        },
-    )?;
-    commit_post_advance_materialization(
-        &files,
-        options.world_id.as_str(),
-        pending.turn_id.as_str(),
-        "social_exchange",
-        || {
-            append_social_exchange_event_plan(files.dir.as_path(), &social_exchange_event_plan)?;
-            rebuild_social_exchange(
-                files.dir.as_path(),
-                &SocialExchangePacket {
-                    world_id: options.world_id.clone(),
-                    turn_id: pending.turn_id.clone(),
-                    ..pending.visible_context.active_social_exchange.clone()
-                },
-            )?;
-            Ok(())
-        },
-    )?;
-    commit_post_advance_materialization(
-        &files,
-        options.world_id.as_str(),
-        pending.turn_id.as_str(),
-        "encounter_surface",
-        || {
-            append_encounter_surface_event_plan(
-                files.dir.as_path(),
-                &encounter_surface_event_plan,
-            )?;
-            rebuild_encounter_surface(
-                files.dir.as_path(),
-                &EncounterSurfacePacket {
-                    world_id: options.world_id.clone(),
-                    turn_id: pending.turn_id.clone(),
-                    ..pending.visible_context.active_encounter_surface.clone()
-                },
-            )?;
-            Ok(())
-        },
-    )?;
-    commit_post_advance_materialization(
-        &files,
-        options.world_id.as_str(),
-        pending.turn_id.as_str(),
-        "body_resource",
-        || {
-            append_body_resource_event_plan(files.dir.as_path(), &body_resource_event_plan)?;
-            rebuild_body_resource_state(
-                files.dir.as_path(),
-                &pending.visible_context.active_body_resource_state,
-            )?;
-            Ok(())
-        },
-    )?;
-    commit_post_advance_materialization(
-        &files,
-        options.world_id.as_str(),
-        pending.turn_id.as_str(),
-        "location_graph",
-        || {
-            append_location_event_plan(files.dir.as_path(), &location_event_plan)?;
-            rebuild_location_graph(
-                files.dir.as_path(),
-                &pending.visible_context.active_location_graph,
-            )?;
-            Ok(())
-        },
-    )?;
-
-    let packet = build_vn_packet(&BuildVnPacketOptions {
-        store_root: options.store_root.clone(),
-        world_id: options.world_id.clone(),
-        turn_id: Some(pending.turn_id.clone()),
-        scene_image_url: None,
-    })?;
-    let commit_record_path = turn_dir.join(AGENT_COMMIT_RECORD_FILENAME);
-    let committed = CommittedAgentTurn {
-        schema_version: AGENT_COMMIT_RECORD_SCHEMA_VERSION.to_owned(),
-        world_id: options.world_id.clone(),
-        turn_id: pending.turn_id.clone(),
-        render_packet_path: advanced.render_packet_path.display().to_string(),
-        response_path: response_path.display().to_string(),
-        commit_record_path: commit_record_path.display().to_string(),
-        committed_at,
-        packet,
-    };
-    write_json(&commit_record_path, &committed)?;
-    append_turn_commit_envelope(
-        files.dir.as_path(),
-        &TurnCommitEnvelope::committed(
-            &pending,
-            before_commit_snapshot.turn_id.as_str(),
-            &committed,
-        ),
-    )?;
-    commit_extra_memory_projection_terminal(&extra_memory_projection)?;
-    fs::remove_file(&pending_path)
-        .with_context(|| format!("failed to remove {}", pending_path.display()))?;
-    Ok(committed)
+            Err(error)
+        }
+    }
 }
 
 fn canonical_agent_turn_response(mut response: AgentTurnResponse) -> AgentTurnResponse {
@@ -1163,30 +1222,42 @@ fn commit_post_advance_materialization(
     component: &str,
     materialize: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
-    let event = match materialize() {
-        Ok(()) => PostCommitMaterializationEvent {
-            schema_version: POST_COMMIT_MATERIALIZATION_EVENT_SCHEMA_VERSION.to_owned(),
-            world_id: world_id.to_owned(),
-            turn_id: turn_id.to_owned(),
-            component: component.to_owned(),
-            status: "committed".to_owned(),
-            error: None,
-            recorded_at: Utc::now().to_rfc3339(),
-        },
-        Err(error) => PostCommitMaterializationEvent {
-            schema_version: POST_COMMIT_MATERIALIZATION_EVENT_SCHEMA_VERSION.to_owned(),
-            world_id: world_id.to_owned(),
-            turn_id: turn_id.to_owned(),
-            component: component.to_owned(),
-            status: "failed".to_owned(),
-            error: Some(format!("{error:#}")),
-            recorded_at: Utc::now().to_rfc3339(),
-        },
-    };
-    append_jsonl(
-        &files.dir.join(POST_COMMIT_MATERIALIZATION_EVENTS_FILENAME),
-        &event,
-    )
+    match materialize() {
+        Ok(()) => {
+            let event = PostCommitMaterializationEvent {
+                schema_version: POST_COMMIT_MATERIALIZATION_EVENT_SCHEMA_VERSION.to_owned(),
+                world_id: world_id.to_owned(),
+                turn_id: turn_id.to_owned(),
+                component: component.to_owned(),
+                status: "committed".to_owned(),
+                error: None,
+                recorded_at: Utc::now().to_rfc3339(),
+            };
+            append_jsonl(
+                &files.dir.join(POST_COMMIT_MATERIALIZATION_EVENTS_FILENAME),
+                &event,
+            )
+        }
+        Err(error) => {
+            let rendered = format!("{error:#}");
+            let event = PostCommitMaterializationEvent {
+                schema_version: POST_COMMIT_MATERIALIZATION_EVENT_SCHEMA_VERSION.to_owned(),
+                world_id: world_id.to_owned(),
+                turn_id: turn_id.to_owned(),
+                component: component.to_owned(),
+                status: "failed".to_owned(),
+                error: Some(rendered.clone()),
+                recorded_at: Utc::now().to_rfc3339(),
+            };
+            append_jsonl(
+                &files.dir.join(POST_COMMIT_MATERIALIZATION_EVENTS_FILENAME),
+                &event,
+            )?;
+            bail!(
+                "required post-advance materialization failed: world_id={world_id}, turn_id={turn_id}, component={component}, error={rendered}"
+            );
+        }
+    }
 }
 
 fn validate_agent_response(pending: &PendingAgentTurn, response: &AgentTurnResponse) -> Result<()> {
@@ -1231,36 +1302,64 @@ fn validate_agent_response(pending: &PendingAgentTurn, response: &AgentTurnRespo
     ensure_no_hidden_leak(pending, response)
 }
 
-fn audit_agent_resolution_proposal(
+fn audit_agent_world_court(
+    world_dir: &Path,
     store_root: Option<&Path>,
     pending: &PendingAgentTurn,
     response: &AgentTurnResponse,
-) -> Result<()> {
+) -> Result<WorldCourtVerdict> {
     let prompt_context = compile_prompt_context_packet(&CompilePromptContextPacketOptions {
         store_root,
         pending,
         engine_session_kind: "webgpt_project_session",
     })?;
-    let required_fields = &prompt_context
-        .pre_turn_simulation
-        .required_resolution_fields;
-    if required_fields.resolution_proposal_required && response.resolution_proposal.is_none() {
-        bail!(
-            "agent response missing required resolution_proposal before commit: world_id={}, turn_id={}, reason={}",
-            pending.world_id,
-            pending.turn_id,
-            required_fields.reason
-        );
+    let verdict = adjudicate_world_changes(&WorldCourtInput {
+        context: &prompt_context,
+        resolution_proposal: response.resolution_proposal.as_ref(),
+        next_choices: &response.next_choices,
+    });
+    if verdict.status == WorldCourtVerdictStatus::Accept {
+        return Ok(verdict);
     }
-    let Some(proposal) = &response.resolution_proposal else {
-        return Ok(());
-    };
-    audit_resolution_proposal(&prompt_context, proposal)
-        .map_err(|critique| resolution_critique_error(&critique))
-        .and_then(|()| {
-            audit_resolution_choices(&prompt_context, proposal, &response.next_choices)
-                .map_err(|critique| resolution_critique_error(&critique))
-        })
+    append_world_court_rejection_record(world_dir, pending, &verdict)?;
+    bail!("{}", render_world_court_verdict(&verdict));
+}
+
+fn append_world_court_rejection_record(
+    world_dir: &Path,
+    pending: &PendingAgentTurn,
+    verdict: &WorldCourtVerdict,
+) -> Result<()> {
+    let agent_bridge_dir = world_dir.join(AGENT_BRIDGE_DIR);
+    fs::create_dir_all(&agent_bridge_dir)
+        .with_context(|| format!("failed to create {}", agent_bridge_dir.display()))?;
+    append_jsonl(
+        &agent_bridge_dir.join(WORLD_COURT_REJECTIONS_FILENAME),
+        &WorldCourtRejectionRecord {
+            schema_version: WORLD_COURT_REJECTION_RECORD_SCHEMA_VERSION.to_owned(),
+            world_id: pending.world_id.clone(),
+            turn_id: pending.turn_id.clone(),
+            pending_ref: pending.pending_ref.clone(),
+            verdict: verdict.clone(),
+            rejected_at: Utc::now().to_rfc3339(),
+        },
+    )
+}
+
+fn event_authority_for_agent_commit(
+    response: &AgentTurnResponse,
+    verdict: &WorldCourtVerdict,
+) -> EventAuthority {
+    if response.resolution_proposal.is_some()
+        && verdict
+            .accepted_checks
+            .iter()
+            .any(|check| check == "resolution_schema")
+    {
+        EventAuthority::ResolutionAccepted
+    } else {
+        EventAuthority::TurnReducer
+    }
 }
 
 fn audit_agent_scene_director_proposal(
@@ -1292,15 +1391,6 @@ fn scene_director_critique_error(critique: &SceneDirectorCritique) -> anyhow::Er
         critique.message,
         critique.rejected_refs,
         critique.required_changes
-    )
-}
-
-fn resolution_critique_error(critique: &ResolutionCritique) -> anyhow::Error {
-    anyhow::anyhow!(
-        "resolution proposal audit failed: failure_kind={:?}, message={}, rejected_refs={:?}",
-        critique.failure_kind,
-        critique.message,
-        critique.rejected_refs
     )
 }
 
@@ -1993,12 +2083,14 @@ mod tests {
         AGENT_PENDING_TURN_SCHEMA_VERSION, AGENT_TURN_RESPONSE_SCHEMA_VERSION,
         AgentCommitTurnOptions, AgentContextRepairRequest, AgentExtraContact, AgentOutputContract,
         AgentPrivateAdjudicationContext, AgentSubmitTurnOptions, AgentTurnResponse,
-        AgentVisibleContext, PendingAgentTurn, canonical_agent_turn_response, enqueue_agent_turn,
-        load_pending_agent_turn, narrative_budget_for_level, normalize_narrative_level,
-        selected_choice, validate_agent_next_choices, validate_agent_response,
+        AgentVisibleContext, PendingAgentTurn, WORLD_COURT_REJECTION_RECORD_SCHEMA_VERSION,
+        WORLD_COURT_REJECTIONS_FILENAME, WorldCourtRejectionRecord, canonical_agent_turn_response,
+        enqueue_agent_turn, load_pending_agent_turn, narrative_budget_for_level,
+        normalize_narrative_level, selected_choice, validate_agent_next_choices,
+        validate_agent_response,
     };
     use crate::actor_agency::ActorAgencyPacket;
-    use crate::agent_bridge::commit_agent_turn;
+    use crate::agent_bridge::{commit_agent_turn, commit_post_advance_materialization};
     use crate::autobiographical_index::AutobiographicalIndexPacket;
     use crate::belief_graph::BeliefGraphPacket;
     use crate::body_resource::BodyResourcePacket;
@@ -2007,14 +2099,15 @@ mod tests {
     use crate::consequence_spine::ConsequenceSpinePacket;
     use crate::context_capsule::ContextCapsuleSelection;
     use crate::encounter_surface::EncounterSurfacePacket;
+    use crate::event_ledger::load_world_events;
     use crate::extra_memory::{
         ExtraMemoryPacket, ExtraMemoryProjectionStatus, load_extra_memory_projection_records,
         load_remembered_extras,
     };
     use crate::location_graph::LocationGraphPacket;
     use crate::models::{
-        GUIDE_CHOICE_TAG, NARRATIVE_SCENE_SCHEMA_VERSION, NarrativeScene, TurnChoice, TurnSnapshot,
-        default_turn_choices,
+        EventAuthority, GUIDE_CHOICE_TAG, NARRATIVE_SCENE_SCHEMA_VERSION, NarrativeScene,
+        TurnChoice, TurnSnapshot, default_turn_choices,
     };
     use crate::narrative_style_state::NarrativeStyleState;
     use crate::pattern_debt::PatternDebtPacket;
@@ -2036,6 +2129,7 @@ mod tests {
     use crate::turn_commit::{TURN_COMMITS_FILENAME, TurnCommitEnvelope, TurnCommitStatus};
     use crate::turn_retrieval_controller::TurnRetrievalControllerPacket;
     use crate::vn::{BuildVnPacketOptions, build_vn_packet};
+    use crate::world_court::{WorldCourtVerdict, WorldCourtVerdictStatus};
     use crate::world_lore::WorldLorePacket;
     use crate::world_process_clock::WorldProcessClockPacket;
     use std::path::Path;
@@ -2093,6 +2187,19 @@ premise:
                 intent: "맡긴다. 세부 내용은 선택 후 드러난다.".to_owned(),
             },
         ]
+    }
+
+    fn load_world_court_rejections(
+        world_dir: &Path,
+    ) -> anyhow::Result<Vec<WorldCourtRejectionRecord>> {
+        let path = world_dir
+            .join("agent_bridge")
+            .join(WORLD_COURT_REJECTIONS_FILENAME);
+        let raw = std::fs::read_to_string(&path)?;
+        raw.lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).map_err(Into::into))
+            .collect()
     }
 
     fn valid_resolution_proposal_for_pending(
@@ -2494,6 +2601,23 @@ premise:
         assert_eq!(envelopes[1].status, TurnCommitStatus::Committed);
         assert_eq!(envelopes[1].parent_turn_id, "turn_0000");
         assert_eq!(envelopes[1].turn_id, "turn_0001");
+        let Some(verdict_path) = envelopes[1].world_court_verdict_path.as_deref() else {
+            anyhow::bail!("committed turn missing world court verdict path");
+        };
+        let verdict: WorldCourtVerdict = read_json(Path::new(verdict_path))?;
+        assert_eq!(verdict.status, WorldCourtVerdictStatus::Accept);
+        assert!(
+            verdict
+                .accepted_checks
+                .iter()
+                .any(|check| check == "resolution_schema")
+        );
+        let canon_events = load_world_events(&files.canon_events)?;
+        assert_eq!(canon_events.len(), 2);
+        assert_eq!(
+            canon_events[1].authority,
+            Some(EventAuthority::ResolutionAccepted)
+        );
         assert!(files.dir.join("body_resource_state.json").is_file());
         assert!(files.dir.join("location_graph.json").is_file());
         assert!(files.dir.join("plot_threads.json").is_file());
@@ -2509,6 +2633,145 @@ premise:
             packet.scene.text_blocks,
             vec!["agent-authored visible scene"]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn commit_failure_after_prepare_records_failed_envelope() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(&seed_path, seed_body("stw_agent_commit_fail"))?;
+        init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+
+        let pending = enqueue_agent_turn(&AgentSubmitTurnOptions {
+            store_root: Some(store.clone()),
+            world_id: "stw_agent_commit_fail".to_owned(),
+            input: "1".to_owned(),
+            narrative_level: None,
+        })?;
+        let store_paths = resolve_store_paths(Some(store.as_path()))?;
+        let files = world_file_paths(&store_paths, "stw_agent_commit_fail");
+        let snapshot: TurnSnapshot = read_json(&files.latest_snapshot)?;
+        let blocked_snapshot_path = files
+            .dir
+            .join("sessions")
+            .join(snapshot.session_id.as_str())
+            .join("snapshots")
+            .join("turn_0001.json");
+        std::fs::create_dir_all(&blocked_snapshot_path)?;
+
+        let result = commit_agent_turn(&AgentCommitTurnOptions {
+            store_root: Some(store.clone()),
+            world_id: "stw_agent_commit_fail".to_owned(),
+            response: AgentTurnResponse {
+                schema_version: AGENT_TURN_RESPONSE_SCHEMA_VERSION.to_owned(),
+                world_id: pending.world_id.clone(),
+                turn_id: pending.turn_id.clone(),
+                resolution_proposal: Some(valid_resolution_proposal_for_pending(
+                    store.as_path(),
+                    &pending,
+                )?),
+                scene_director_proposal: None,
+                consequence_proposal: None,
+                social_exchange_proposal: None,
+                encounter_proposal: None,
+                visible_scene: NarrativeScene {
+                    schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
+                    speaker: None,
+                    text_blocks: vec!["this commit will fail after prepare".to_owned()],
+                    tone_notes: Vec::new(),
+                },
+                adjudication: None,
+                canon_event: None,
+                entity_updates: Vec::new(),
+                relationship_updates: Vec::new(),
+                plot_thread_events: Vec::new(),
+                scene_pressure_events: Vec::new(),
+                world_lore_updates: Vec::new(),
+                character_text_design_updates: Vec::new(),
+                body_resource_events: Vec::new(),
+                location_events: Vec::new(),
+                extra_contacts: Vec::new(),
+                hidden_state_delta: Vec::new(),
+                needs_context: Vec::new(),
+                next_choices: scene_specific_choices(),
+                actor_goal_events: Vec::new(),
+                actor_move_events: Vec::new(),
+            },
+        });
+
+        let Err(error) = result else {
+            anyhow::bail!("commit should fail after prepared envelope");
+        };
+        assert!(format!("{error:#}").contains("turn_0001.json"));
+        let raw = std::fs::read_to_string(files.dir.join(TURN_COMMITS_FILENAME))?;
+        let envelopes = raw
+            .lines()
+            .map(serde_json::from_str::<TurnCommitEnvelope>)
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(envelopes.len(), 2);
+        assert_eq!(envelopes[0].status, TurnCommitStatus::Prepared);
+        assert_eq!(envelopes[1].status, TurnCommitStatus::Failed);
+        assert_eq!(envelopes[1].parent_turn_id, "turn_0000");
+        assert_eq!(
+            envelopes[1].failed_stage.as_deref(),
+            Some("agent_commit_after_prepare")
+        );
+        assert!(
+            envelopes[1]
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("turn_0001.json"))
+        );
+        assert!(
+            files
+                .dir
+                .join("agent_bridge")
+                .join("pending_turn.json")
+                .is_file()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn materialization_failure_is_returned_after_failed_event() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(&seed_path, seed_body("stw_agent_materialization_fail"))?;
+        init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+        let store_paths = resolve_store_paths(Some(store.as_path()))?;
+        let files = world_file_paths(&store_paths, "stw_agent_materialization_fail");
+
+        let result = commit_post_advance_materialization(
+            &files,
+            "stw_agent_materialization_fail",
+            "turn_0001",
+            "agent_context_projection",
+            || anyhow::bail!("synthetic materialization failure"),
+        );
+
+        let Err(error) = result else {
+            anyhow::bail!("required materialization failure should be returned");
+        };
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("required post-advance materialization failed"),
+            "{rendered}"
+        );
+        let materialization_events =
+            std::fs::read_to_string(files.dir.join("post_commit_materialization_events.jsonl"))?;
+        assert!(materialization_events.contains("\"status\":\"failed\""));
+        assert!(materialization_events.contains("synthetic materialization failure"));
         Ok(())
     }
 
@@ -2881,11 +3144,33 @@ premise:
             format!("{error:#}").contains("resolution proposal audit failed"),
             "{error:#}"
         );
+        assert!(format!("{error:#}").contains("layer=Ontology"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("resource:missing_map"),
+            "{error:#}"
+        );
 
         let store_paths = resolve_store_paths(Some(store.as_path()))?;
         let files = world_file_paths(&store_paths, "stw_agent_bad_resolution");
         let latest: TurnSnapshot = read_json(&files.latest_snapshot)?;
         assert_eq!(latest.turn_id, "turn_0000");
+        let rejections = load_world_court_rejections(&files.dir)?;
+        assert_eq!(rejections.len(), 1);
+        assert_eq!(
+            rejections[0].schema_version,
+            WORLD_COURT_REJECTION_RECORD_SCHEMA_VERSION
+        );
+        assert_eq!(rejections[0].turn_id, "turn_0001");
+        assert_eq!(
+            rejections[0].verdict.status,
+            WorldCourtVerdictStatus::Reject
+        );
+        assert!(rejections[0].verdict.violations.iter().any(|violation| {
+            violation
+                .rejected_refs
+                .iter()
+                .any(|reference| reference == "resource:missing_map")
+        }));
         Ok(())
     }
 
@@ -2955,6 +3240,20 @@ premise:
         let files = world_file_paths(&store_paths, "stw_agent_missing_resolution");
         let latest: TurnSnapshot = read_json(&files.latest_snapshot)?;
         assert_eq!(latest.turn_id, "turn_0000");
+        let rejections = load_world_court_rejections(&files.dir)?;
+        assert_eq!(rejections.len(), 1);
+        assert_eq!(rejections[0].turn_id, "turn_0001");
+        assert_eq!(
+            rejections[0].verdict.status,
+            WorldCourtVerdictStatus::Reject
+        );
+        assert!(
+            rejections[0]
+                .verdict
+                .violations
+                .iter()
+                .any(|violation| violation.check == "resolution_proposal_required")
+        );
         Ok(())
     }
 

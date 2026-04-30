@@ -1,67 +1,69 @@
 #![recursion_limit = "256"]
 
-pub mod actor_agency;
-pub mod adjudication;
-pub mod affordance_graph;
-pub mod agent_bridge;
-pub mod autobiographical_index;
-pub mod backend_selection;
-pub mod belief_graph;
-pub mod body_resource;
-pub mod change_ledger;
-pub mod character_text_design;
-pub mod chat;
-pub mod codex_view;
-pub mod consequence_spine;
-pub mod context_capsule;
-pub mod encounter_surface;
-pub mod entity_update;
-pub mod extra_memory;
-pub mod host_supervisor;
-pub mod job_ledger;
-pub mod location_graph;
-pub mod memory_revival;
-pub mod memory_revival_policy;
-pub mod models;
-pub mod narrative_style_state;
-pub mod pattern_debt;
-pub mod player_intent;
-pub mod plot_thread;
-pub mod pre_turn_simulation;
-pub mod projection_health;
-pub mod projection_registry;
-pub mod prompt_context;
-pub mod prompt_context_budget;
-pub mod relationship_graph;
-pub mod render;
-pub mod resolution;
-pub mod response_context;
-pub mod resume;
-pub mod revival;
-pub mod runtime_profile;
-pub mod scene_director;
-pub mod scene_pressure;
+mod actor_agency;
+mod adjudication;
+mod affordance_graph;
+mod agent_bridge;
+mod autobiographical_index;
+mod backend_selection;
+mod belief_graph;
+mod body_resource;
+mod change_ledger;
+mod character_text_design;
+mod chat;
+mod codex_view;
+mod consequence_spine;
+mod context_capsule;
+mod encounter_surface;
+mod entity_update;
+mod event_ledger;
+mod extra_memory;
+mod host_supervisor;
+mod job_ledger;
+mod location_graph;
+mod memory_revival;
+mod memory_revival_policy;
+mod models;
+mod narrative_style_state;
+mod pattern_debt;
+mod player_intent;
+mod plot_thread;
+mod pre_turn_simulation;
+mod projection_health;
+mod projection_registry;
+mod prompt_context;
+mod prompt_context_budget;
+mod relationship_graph;
+mod render;
+mod resolution;
+mod response_context;
+mod resume;
+mod revival;
+mod runtime_profile;
+mod scene_director;
+mod scene_pressure;
 #[cfg(test)]
 mod simulator_soak;
-pub mod social_exchange;
+mod social_exchange;
 pub mod sqlite;
-pub mod start;
-pub mod store;
-pub mod transfer;
-pub mod turn;
-pub mod turn_commit;
-pub mod turn_context;
-pub mod turn_retrieval_controller;
+mod start;
+mod store;
+mod transfer;
+mod turn;
+mod turn_commit;
+mod turn_context;
+mod turn_retrieval_controller;
 pub mod validate;
-pub mod visual_asset_graph;
-pub mod visual_assets;
-pub mod vn;
-pub mod vn_server;
-pub mod voice_anchor;
-pub mod world_db;
-pub mod world_docs;
-pub mod world_lore;
-pub mod world_process_clock;
+mod visual_asset_graph;
+mod visual_assets;
+mod vn;
+mod vn_server;
+mod voice_anchor;
+mod world_court;
+mod world_db;
+mod world_docs;
+mod world_lore;
+mod world_process_clock;
 
 pub use actor_agency::{
     ACTOR_AGENCY_FILENAME, ACTOR_AGENCY_PACKET_SCHEMA_VERSION, ACTOR_GOAL_EVENT_SCHEMA_VERSION,
@@ -177,6 +179,10 @@ pub use encounter_surface::{
     load_encounter_surface_state, prepare_encounter_surface_event_plan, rebuild_encounter_surface,
 };
 pub use entity_update::{EntityUpdateInput, apply_structured_entity_updates};
+pub use event_ledger::{
+    WORLD_EVENT_LEDGER_SCHEMA_VERSION, WorldEventLedgerAppendReport,
+    WorldEventLedgerVerificationReport, verify_world_event_ledger,
+};
 pub use extra_memory::{
     EXTRA_MEMORY_PROJECTION_RECORD_SCHEMA_VERSION, EXTRA_MEMORY_PROJECTIONS_FILENAME,
     EXTRA_TRACE_SCHEMA_VERSION, EXTRA_TRACES_FILENAME, ExtraMemoryPacket, ExtraMemoryPolicy,
@@ -220,14 +226,15 @@ pub use models::{
     CanonEvent, CharacterBody, CharacterRecord, CharacterVoiceAnchor, CodexAnalysisEntry,
     CodexEntityEntry, CodexFactEntry, CodexHiddenFilter, CodexRecommendation, CodexTimelineEntry,
     CodexView, CodexVoiceAnchorEntry, CurrentEvent, DEFAULT_CHOICE_COUNT, DashboardSummary,
-    ENTITY_UPDATE_SCHEMA_VERSION, EntityName, EntityRecords, EntityUpdateRecord,
+    ENTITY_UPDATE_SCHEMA_VERSION, EntityName, EntityRecords, EntityUpdateRecord, EventAuthority,
     FREEFORM_CHOICE_SLOT, FREEFORM_CHOICE_TAG, GUIDE_CHOICE_REDACTED_INTENT, GUIDE_CHOICE_SLOT,
     HiddenState, HiddenStateSecret, HiddenStateTimer, NARRATIVE_SCENE_SCHEMA_VERSION,
     NarrativeScene, PlayerKnowledge, ProtagonistState, RENDER_PACKET_SCHEMA_VERSION,
     RelationshipUpdateRecord, RenderPacket, SINGULARI_WORLD_SCHEMA_VERSION, ScanTarget,
     StructuredEntityUpdates, TURN_LOG_ENTRY_SCHEMA_VERSION, TURN_SNAPSHOT_SCHEMA_VERSION,
-    TurnChoice, TurnInputKind, TurnLogEntry, TurnSnapshot, VisibleState, WorldPremise, WorldRecord,
-    WorldSeed, default_freeform_choice, default_turn_choices, normalize_turn_choices,
+    TurnChoice, TurnInputKind, TurnLogEntry, TurnSnapshot, VisibleState, WorldEventKind,
+    WorldPremise, WorldRecord, WorldSeed, default_freeform_choice, default_turn_choices,
+    normalize_turn_choices,
 };
 pub use narrative_style_state::{
     NARRATIVE_STYLE_EVENT_SCHEMA_VERSION, NARRATIVE_STYLE_EVENTS_FILENAME,
@@ -367,9 +374,11 @@ pub use start::{
 };
 pub use store::{
     ACTIVE_WORLD_BINDING_SCHEMA_VERSION, ACTIVE_WORLD_FILENAME, ActiveWorldBinding,
-    InitWorldOptions, InitializedWorld, SINGULARI_WORLD_HOME_ENV, StorePaths, init_world,
-    latest_snapshot_path, load_active_world, load_latest_snapshot, load_world_record,
-    resolve_store_paths, resolve_world_id, save_active_world,
+    InitWorldOptions, InitializedWorld, SINGULARI_WORLD_HOME_ENV, StorePaths,
+    WORLD_COMMIT_LOCK_SCHEMA_VERSION, WorldCommitLockClearReport, WorldCommitLockInfo,
+    WorldCommitLockStatus, clear_world_commit_lock, init_world, latest_snapshot_path,
+    load_active_world, load_latest_snapshot, load_world_record, resolve_store_paths,
+    resolve_world_id, save_active_world, world_commit_lock_status,
 };
 pub use transfer::{
     EXPORT_MANIFEST_SCHEMA_VERSION, ExportManifest, ExportWorldOptions, ExportWorldReport,
@@ -423,6 +432,12 @@ pub use vn::{
 pub use vn_server::{VnChooseRequest, VnServeOptions, serve_vn};
 pub use voice_anchor::{
     ApplyCharacterAnchorOptions, CharacterAnchorReport, apply_character_anchor,
+};
+pub use world_court::{
+    WORLD_COURT_REPAIR_ACTION_SCHEMA_VERSION, WORLD_COURT_VERDICT_SCHEMA_VERSION,
+    WORLD_COURT_VIOLATION_SCHEMA_VERSION, WorldCourtInput, WorldCourtLayer, WorldCourtRepairAction,
+    WorldCourtVerdict, WorldCourtVerdictStatus, WorldCourtViolation, WorldCourtViolationSeverity,
+    adjudicate_world_changes, enforce_world_court_acceptance, render_world_court_verdict,
 };
 pub use world_db::{
     CanonEventRow, ChapterSummaryRecord, CharacterMemoryRow, EntityRecordRow, WORLD_DB_FILENAME,

@@ -260,6 +260,10 @@ pub struct CanonEvent {
     pub occurred_at_world_time: String,
     pub visibility: String,
     pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_kind: Option<WorldEventKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<EventAuthority>,
     pub summary: String,
     #[serde(default)]
     pub entities: Vec<String>,
@@ -268,6 +272,86 @@ pub struct CanonEvent {
     pub evidence: EventEvidence,
     #[serde(default)]
     pub consequences: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorldEventKind {
+    WorldInitialized,
+    NumericChoice,
+    GuideChoice,
+    FreeformAction,
+    CodexQuery,
+    MacroTimeFlow,
+    CcCanvas,
+    Observation,
+    RepairRebuild,
+    UnclassifiedLegacy,
+}
+
+impl WorldEventKind {
+    #[must_use]
+    pub const fn as_legacy_kind(self) -> &'static str {
+        match self {
+            Self::WorldInitialized => "note",
+            Self::NumericChoice => "numeric_choice",
+            Self::GuideChoice => "guide_choice",
+            Self::FreeformAction => "freeform_action",
+            Self::CodexQuery => "codex_query",
+            Self::MacroTimeFlow => "macro_time_flow",
+            Self::CcCanvas => "cc_canvas",
+            Self::Observation => "observation",
+            Self::RepairRebuild => "repair_rebuild",
+            Self::UnclassifiedLegacy => "unclassified_legacy",
+        }
+    }
+
+    #[must_use]
+    pub const fn from_turn_input_kind(kind: TurnInputKind) -> Self {
+        match kind {
+            TurnInputKind::NumericChoice => Self::NumericChoice,
+            TurnInputKind::GuideChoice => Self::GuideChoice,
+            TurnInputKind::FreeformAction => Self::FreeformAction,
+            TurnInputKind::CodexQuery => Self::CodexQuery,
+            TurnInputKind::MacroTimeFlow => Self::MacroTimeFlow,
+            TurnInputKind::CcCanvas => Self::CcCanvas,
+        }
+    }
+
+    #[must_use]
+    pub fn from_legacy_kind(kind: &str) -> Option<Self> {
+        match kind {
+            "note" => Some(Self::WorldInitialized),
+            "numeric_choice" => Some(Self::NumericChoice),
+            "guide_choice" => Some(Self::GuideChoice),
+            "freeform_action" => Some(Self::FreeformAction),
+            "codex_query" => Some(Self::CodexQuery),
+            "macro_time_flow" => Some(Self::MacroTimeFlow),
+            "cc_canvas" => Some(Self::CcCanvas),
+            "observation" => Some(Self::Observation),
+            "repair_rebuild" => Some(Self::RepairRebuild),
+            "unclassified_legacy" => Some(Self::UnclassifiedLegacy),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn matches_legacy_kind(self, kind: &str) -> bool {
+        self.as_legacy_kind() == kind
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EventAuthority {
+    WorldInit,
+    TurnReducer,
+    ResolutionAccepted,
+    HiddenProcessTick,
+    ExplicitLoreRule,
+    RepairRebuild,
+    ManualImport,
+    LegacyImport,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -684,6 +768,10 @@ pub struct CodexTimelineEntry {
     pub turn_id: String,
     pub event_id: String,
     pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<String>,
     pub summary: String,
 }
 
@@ -1019,6 +1107,8 @@ pub fn initial_canon_event(world: &WorldRecord) -> CanonEvent {
         occurred_at_world_time: "prelude".to_owned(),
         visibility: "system".to_owned(),
         kind: "note".to_owned(),
+        event_kind: Some(WorldEventKind::WorldInitialized),
+        authority: Some(EventAuthority::WorldInit),
         summary: "World initialized from seed. Dramatic focus starts unresolved.".to_owned(),
         entities: vec![PROTAGONIST_CHARACTER_ID.to_owned()],
         location: Some(OPENING_LOCATION_ID.to_owned()),

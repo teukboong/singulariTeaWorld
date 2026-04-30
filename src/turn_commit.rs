@@ -4,7 +4,10 @@ use crate::models::{
     NARRATIVE_SCENE_SCHEMA_VERSION, NarrativeScene, RENDER_PACKET_SCHEMA_VERSION, RenderPacket,
     TurnChoice, VisibleState,
 };
-use crate::store::{append_jsonl, read_json, resolve_store_paths, world_file_paths, write_json};
+use crate::store::{
+    acquire_world_commit_lock, append_jsonl, read_json, resolve_store_paths, world_file_paths,
+    write_json,
+};
 use crate::vn::{BuildVnPacketOptions, VnPacket, build_vn_packet};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -19,6 +22,7 @@ pub const TURN_COMMITS_FILENAME: &str = "turn_commits.jsonl";
 pub enum TurnCommitStatus {
     Prepared,
     Committed,
+    Failed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,6 +40,12 @@ pub struct TurnCommitEnvelope {
     pub render_packet_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit_record_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub world_court_verdict_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_stage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     pub created_at: String,
 }
 
@@ -63,6 +73,9 @@ impl TurnCommitEnvelope {
             response_path: None,
             render_packet_path: None,
             commit_record_path: None,
+            world_court_verdict_path: None,
+            failed_stage: None,
+            error: None,
             created_at,
         }
     }
@@ -84,7 +97,36 @@ impl TurnCommitEnvelope {
             response_path: Some(committed.response_path.clone()),
             render_packet_path: Some(committed.render_packet_path.clone()),
             commit_record_path: Some(committed.commit_record_path.clone()),
+            world_court_verdict_path: committed.world_court_verdict_path.clone(),
+            failed_stage: None,
+            error: None,
             created_at: committed.committed_at.clone(),
+        }
+    }
+
+    #[must_use]
+    pub fn failed(
+        pending: &PendingAgentTurn,
+        parent_turn_id: &str,
+        failed_stage: &str,
+        error: String,
+        created_at: String,
+    ) -> Self {
+        Self {
+            schema_version: TURN_COMMIT_ENVELOPE_SCHEMA_VERSION.to_owned(),
+            world_id: pending.world_id.clone(),
+            turn_id: pending.turn_id.clone(),
+            parent_turn_id: parent_turn_id.to_owned(),
+            player_input: pending.player_input.clone(),
+            status: TurnCommitStatus::Failed,
+            pending_ref: pending.pending_ref.clone(),
+            response_path: None,
+            render_packet_path: None,
+            commit_record_path: None,
+            world_court_verdict_path: None,
+            failed_stage: Some(failed_stage.to_owned()),
+            error: Some(error),
+            created_at,
         }
     }
 }
@@ -111,6 +153,7 @@ pub fn repair_turn_materializations(
 ) -> Result<TurnMaterializationRepairReport> {
     let store_paths = resolve_store_paths(store_root)?;
     let files = world_file_paths(&store_paths, world_id);
+    let _world_lock = acquire_world_commit_lock(&files.dir, "repair_turn_materializations")?;
     let envelopes = read_turn_commit_envelopes(files.dir.join(TURN_COMMITS_FILENAME).as_path())?;
     let committed_envelopes = envelopes
         .iter()
@@ -170,6 +213,7 @@ pub fn repair_turn_materializations(
                 render_packet_path: render_packet_path.display().to_string(),
                 response_path: response_path.display().to_string(),
                 commit_record_path: commit_record_path.display().to_string(),
+                world_court_verdict_path: envelope.world_court_verdict_path.clone(),
                 committed_at: envelope.created_at.clone(),
                 packet,
             };
@@ -206,6 +250,7 @@ fn required_envelope_path(envelope: &TurnCommitEnvelope, field: &str) -> Result<
         "response_path" => envelope.response_path.as_deref(),
         "render_packet_path" => envelope.render_packet_path.as_deref(),
         "commit_record_path" => envelope.commit_record_path.as_deref(),
+        "world_court_verdict_path" => envelope.world_court_verdict_path.as_deref(),
         _ => None,
     };
     let Some(value) = value else {

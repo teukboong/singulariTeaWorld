@@ -25,13 +25,14 @@ use crate::store::{
 use crate::transfer::{ExportWorldOptions, ImportWorldOptions, export_world, import_world};
 use crate::turn::{AdvanceTurnOptions, advance_turn};
 use crate::visual_assets::{
-    BuildWorldVisualAssetsOptions, ImageGenerationJob, build_world_visual_assets,
+    BuildWorldVisualAssetsOptions, ImageGenerationJob, VN_ASSETS_DIR, build_world_visual_assets,
 };
 use crate::vn::{BuildVnPacketOptions, build_vn_packet, turn_cg_retry_path};
 use crate::world_db::{WorldDbRepairReport, repair_world_db};
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::fmt::Write as FmtWrite;
 use std::fs;
 #[cfg(not(test))]
 use std::fs::OpenOptions;
@@ -41,6 +42,7 @@ use std::path::{Path, PathBuf};
 #[cfg(not(test))]
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
+use std::time::Duration as StdDuration;
 
 const INDEX_HTML: &str = include_str!("../vn-web/index.html");
 const APP_JS: &str = include_str!("../vn-web/app.js");
@@ -56,6 +58,8 @@ const WEBGPT_IMAGE_CDP_PORT_ENV: &str = "SINGULARI_WORLD_WEBGPT_IMAGE_CDP_PORT";
 const DEFAULT_WEBGPT_TEXT_CDP_PORT: u16 = 9238;
 const DEFAULT_WEBGPT_IMAGE_CDP_PORT: u16 = 9239;
 const INITIAL_AGENT_TURN_INPUT: &str = "세계 개막";
+const VN_TOKEN_HEADER: &str = "X-Singulari-VN-Token";
+const VN_REQUEST_TIMEOUT_SECS: u64 = 5;
 const VN_CHOOSE_RESPONSE_SCHEMA_VERSION: &str = "singulari.vn_choose_response.v1";
 const VN_RUNTIME_STATUS_SCHEMA_VERSION: &str = "singulari.vn_runtime_status.v1";
 const VN_CG_GALLERY_SCHEMA_VERSION: &str = "singulari.vn_cg_gallery.v1";
@@ -299,6 +303,7 @@ struct VnCgGalleryItem {
 struct VnServerState {
     store_root: Option<PathBuf>,
     world_id: Mutex<String>,
+    vn_token: String,
     #[cfg(not(test))]
     host_worker: Mutex<Option<Child>>,
 }
@@ -307,6 +312,7 @@ struct VnServerState {
 struct HttpRequest {
     method: String,
     path: String,
+    headers: Vec<(String, String)>,
     body: Vec<u8>,
 }
 
@@ -329,6 +335,7 @@ pub fn serve_vn(options: &VnServeOptions) -> Result<()> {
     let state = VnServerState {
         store_root: options.store_root.clone(),
         world_id: Mutex::new(world_id),
+        vn_token: generate_vn_token()?,
         #[cfg(not(test))]
         host_worker: Mutex::new(None),
     };
@@ -344,6 +351,9 @@ pub fn serve_vn(options: &VnServeOptions) -> Result<()> {
     for stream in listener.incoming() {
         match stream {
             Ok(mut stream) => {
+                if let Err(error) = configure_vn_stream(&stream) {
+                    eprintln!("vn server stream timeout setup failed: {error}");
+                }
                 let response = match read_request(&mut stream) {
                     Ok(request) => route_request(&state, &request),
                     Err(error) => error_response("400 Bad Request", error.to_string()),
@@ -372,9 +382,14 @@ fn route_request(state: &VnServerState, request: &HttpRequest) -> HttpResponse {
     if let Some(asset_path) = path.strip_prefix("/world-assets/") {
         return world_asset_response(state, asset_path);
     }
+    if is_mutating_vn_route(request.method.as_str(), path)
+        && let Err(error) = authorize_vn_mutation(state, request)
+    {
+        return error_response("403 Forbidden", error.to_string());
+    }
     match (request.method.as_str(), path) {
         ("GET", "/" | "/index.html") => html_response(INDEX_HTML),
-        ("GET", "/app.js") => static_response("application/javascript; charset=utf-8", APP_JS),
+        ("GET", "/app.js") => app_js_response(state),
         ("GET", "/styles.css") => static_response("text/css; charset=utf-8", STYLES_CSS),
         ("GET", "/api/health") => json_response(&serde_json::json!({
             "ok": true,
@@ -408,6 +423,38 @@ fn world_asset_response(state: &VnServerState, asset_path: &str) -> HttpResponse
         },
         Err(error) => error_response("404 Not Found", error.to_string()),
     }
+}
+
+fn app_js_response(state: &VnServerState) -> HttpResponse {
+    match serde_json::to_string(&state.vn_token) {
+        Ok(token) => static_response(
+            "application/javascript; charset=utf-8",
+            &format!("globalThis.SINGULARI_VN_TOKEN = {token};\n{APP_JS}"),
+        ),
+        Err(error) => error_response("500 Internal Server Error", error.to_string()),
+    }
+}
+
+fn is_mutating_vn_route(method: &str, path: &str) -> bool {
+    method == "POST" && path.starts_with("/api/vn/")
+}
+
+fn authorize_vn_mutation(state: &VnServerState, request: &HttpRequest) -> Result<()> {
+    let Some(token) = request_header(request, VN_TOKEN_HEADER) else {
+        bail!("VN mutation missing {VN_TOKEN_HEADER}");
+    };
+    if token == state.vn_token {
+        return Ok(());
+    }
+    bail!("VN mutation rejected invalid {VN_TOKEN_HEADER}");
+}
+
+fn request_header<'a>(request: &'a HttpRequest, name: &str) -> Option<&'a str> {
+    request
+        .headers
+        .iter()
+        .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
 }
 
 fn world_list_response(state: &VnServerState) -> HttpResponse {
@@ -1565,17 +1612,21 @@ fn read_world_asset(state: &VnServerState, asset_path: &str) -> Result<(&'static
     if relative.as_os_str().is_empty() {
         bail!("world asset path missing relative file: {asset_path}");
     }
+    let public_root_relative = Path::new(VN_ASSETS_DIR);
+    if !relative.starts_with(public_root_relative) {
+        bail!("world asset path is not public: {asset_path}");
+    }
+    if !public_asset_extension_allowed(&relative) {
+        bail!("world asset extension is not public: {asset_path}");
+    }
     let store_paths = resolve_store_paths(state.store_root.as_deref())?;
     let files = world_file_paths(&store_paths, world_id);
+    let public_root = files.dir.join(public_root_relative);
     let path = files.dir.join(&relative);
-    if !path.starts_with(&files.dir) || !path.is_file() {
+    if !path.starts_with(&public_root) || !path.is_file() {
         bail!("world asset not found: {asset_path}");
     }
-    let metadata = fs::symlink_metadata(&path)
-        .with_context(|| format!("failed to stat {}", path.display()))?;
-    if metadata.file_type().is_symlink() {
-        bail!("world asset rejected symlink: {asset_path}");
-    }
+    reject_asset_symlink_path(&files.dir, &relative, asset_path)?;
     let content_type = asset_content_type(&path);
     let body = fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
     Ok((content_type, body))
@@ -1681,6 +1732,29 @@ fn safe_asset_component(value: &str) -> bool {
         && value
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+}
+
+fn public_asset_extension_allowed(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|extension| extension.to_str()),
+        Some("jpg" | "jpeg" | "png" | "webp")
+    )
+}
+
+fn reject_asset_symlink_path(root: &Path, relative: &Path, asset_path: &str) -> Result<()> {
+    let mut cursor = root.to_path_buf();
+    for component in relative.components() {
+        cursor.push(component);
+        if !cursor.exists() {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(&cursor)
+            .with_context(|| format!("failed to stat {}", cursor.display()))?;
+        if metadata.file_type().is_symlink() {
+            bail!("world asset rejected symlink: {asset_path}");
+        }
+    }
+    Ok(())
 }
 
 fn asset_content_type(path: &Path) -> &'static str {
@@ -1792,6 +1866,29 @@ fn ensure_allowed_vn_host(host: &str) -> Result<()> {
     bail!("vn server host must be loopback or Tailscale-scoped: got {host}");
 }
 
+fn configure_vn_stream(stream: &TcpStream) -> Result<()> {
+    let timeout = Some(StdDuration::from_secs(VN_REQUEST_TIMEOUT_SECS));
+    stream
+        .set_read_timeout(timeout)
+        .context("vn server set read timeout failed")?;
+    stream
+        .set_write_timeout(timeout)
+        .context("vn server set write timeout failed")
+}
+
+fn generate_vn_token() -> Result<String> {
+    let mut bytes = [0_u8; 32];
+    fs::File::open("/dev/urandom")
+        .context("failed to open /dev/urandom for VN token")?
+        .read_exact(&mut bytes)
+        .context("failed to read VN token entropy")?;
+    let mut token = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(&mut token, "{byte:02x}").context("failed to encode VN token")?;
+    }
+    Ok(token)
+}
+
 fn is_tailscale_ipv4(addr: IpAddr) -> bool {
     let IpAddr::V4(addr) = addr else {
         return false;
@@ -1828,6 +1925,7 @@ fn read_request(stream: &mut TcpStream) -> Result<HttpRequest> {
     let method = parts.next().context("missing HTTP method")?.to_owned();
     let path = parts.next().context("missing HTTP path")?.to_owned();
     let content_length = content_length(headers)?;
+    let parsed_headers = parse_headers(headers)?;
     let body_start = header_end + 4;
     while buffer.len() < body_start + content_length {
         let read = stream
@@ -1845,6 +1943,7 @@ fn read_request(stream: &mut TcpStream) -> Result<HttpRequest> {
     Ok(HttpRequest {
         method,
         path,
+        headers: parsed_headers,
         body: buffer[body_start..body_end].to_vec(),
     })
 }
@@ -1866,6 +1965,20 @@ fn content_length(headers: &str) -> Result<usize> {
         }
     }
     Ok(0)
+}
+
+fn parse_headers(headers: &str) -> Result<Vec<(String, String)>> {
+    let mut parsed = Vec::new();
+    for line in headers.lines().skip(1) {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            bail!("invalid HTTP header line");
+        };
+        parsed.push((name.trim().to_owned(), value.trim().to_owned()));
+    }
+    Ok(parsed)
 }
 
 fn write_response(stream: &mut TcpStream, response: &HttpResponse) -> Result<()> {
@@ -1933,13 +2046,14 @@ fn choose_request_body(input: &str) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use super::HttpRequest;
     use super::{
-        DEFAULT_HOST, VnAgentPendingResponse, VnCgRetryRequest, VnNewWorldRequest,
-        VnSaveWorldResponse, VnServeOptions, VnServerState, VnWorldSwitchResponse, cg_gallery,
-        cg_retry_response, choose_request_body, choose_response, ensure_allowed_vn_host,
-        initial_vn_world_id, load_request_body, load_world_response, new_world, read_world_asset,
-        repair_world_db_response, runtime_status, save_request_body, save_world_response,
-        validate_vn_input, world_list,
+        DEFAULT_HOST, VN_TOKEN_HEADER, VnAgentPendingResponse, VnCgRetryRequest, VnNewWorldRequest,
+        VnSaveWorldResponse, VnServeOptions, VnServerState, VnWorldSwitchResponse, app_js_response,
+        cg_gallery, cg_retry_response, choose_request_body, choose_response,
+        ensure_allowed_vn_host, initial_vn_world_id, load_request_body, load_world_response,
+        new_world, read_world_asset, repair_world_db_response, route_request, runtime_status,
+        save_request_body, save_world_response, validate_vn_input, world_list,
     };
     use crate::backend_selection::{WorldTextBackend, WorldVisualBackend};
     use crate::job_ledger::{WorldJobKind, WorldJobStatus};
@@ -1961,6 +2075,46 @@ mod tests {
         assert!(validate_vn_input("7").is_ok());
         assert!(validate_vn_input("8").is_err());
         assert!(validate_vn_input("문서관을 본다").is_err());
+    }
+
+    #[test]
+    fn route_request_requires_token_for_vn_mutations() {
+        let state = VnServerState {
+            store_root: None,
+            world_id: Mutex::new(String::new()),
+            vn_token: "test-vn-token".to_owned(),
+        };
+        let missing = HttpRequest {
+            method: "POST".to_owned(),
+            path: "/api/vn/not-real".to_owned(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        };
+        assert_eq!(route_request(&state, &missing).status, "403 Forbidden");
+
+        let valid = HttpRequest {
+            method: "POST".to_owned(),
+            path: "/api/vn/not-real".to_owned(),
+            headers: vec![(VN_TOKEN_HEADER.to_owned(), "test-vn-token".to_owned())],
+            body: Vec::new(),
+        };
+        assert_eq!(route_request(&state, &valid).status, "404 Not Found");
+    }
+
+    #[test]
+    fn app_js_response_embeds_process_token() -> anyhow::Result<()> {
+        let state = VnServerState {
+            store_root: None,
+            world_id: Mutex::new(String::new()),
+            vn_token: "test-vn-token".to_owned(),
+        };
+
+        let response = app_js_response(&state);
+
+        assert_eq!(response.status, "200 OK");
+        let body = String::from_utf8(response.body)?;
+        assert!(body.starts_with("globalThis.SINGULARI_VN_TOKEN = \"test-vn-token\";"));
+        Ok(())
     }
 
     #[test]
@@ -2003,6 +2157,7 @@ premise:
         let state = VnServerState {
             store_root: Some(store.clone()),
             world_id: Mutex::new("stw_vn_server".to_owned()),
+            vn_token: "test-vn-token".to_owned(),
         };
         let response = choose_response(&state, &choose_request_body("6 세아에게 낮게 묻는다"));
         assert_eq!(response.status, "200 OK");
@@ -2044,6 +2199,7 @@ premise:
         let state = VnServerState {
             store_root: Some(store),
             world_id: Mutex::new("stw_vn_cg_retry".to_owned()),
+            vn_token: "test-vn-token".to_owned(),
         };
         let body = serde_json::to_vec(&VnCgRetryRequest { turn_id: None })?;
         let response = cg_retry_response(&state, &body);
@@ -2085,6 +2241,7 @@ premise:
         let state = VnServerState {
             store_root: Some(store),
             world_id: Mutex::new("stw_launcher_base".to_owned()),
+            vn_token: "test-vn-token".to_owned(),
         };
 
         let initial_list = world_list(&state)?;
@@ -2129,6 +2286,7 @@ premise:
                 host: DEFAULT_HOST.to_owned(),
                 port: 4188,
             })?),
+            vn_token: "test-vn-token".to_owned(),
         };
 
         assert!(state.world_id().is_err());
@@ -2176,6 +2334,7 @@ premise:
         let state = VnServerState {
             store_root: Some(store),
             world_id: Mutex::new("stw_vn_runtime_status".to_owned()),
+            vn_token: "test-vn-token".to_owned(),
         };
 
         let status = runtime_status(&state)?;
@@ -2249,6 +2408,7 @@ premise:
         let state = VnServerState {
             store_root: Some(store),
             world_id: Mutex::new("stw_vn_repair_db".to_owned()),
+            vn_token: "test-vn-token".to_owned(),
         };
 
         let response = repair_world_db_response(&state);
@@ -2295,6 +2455,7 @@ premise:
         let state = VnServerState {
             store_root: Some(store),
             world_id: Mutex::new("stw_vn_gallery".to_owned()),
+            vn_token: "test-vn-token".to_owned(),
         };
 
         let gallery = cg_gallery(&state)?;
@@ -2353,6 +2514,7 @@ premise:
         let state = VnServerState {
             store_root: Some(target_store.clone()),
             world_id: Mutex::new("stw_vn_current".to_owned()),
+            vn_token: "test-vn-token".to_owned(),
         };
         let save_response = save_world_response(&state, &save_request_body(None));
         assert_eq!(save_response.status, "200 OK");
@@ -2403,11 +2565,83 @@ premise:
         let state = VnServerState {
             store_root: Some(store),
             world_id: Mutex::new("stw_vn_asset".to_owned()),
+            vn_token: "test-vn-token".to_owned(),
         };
         let (content_type, body) =
             read_world_asset(&state, "stw_vn_asset/assets/vn/stage_background.png")?;
         assert_eq!(content_type, "image/png");
         assert_eq!(body, b"png-bytes");
+        Ok(())
+    }
+
+    #[test]
+    fn world_asset_route_rejects_hidden_world_state() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(
+            &seed_path,
+            r#"
+schema_version: singulari.world_seed.v1
+world_id: stw_vn_hidden
+title: "숨김 세계"
+premise:
+  genre: "중세 판타지"
+  protagonist: "변경 순찰자, 남자 주인공"
+"#,
+        )?;
+        init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+        let state = VnServerState {
+            store_root: Some(store),
+            world_id: Mutex::new("stw_vn_hidden".to_owned()),
+            vn_token: "test-vn-token".to_owned(),
+        };
+        let result = read_world_asset(&state, "stw_vn_hidden/hidden_state.json");
+        let Err(error) = result else {
+            anyhow::bail!("hidden_state.json should not be served as a world asset");
+        };
+        assert!(format!("{error:#}").contains("world asset path is not public"));
+        Ok(())
+    }
+
+    #[test]
+    fn world_asset_route_rejects_non_image_public_asset_files() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(
+            &seed_path,
+            r#"
+schema_version: singulari.world_seed.v1
+world_id: stw_vn_json_asset
+title: "에셋 세계"
+premise:
+  genre: "중세 판타지"
+  protagonist: "변경 순찰자, 남자 주인공"
+"#,
+        )?;
+        let initialized = init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+        let asset_dir = initialized.world_dir.join(VN_ASSETS_DIR);
+        std::fs::create_dir_all(&asset_dir)?;
+        std::fs::write(asset_dir.join("manifest.json"), "{}")?;
+        let state = VnServerState {
+            store_root: Some(store),
+            world_id: Mutex::new("stw_vn_json_asset".to_owned()),
+            vn_token: "test-vn-token".to_owned(),
+        };
+        let result = read_world_asset(&state, "stw_vn_json_asset/assets/vn/manifest.json");
+        let Err(error) = result else {
+            anyhow::bail!("non-image files under assets/vn should not be served");
+        };
+        assert!(format!("{error:#}").contains("world asset extension is not public"));
         Ok(())
     }
 }

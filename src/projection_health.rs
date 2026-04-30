@@ -251,6 +251,10 @@ fn turn_commit_health(
         .iter()
         .filter(|envelope| envelope.status == TurnCommitStatus::Committed)
         .count();
+    let failed_count = envelopes
+        .iter()
+        .filter(|envelope| envelope.status == TurnCommitStatus::Failed)
+        .count();
     let mut errors = Vec::new();
     for envelope in &envelopes {
         if envelope.world_id != world_id {
@@ -259,8 +263,17 @@ fn turn_commit_health(
                 envelope.world_id, envelope.turn_id
             ));
         }
-        if envelope.status == TurnCommitStatus::Committed {
-            errors.extend(missing_committed_materialization_errors(envelope));
+        match envelope.status {
+            TurnCommitStatus::Committed => {
+                errors.extend(missing_committed_materialization_errors(envelope));
+            }
+            TurnCommitStatus::Failed => errors.push(format!(
+                "failed turn commit recorded: turn={}, stage={}, error={}",
+                envelope.turn_id,
+                envelope.failed_stage.as_deref().unwrap_or("<unknown>"),
+                envelope.error.as_deref().unwrap_or("<missing>")
+            )),
+            TurnCommitStatus::Prepared => {}
         }
     }
     if let Some(snapshot) = latest_snapshot {
@@ -281,7 +294,7 @@ fn turn_commit_health(
     }
     component_from_errors(
         "turn_commit",
-        format!("prepared={prepared_count}, committed={committed_count}"),
+        format!("prepared={prepared_count}, committed={committed_count}, failed={failed_count}"),
         Vec::new(),
         errors,
     )
@@ -305,6 +318,14 @@ fn missing_committed_materialization_errors(envelope: &TurnCommitEnvelope) -> Ve
                 envelope.turn_id
             )),
         }
+    }
+    if let Some(path) = envelope.world_court_verdict_path.as_deref()
+        && !Path::new(path).is_file()
+    {
+        errors.push(format!(
+            "committed turn optional audit artifact missing: turn={}, field=world_court_verdict_path, path={path}",
+            envelope.turn_id
+        ));
     }
     errors
 }
@@ -458,33 +479,15 @@ where
 }
 
 fn read_canon_events(path: &Path) -> ComponentRead<Vec<CanonEvent>> {
-    let raw = match fs::read_to_string(path) {
-        Ok(raw) => raw,
-        Err(error) => {
-            return ComponentRead {
-                value: None,
-                errors: vec![format!("canon_events unreadable: {error:#}")],
-            };
-        }
-    };
-    let mut events = Vec::new();
-    let mut errors = Vec::new();
-    for (index, line) in raw.lines().enumerate() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<CanonEvent>(line) {
-            Ok(event) => events.push(event),
-            Err(error) => errors.push(format!("canon_events line {} invalid: {error}", index + 1)),
-        }
-    }
-    ComponentRead {
-        value: if errors.is_empty() {
-            Some(events)
-        } else {
-            None
+    match crate::event_ledger::load_world_events(path) {
+        Ok(events) => ComponentRead {
+            value: Some(events),
+            errors: Vec::new(),
         },
-        errors,
+        Err(error) => ComponentRead {
+            value: None,
+            errors: vec![format!("canon_events unreadable: {error:#}")],
+        },
     }
 }
 
@@ -595,6 +598,9 @@ premise:
                 ),
                 render_packet_path: None,
                 commit_record_path: None,
+                world_court_verdict_path: None,
+                failed_stage: None,
+                error: None,
                 created_at: "2026-04-29T00:00:00Z".to_owned(),
             },
         )?;
@@ -607,6 +613,53 @@ premise:
                 && component.errors.iter().any(|error| {
                     error.contains("committed turn materialization missing")
                         && error.contains("missing-agent-response")
+                })
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn projection_health_fails_recorded_failed_turn_commit() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(&seed_path, seed_body())?;
+        let initialized = init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+        append_jsonl(
+            &initialized.world_dir.join("turn_commits.jsonl"),
+            &TurnCommitEnvelope {
+                schema_version: TURN_COMMIT_ENVELOPE_SCHEMA_VERSION.to_owned(),
+                world_id: "stw_projection_health".to_owned(),
+                turn_id: "turn_0001".to_owned(),
+                parent_turn_id: "turn_0000".to_owned(),
+                player_input: "1".to_owned(),
+                status: TurnCommitStatus::Failed,
+                pending_ref: "agent_bridge/pending_turn.json".to_owned(),
+                response_path: None,
+                render_packet_path: None,
+                commit_record_path: None,
+                world_court_verdict_path: None,
+                failed_stage: Some("agent_commit_after_prepare".to_owned()),
+                error: Some("simulated materialization failure".to_owned()),
+                created_at: "2026-04-29T00:00:00Z".to_owned(),
+            },
+        )?;
+
+        let report = build_projection_health_report(Some(&store), "stw_projection_health")?;
+
+        assert_eq!(report.status, ProjectionHealthStatus::Failed);
+        assert!(report.components.iter().any(|component| {
+            component.component == "turn_commit"
+                && component
+                    .detail
+                    .contains("prepared=0, committed=0, failed=1")
+                && component.errors.iter().any(|error| {
+                    error.contains("failed turn commit recorded")
+                        && error.contains("agent_commit_after_prepare")
                 })
         }));
         Ok(())

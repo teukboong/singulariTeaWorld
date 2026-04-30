@@ -12,15 +12,15 @@ use singulari_world::{
     render_packet_markdown, render_projection_health_report, render_resume_pack_markdown,
     render_started_world_report, repair_extra_memory_projection, repair_turn_materializations,
     repair_world_db, resolve_world_id, route_chat_input, search_world_db, start_world,
-    validate_world, world_db_stats,
+    validate_world, world_commit_lock_status, world_db_stats,
 };
 use singulari_world::{
     BuildCodexViewOptions, BuildResumePackOptions, BuildVnPacketOptions,
     BuildWorldVisualAssetsOptions, ChatRouteOptions, ClaimVisualJobOptions, CodexViewSection,
     CompleteVisualJobOptions, ExportWorldOptions, ImportWorldOptions, ReleaseVisualJobClaimOptions,
     StartWorldOptions, VnServeOptions, build_host_supervisor_plan, build_projection_health_report,
-    build_vn_packet, build_world_visual_assets, claim_visual_job, complete_visual_job,
-    export_world, import_world, release_visual_job_claim, serve_vn,
+    build_vn_packet, build_world_visual_assets, claim_visual_job, clear_world_commit_lock,
+    complete_visual_job, export_world, import_world, release_visual_job_claim, serve_vn,
 };
 use std::path::{Path, PathBuf};
 
@@ -221,6 +221,30 @@ enum Commands {
     RepairTurnMaterializations {
         #[arg(long)]
         world_id: Option<String>,
+
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Inspect the world commit lock for one world.
+    WorldLockStatus {
+        #[arg(long)]
+        world_id: Option<String>,
+
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Clear a world commit lock after operator inspection.
+    WorldLockClear {
+        #[arg(long)]
+        world_id: Option<String>,
+
+        #[arg(long)]
+        force: bool,
+
+        #[arg(long, default_value = "operator_confirmed_stale_lock")]
+        reason: String,
 
         #[arg(long)]
         json: bool,
@@ -676,6 +700,21 @@ fn dispatch(cli: Cli) -> Result<()> {
         Commands::RepairTurnMaterializations { world_id, json } => {
             handle_repair_turn_materializations(store_root.as_deref(), world_id.as_deref(), json)?;
         }
+        Commands::WorldLockStatus { world_id, json } => {
+            handle_world_lock_status(store_root.as_deref(), world_id.as_deref(), json)?;
+        }
+        Commands::WorldLockClear {
+            world_id,
+            force,
+            reason,
+            json,
+        } => handle_world_lock_clear(
+            store_root.as_deref(),
+            world_id.as_deref(),
+            force,
+            reason.as_str(),
+            json,
+        )?,
         Commands::Active { json } => handle_active(store_root.as_deref(), json)?,
         Commands::DbStats { world_id, json } => {
             handle_db_stats(store_root.as_deref(), world_id.as_deref(), json)?;
@@ -1213,6 +1252,56 @@ fn handle_repair_turn_materializations(
             "commit_records_repaired: {}",
             report.commit_records_repaired
         );
+    }
+    Ok(())
+}
+
+fn handle_world_lock_status(
+    store_root: Option<&Path>,
+    world_id: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    let world_id = resolve_world_id(store_root, world_id)?;
+    let status = world_commit_lock_status(store_root, world_id.as_str())?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&status)?);
+    } else {
+        println!("world: {}", status.world_id);
+        println!("locked: {}", status.locked);
+        println!("lock_path: {}", status.lock_path);
+        if let Some(lock) = status.lock {
+            println!("holder: {}", lock.holder);
+            println!("pid: {}", lock.pid);
+            println!("acquired_at: {}", lock.acquired_at);
+        }
+        if let Some(error) = status.read_error {
+            println!("read_error: {error}");
+        }
+    }
+    Ok(())
+}
+
+fn handle_world_lock_clear(
+    store_root: Option<&Path>,
+    world_id: Option<&str>,
+    force: bool,
+    reason: &str,
+    json: bool,
+) -> Result<()> {
+    let world_id = resolve_world_id(store_root, world_id)?;
+    let report = clear_world_commit_lock(store_root, world_id.as_str(), force, reason)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("world: {}", report.world_id);
+        println!("cleared: {}", report.cleared);
+        println!("lock_path: {}", report.lock_path);
+        println!("reason: {}", report.reason);
+        if let Some(lock) = report.previous_lock {
+            println!("previous_holder: {}", lock.holder);
+            println!("previous_pid: {}", lock.pid);
+            println!("previous_acquired_at: {}", lock.acquired_at);
+        }
     }
     Ok(())
 }

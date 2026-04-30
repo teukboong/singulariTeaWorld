@@ -339,6 +339,8 @@ fn codex_timeline_entry(event: CanonEventRow) -> CodexTimelineEntry {
         turn_id: event.turn_id,
         event_id: event.event_id,
         kind: event.kind,
+        event_kind: event.event_kind,
+        authority: event.authority,
         summary: redact_guide_choice_public_hints(&event.summary),
     }
 }

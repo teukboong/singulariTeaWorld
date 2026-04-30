@@ -148,6 +148,7 @@ pub(in crate::runtime) fn dispatch_visual_job_via_webgpt(
         "image_session_kind": image_session_kind.as_str(),
         "reference_paths": reference_paths.as_slice(),
         "conversation_id": conversation_id.as_deref(),
+        "timeout_secs": options.webgpt_timeout_secs,
         "prompt_path": prompt_path.display().to_string(),
         "result_path": result_path.display().to_string(),
         "stdout_path": stdout_path.display().to_string(),

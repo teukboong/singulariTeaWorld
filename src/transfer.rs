@@ -1,6 +1,7 @@
 use crate::models::WorldRecord;
 use crate::store::{
     ActiveWorldBinding, WORLD_FILENAME, read_json, resolve_store_paths, save_active_world,
+    validate_safe_id,
 };
 use crate::validate::{ValidationStatus, validate_world};
 use crate::world_db::{WorldDbRepairReport, repair_world_db};
@@ -108,6 +109,7 @@ pub fn export_world(options: &ExportWorldOptions) -> Result<ExportWorldReport> {
 pub fn import_world(options: &ImportWorldOptions) -> Result<ImportWorldReport> {
     let bundle_root = resolve_bundle_root(options.bundle.as_path())?;
     let world: WorldRecord = read_json(&bundle_root.join(WORLD_FILENAME))?;
+    validate_safe_id("world_id", world.world_id.as_str())?;
     let store_paths = resolve_store_paths(options.store_root.as_deref())?;
     let world_dir = store_paths.worlds_dir.join(world.world_id.as_str());
     if world_dir.exists() {
@@ -231,7 +233,9 @@ fn should_skip_export_file(file_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{ExportWorldOptions, ImportWorldOptions, export_world, import_world};
-    use crate::store::{InitWorldOptions, init_world, load_active_world};
+    use crate::store::{
+        InitWorldOptions, WORLD_FILENAME, init_world, load_active_world, read_json,
+    };
     use tempfile::tempdir;
 
     #[test]
@@ -271,6 +275,55 @@ premise:
         assert_eq!(imported.world_id, "stw_transfer");
         let active = load_active_world(Some(target_store.as_path()))?;
         assert_eq!(active.world_id, "stw_transfer");
+        Ok(())
+    }
+
+    #[test]
+    fn import_world_rejects_unsafe_bundle_world_id() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let seed_path = temp.path().join("seed.yaml");
+        let source_store = temp.path().join("source-store");
+        let target_store = temp.path().join("target-store");
+        let bundle = temp.path().join("bundle");
+        std::fs::write(
+            &seed_path,
+            r#"
+schema_version: singulari.world_seed.v1
+world_id: stw_transfer_unsafe
+title: "전송 세계"
+premise:
+  genre: "중세 판타지"
+  protagonist: "변경 순찰자, 남자 주인공"
+"#,
+        )?;
+        init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(source_store.clone()),
+            session_id: Some("session_transfer_unsafe".to_owned()),
+        })?;
+        export_world(&ExportWorldOptions {
+            store_root: Some(source_store),
+            world_id: "stw_transfer_unsafe".to_owned(),
+            output: bundle.clone(),
+        })?;
+        let world_path = bundle.join(WORLD_FILENAME);
+        let mut world: serde_json::Value = read_json(&world_path)?;
+        world["world_id"] = serde_json::Value::String("../../escape".to_owned());
+        std::fs::write(
+            &world_path,
+            format!("{}\n", serde_json::to_string_pretty(&world)?),
+        )?;
+
+        let result = import_world(&ImportWorldOptions {
+            store_root: Some(target_store.clone()),
+            bundle,
+            activate: false,
+        });
+        let Err(error) = result else {
+            anyhow::bail!("unsafe bundle world_id should fail import");
+        };
+        assert!(format!("{error:#}").contains("world_id must contain only ASCII"));
+        assert!(!temp.path().join("escape").exists());
         Ok(())
     }
 }

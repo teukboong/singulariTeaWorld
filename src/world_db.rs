@@ -82,6 +82,10 @@ pub struct CanonEventRow {
     pub event_id: String,
     pub turn_id: String,
     pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<String>,
     pub visibility: String,
     pub summary: String,
 }
@@ -275,24 +279,27 @@ pub fn sync_world_db_materialized_projections(
 /// Returns an error when the database is missing, cannot be migrated, or any
 /// projection write fails.
 pub fn record_turn_in_world_db(input: &RecordTurnDbInput<'_>) -> Result<()> {
-    let conn = open_world_db(input.world_dir)?;
+    let mut conn = open_world_db(input.world_dir)?;
     migrate_world_db(&conn)?;
-    upsert_world(&conn, input.world)?;
+    let tx = conn
+        .transaction()
+        .context("world.db record turn transaction begin failed")?;
+    upsert_world(&tx, input.world)?;
     upsert_entity_records(
-        &conn,
+        &tx,
         input.entities,
         input.turn_log_entry.created_at.as_str(),
     )?;
-    insert_canon_event(&conn, input.canon_event)?;
-    insert_timeline_event(&conn, input.canon_event)?;
+    insert_canon_event(&tx, input.canon_event)?;
+    insert_timeline_event(&tx, input.canon_event)?;
     insert_state_changes(
-        &conn,
+        &tx,
         input.canon_event,
         input.turn_log_entry.created_at.as_str(),
     )?;
-    insert_structured_entity_updates(&conn, input.structured_updates)?;
+    insert_structured_entity_updates(&tx, input.structured_updates)?;
     insert_character_memory(
-        &conn,
+        &tx,
         input.world.world_id.as_str(),
         "char:protagonist",
         PLAYER_VISIBLE,
@@ -301,34 +308,36 @@ pub fn record_turn_in_world_db(input: &RecordTurnDbInput<'_>) -> Result<()> {
         input.turn_log_entry.created_at.as_str(),
     )?;
     upsert_snapshot(
-        &conn,
+        &tx,
         input.snapshot,
         input.turn_log_entry.created_at.as_str(),
     )?;
     upsert_render_packet(
-        &conn,
+        &tx,
         input.render_packet,
         input.turn_log_entry.created_at.as_str(),
     )?;
     upsert_materialized_projection_files(
-        &conn,
+        &tx,
         input.world_dir,
         input.world.world_id.as_str(),
         input.turn_log_entry.created_at.as_str(),
     )?;
     upsert_context_capsule_audit(
-        &conn,
+        &tx,
         input.world_dir,
         input.world.world_id.as_str(),
         input.turn_log_entry.created_at.as_str(),
     )?;
     refresh_due_chapter_summary_for_conn(
-        &conn,
+        &tx,
         input.world.world_id.as_str(),
         DEFAULT_AUTO_CHAPTER_EVENT_COUNT,
         input.turn_log_entry.created_at.as_str(),
     )?;
-    rebuild_world_search_index_for_conn(&conn, input.world.world_id.as_str())?;
+    rebuild_world_search_index_for_conn(&tx, input.world.world_id.as_str())?;
+    tx.commit()
+        .context("world.db record turn transaction commit failed")?;
     Ok(())
 }
 
@@ -440,7 +449,7 @@ pub fn recent_canon_events(
     let conn = open_readonly_world_db(&world_db_path(world_dir))?;
     let mut stmt = conn
         .prepare(
-            "SELECT event_id, turn_id, kind, visibility, summary
+            "SELECT event_id, turn_id, kind, event_kind, authority, visibility, summary
              FROM canon_events
              WHERE world_id = ?1
              ORDER BY turn_id DESC
@@ -453,8 +462,10 @@ pub fn recent_canon_events(
                 event_id: row.get(0)?,
                 turn_id: row.get(1)?,
                 kind: row.get(2)?,
-                visibility: row.get(3)?,
-                summary: redact_guide_choice_public_hints(&row.get::<_, String>(4)?),
+                event_kind: row.get(3)?,
+                authority: row.get(4)?,
+                visibility: row.get(5)?,
+                summary: redact_guide_choice_public_hints(&row.get::<_, String>(6)?),
             })
         })
         .context("world.db recent canon events query failed")?;
@@ -783,22 +794,25 @@ pub fn repair_world_db(world_dir: &Path, world_id: &str) -> Result<WorldDbRepair
         read_structured_updates_jsonl(&world_dir.join(ENTITY_UPDATES_FILENAME))?;
     let snapshots = read_session_snapshots(world_dir)?;
     let render_packets = read_session_render_packets(world_dir)?;
-    let conn = open_world_db(world_dir)?;
+    let mut conn = open_world_db(world_dir)?;
     migrate_world_db(&conn)?;
-    clear_world_rows(&conn, world_id)?;
-    upsert_world(&conn, &world)?;
-    upsert_player_knowledge(&conn, &player_knowledge)?;
-    upsert_hidden_state(&conn, &hidden_state)?;
-    upsert_entity_records(&conn, &entities, world.updated_at.as_str())?;
+    let tx = conn
+        .transaction()
+        .context("world.db repair transaction begin failed")?;
+    clear_world_rows(&tx, world_id)?;
+    upsert_world(&tx, &world)?;
+    upsert_player_knowledge(&tx, &player_knowledge)?;
+    upsert_hidden_state(&tx, &hidden_state)?;
+    upsert_entity_records(&tx, &entities, world.updated_at.as_str())?;
     if let Some(first_event) = canon_events.first() {
-        upsert_world_facts(&conn, &world, first_event.event_id.as_str())?;
+        upsert_world_facts(&tx, &world, first_event.event_id.as_str())?;
     }
     for event in &canon_events {
-        insert_canon_event(&conn, event)?;
-        insert_timeline_event(&conn, event)?;
-        insert_state_changes(&conn, event, world.updated_at.as_str())?;
+        insert_canon_event(&tx, event)?;
+        insert_timeline_event(&tx, event)?;
+        insert_state_changes(&tx, event, world.updated_at.as_str())?;
         insert_character_memory(
-            &conn,
+            &tx,
             world_id,
             "char:protagonist",
             if event.visibility == SYSTEM_VISIBLE {
@@ -812,23 +826,25 @@ pub fn repair_world_db(world_dir: &Path, world_id: &str) -> Result<WorldDbRepair
         )?;
     }
     for updates in &structured_updates {
-        insert_structured_entity_updates(&conn, updates)?;
+        insert_structured_entity_updates(&tx, updates)?;
     }
     if snapshots.is_empty() {
-        upsert_snapshot(&conn, &latest_snapshot, world.updated_at.as_str())?;
+        upsert_snapshot(&tx, &latest_snapshot, world.updated_at.as_str())?;
     } else {
         for snapshot in &snapshots {
-            upsert_snapshot(&conn, snapshot, world.updated_at.as_str())?;
+            upsert_snapshot(&tx, snapshot, world.updated_at.as_str())?;
         }
     }
     for packet in &render_packets {
-        upsert_render_packet(&conn, packet, world.updated_at.as_str())?;
+        upsert_render_packet(&tx, packet, world.updated_at.as_str())?;
     }
-    upsert_materialized_projection_files(&conn, world_dir, world_id, world.updated_at.as_str())?;
-    upsert_context_capsule_audit(&conn, world_dir, world_id, world.updated_at.as_str())?;
-    create_chapter_summary_for_open_events(&conn, world_id, 1, true, world.updated_at.as_str())?;
-    rebuild_world_search_index_for_conn(&conn, world_id)?;
-    let search_documents = count_world_rows(&conn, "world_search_fts", world_id)?;
+    upsert_materialized_projection_files(&tx, world_dir, world_id, world.updated_at.as_str())?;
+    upsert_context_capsule_audit(&tx, world_dir, world_id, world.updated_at.as_str())?;
+    create_chapter_summary_for_open_events(&tx, world_id, 1, true, world.updated_at.as_str())?;
+    rebuild_world_search_index_for_conn(&tx, world_id)?;
+    let search_documents = count_world_rows(&tx, "world_search_fts", world_id)?;
+    tx.commit()
+        .context("world.db repair transaction commit failed")?;
     Ok(WorldDbRepairReport {
         world_id: world_id.to_owned(),
         db_path: world_db_path(world_dir),
@@ -912,6 +928,8 @@ const WORLD_DB_SCHEMA_SQL: &str = r"
             occurred_at_world_time TEXT NOT NULL,
             visibility TEXT NOT NULL,
             kind TEXT NOT NULL,
+            event_kind TEXT,
+            authority TEXT,
             summary TEXT NOT NULL,
             location TEXT,
             evidence_source TEXT NOT NULL,
@@ -1205,6 +1223,7 @@ fn migrate_world_db(conn: &Connection) -> Result<()> {
     conn.execute_batch(WORLD_DB_SCHEMA_SQL)
         .context("world.db migration failed")?;
     ensure_chapter_summary_raw_json_column(conn)?;
+    ensure_canon_event_authority_columns(conn)?;
     conn.execute(
         "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema_version', ?1)",
         params![WORLD_DB_SCHEMA_VERSION],
@@ -1213,29 +1232,73 @@ fn migrate_world_db(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn ensure_chapter_summary_raw_json_column(conn: &Connection) -> Result<()> {
+fn ensure_canon_event_authority_columns(conn: &Connection) -> Result<()> {
+    ensure_column_exists(
+        conn,
+        "canon_events",
+        "event_kind",
+        "ALTER TABLE canon_events ADD COLUMN event_kind TEXT",
+    )?;
+    ensure_column_exists(
+        conn,
+        "canon_events",
+        "authority",
+        "ALTER TABLE canon_events ADD COLUMN authority TEXT",
+    )
+}
+
+fn ensure_column_exists(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    alter_sql: &str,
+) -> Result<()> {
+    let pragma = format!("PRAGMA table_info({table})");
     let mut stmt = conn
-        .prepare("PRAGMA table_info(chapter_summaries)")
-        .context("world.db chapter_summaries table_info prepare failed")?;
+        .prepare(pragma.as_str())
+        .with_context(|| format!("world.db {table} table_info prepare failed"))?;
     let rows = stmt
         .query_map([], |row| row.get::<_, String>(1))
-        .context("world.db chapter_summaries table_info query failed")?;
-    let mut has_raw_json = false;
+        .with_context(|| format!("world.db {table} table_info query failed"))?;
     for row in rows {
-        if row.context("world.db chapter_summaries table_info row failed")? == "raw_json" {
-            has_raw_json = true;
-            break;
+        if row.with_context(|| format!("world.db {table} table_info row failed"))? == column {
+            return Ok(());
         }
     }
-    if has_raw_json {
-        return Ok(());
-    }
-    conn.execute(
-        "ALTER TABLE chapter_summaries ADD COLUMN raw_json TEXT NOT NULL DEFAULT '{}'",
-        [],
-    )
-    .context("world.db chapter_summaries raw_json migration failed")?;
+    conn.execute(alter_sql, [])
+        .with_context(|| format!("world.db {table}.{column} migration failed"))?;
     Ok(())
+}
+
+fn ensure_chapter_summary_raw_json_column(conn: &Connection) -> Result<()> {
+    ensure_column_exists(
+        conn,
+        "chapter_summaries",
+        "raw_json",
+        "ALTER TABLE chapter_summaries ADD COLUMN raw_json TEXT NOT NULL DEFAULT '{}'",
+    )
+}
+
+fn optional_event_kind(event: &CanonEvent) -> Option<String> {
+    event
+        .event_kind
+        .map(|event_kind| event_kind.as_legacy_kind().to_owned())
+}
+
+fn optional_event_authority(event: &CanonEvent) -> Result<Option<String>> {
+    event
+        .authority
+        .map(|authority| {
+            serde_json::to_value(authority)
+                .context("world.db event authority serialization failed")
+                .and_then(|value| {
+                    value
+                        .as_str()
+                        .map(str::to_owned)
+                        .context("world.db event authority serialized to non-string value")
+                })
+        })
+        .transpose()
 }
 
 fn refresh_due_chapter_summary_for_conn(
@@ -1305,7 +1368,7 @@ fn open_chapter_events(
     let mut events = if let Some(turn_id) = after_turn {
         let mut stmt = conn
             .prepare(
-                "SELECT event_id, turn_id, kind, visibility, summary
+                "SELECT event_id, turn_id, kind, event_kind, authority, visibility, summary
                  FROM canon_events
                  WHERE world_id = ?1 AND turn_id > ?2
                  ORDER BY turn_id ASC",
@@ -1322,7 +1385,7 @@ fn open_chapter_events(
     } else {
         let mut stmt = conn
             .prepare(
-                "SELECT event_id, turn_id, kind, visibility, summary
+                "SELECT event_id, turn_id, kind, event_kind, authority, visibility, summary
                  FROM canon_events
                  WHERE world_id = ?1
                  ORDER BY turn_id ASC",
@@ -1348,8 +1411,10 @@ fn canon_event_row_from_sql(
         event_id: row.get(0)?,
         turn_id: row.get(1)?,
         kind: row.get(2)?,
-        visibility: row.get(3)?,
-        summary: row.get(4)?,
+        event_kind: row.get(3)?,
+        authority: row.get(4)?,
+        visibility: row.get(5)?,
+        summary: row.get(6)?,
     })
 }
 
@@ -1599,8 +1664,9 @@ fn insert_canon_event(conn: &Connection, event: &CanonEvent) -> Result<()> {
         r"
         INSERT OR IGNORE INTO canon_events(
             event_id, world_id, turn_id, occurred_at_world_time, visibility, kind,
-            summary, location, evidence_source, user_input, narrative_ref, raw_json
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            event_kind, authority, summary, location, evidence_source, user_input,
+            narrative_ref, raw_json
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
         ",
         params![
             event.event_id,
@@ -1609,6 +1675,8 @@ fn insert_canon_event(conn: &Connection, event: &CanonEvent) -> Result<()> {
             event.occurred_at_world_time,
             event.visibility,
             event.kind,
+            optional_event_kind(event),
+            optional_event_authority(event)?,
             event.summary,
             event.location,
             event.evidence.source,
@@ -2518,7 +2586,7 @@ fn index_world_facts(conn: &Connection, world_id: &str) -> Result<()> {
 fn index_canon_events(conn: &Connection, world_id: &str) -> Result<()> {
     let mut stmt = conn
         .prepare(
-            "SELECT event_id, turn_id, kind, summary
+            "SELECT event_id, turn_id, kind, event_kind, authority, summary
              FROM canon_events
              WHERE world_id = ?1 AND visibility = ?2",
         )
@@ -2529,19 +2597,30 @@ fn index_canon_events(conn: &Connection, world_id: &str) -> Result<()> {
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, String>(5)?,
             ))
         })
         .context("world.db search index canon events query failed")?;
     for row in rows {
-        let (event_id, turn_id, kind, summary) =
+        let (event_id, turn_id, kind, event_kind, authority, summary) =
             row.context("world.db search index canon event row failed")?;
+        let mut title = format!("{turn_id} {kind}");
+        if let Some(event_kind) = event_kind {
+            title.push_str(" event_kind:");
+            title.push_str(event_kind.as_str());
+        }
+        if let Some(authority) = authority {
+            title.push_str(" authority:");
+            title.push_str(authority.as_str());
+        }
         insert_search_document(
             conn,
             world_id,
             "canon_events",
             event_id.as_str(),
-            format!("{turn_id} {kind}").as_str(),
+            title.as_str(),
             summary.as_str(),
             PLAYER_VISIBLE,
         )?;
@@ -3136,18 +3215,7 @@ where
 }
 
 fn read_canon_events_jsonl(path: &Path) -> Result<Vec<CanonEvent>> {
-    let raw =
-        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let mut events = Vec::new();
-    for (index, line) in raw.lines().enumerate() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let event = serde_json::from_str(line)
-            .with_context(|| format!("failed to parse {} line {}", path.display(), index + 1))?;
-        events.push(event);
-    }
-    Ok(events)
+    crate::event_ledger::load_world_events(path)
 }
 
 fn read_structured_updates_jsonl(path: &Path) -> Result<Vec<StructuredEntityUpdates>> {
@@ -3494,8 +3562,8 @@ const MATERIALIZED_PROJECTION_FILES: &[MaterializedProjectionFile] = &[
 #[cfg(test)]
 mod tests {
     use super::{
-        force_chapter_summary, latest_chapter_summaries, repair_world_db, search_world_db,
-        sync_world_db_materialized_projections, validate_world_db, world_db_stats,
+        force_chapter_summary, latest_chapter_summaries, recent_canon_events, repair_world_db,
+        search_world_db, sync_world_db_materialized_projections, validate_world_db, world_db_stats,
     };
     use crate::autobiographical_index::{
         AUTOBIOGRAPHICAL_GENERAL_EVENT_SCHEMA_VERSION, AUTOBIOGRAPHICAL_INDEX_FILENAME,
@@ -3587,6 +3655,10 @@ premise:
         assert!(stats.world_facts >= 3);
         assert!(stats.entity_records >= 3);
         assert!(stats.search_documents >= 3);
+        let events = recent_canon_events(&initialized.world_dir, "stw_db_test", 3)?;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_kind.as_deref(), Some("note"));
+        assert_eq!(events[0].authority.as_deref(), Some("world_init"));
         let report = validate_world_db(&initialized.world_dir, "stw_db_test", 1)?;
         assert!(report.warnings.is_empty());
         Ok(())
@@ -3652,6 +3724,17 @@ premise:
         })?;
         let hits = search_world_db(&initialized.world_dir, "stw_search_test", "판단 위임", 10)?;
         assert!(!hits.is_empty());
+        let authority_hits = search_world_db(
+            &initialized.world_dir,
+            "stw_search_test",
+            "turn_reducer",
+            10,
+        )?;
+        assert!(
+            authority_hits
+                .iter()
+                .any(|hit| hit.source_table == "canon_events")
+        );
         Ok(())
     }
 

@@ -13,6 +13,9 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::thread;
+use std::time::Duration as StdDuration;
 
 use super::host_worker::HostWorkerOptions;
 
@@ -37,7 +40,8 @@ pub(crate) const DEFAULT_WEBGPT_TEXT_CDP_PORT: u16 = 9238;
 pub(crate) const DEFAULT_WEBGPT_IMAGE_CDP_PORT: u16 = 9239;
 pub(crate) const DEFAULT_WEBGPT_REFERENCE_IMAGE_CDP_PORT: u16 = 9240;
 pub(crate) const DEFAULT_WEBGPT_TIMEOUT_SECS: u64 = 900;
-const STALE_DISPATCH_RETRY_AFTER_SECS: i64 = 45;
+const WEBGPT_DISPATCH_STALE_CUSHION_SECS: u64 = 60;
+const WEBGPT_MCP_CONTROL_TIMEOUT_SECS: u64 = 30;
 const WEBGPT_TEXT_JOB_OWNER: &str = "webgpt_host_worker";
 const MCP_PROTOCOL_VERSION: &str = "2025-03-26";
 const MCP_CLIENT_VERSION: &str = "0.1.0";
@@ -821,6 +825,7 @@ fn webgpt_dispatch_claim(
         "mcp_cdp_port": dispatcher.mcp_cdp_port(),
         "mcp_cdp_url": dispatcher.mcp_cdp_url(),
         "conversation_id": dispatcher.conversation_id(),
+        "timeout_secs": dispatcher.timeout_secs(),
         "prompt_path": paths.prompt_path.display().to_string(),
         "prompt_context_path": paths.prompt_context_path.display().to_string(),
         "response_path": paths.response_path.display().to_string(),
@@ -905,7 +910,7 @@ struct PersistentMcpToolResult {
 struct PersistentMcpClient {
     child: Child,
     stdin: ChildStdin,
-    reader: BufReader<ChildStdout>,
+    stdout_rx: Receiver<Result<String, String>>,
     next_id: i64,
     advertised_tools: Option<HashSet<String>>,
 }
@@ -944,7 +949,7 @@ impl PersistentMcpClient {
         let mut client = Self {
             child,
             stdin,
-            reader: BufReader::new(stdout),
+            stdout_rx: spawn_resident_mcp_stdout_reader(stdout),
             next_id: 1,
             advertised_tools: None,
         };
@@ -960,7 +965,10 @@ impl PersistentMcpClient {
             },
         }))?;
         client
-            .read_response(initialize_id)
+            .read_response(
+                initialize_id,
+                StdDuration::from_secs(WEBGPT_MCP_CONTROL_TIMEOUT_SECS),
+            )
             .context("resident webgpt-mcp initialize failed")?;
         client.send_json(&serde_json::json!({
             "jsonrpc": "2.0",
@@ -994,19 +1002,30 @@ impl PersistentMcpClient {
         Ok(())
     }
 
-    fn read_response(&mut self, expected_id: i64) -> Result<Value> {
-        let mut line = String::new();
+    fn read_response(&mut self, expected_id: i64, timeout: StdDuration) -> Result<Value> {
+        let deadline = std::time::Instant::now() + timeout;
         loop {
-            line.clear();
-            let read = self
-                .reader
-                .read_line(&mut line)
-                .context("failed to read resident MCP response")?;
-            if read == 0 {
+            let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
                 anyhow::bail!(
-                    "resident webgpt-mcp closed stdout while waiting for id={expected_id}"
+                    "resident webgpt-mcp response timed out while waiting for id={expected_id}, timeout_secs={}",
+                    timeout.as_secs()
                 );
-            }
+            };
+            let line = match self.stdout_rx.recv_timeout(remaining) {
+                Ok(Ok(line)) => line,
+                Ok(Err(error)) => anyhow::bail!("{error}"),
+                Err(RecvTimeoutError::Timeout) => {
+                    anyhow::bail!(
+                        "resident webgpt-mcp response timed out while waiting for id={expected_id}, timeout_secs={}",
+                        timeout.as_secs()
+                    );
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    anyhow::bail!(
+                        "resident webgpt-mcp closed stdout while waiting for id={expected_id}"
+                    );
+                }
+            };
             let trimmed = line.trim();
             let payload: Value = serde_json::from_str(trimmed).with_context(|| {
                 format!(
@@ -1040,7 +1059,10 @@ impl PersistentMcpClient {
             "params": {},
         }))?;
         let response = self
-            .read_response(request_id)
+            .read_response(
+                request_id,
+                StdDuration::from_secs(WEBGPT_MCP_CONTROL_TIMEOUT_SECS),
+            )
             .context("resident webgpt-mcp tools/list failed")?;
         let tools = response
             .get("result")
@@ -1077,7 +1099,7 @@ impl PersistentMcpClient {
             "params": {"name": tool_name, "arguments": arguments},
         }))?;
         let call_response = self
-            .read_response(request_id)
+            .read_response(request_id, resident_mcp_tool_timeout(arguments))
             .context("resident webgpt-mcp tools/call failed")?;
         let first_text = call_response
             .get("result")
@@ -1099,6 +1121,41 @@ impl PersistentMcpClient {
             first_text,
         })
     }
+}
+
+fn spawn_resident_mcp_stdout_reader(stdout: ChildStdout) -> Receiver<Result<String, String>> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    if tx.send(Ok(line)).is_err() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    let _ = tx.send(Err(format!(
+                        "failed to read resident MCP response: {error}"
+                    )));
+                    break;
+                }
+            }
+        }
+    });
+    rx
+}
+
+fn resident_mcp_tool_timeout(arguments: &Value) -> StdDuration {
+    let timeout_secs = arguments
+        .get("timeout_secs")
+        .and_then(Value::as_u64)
+        .unwrap_or(WEBGPT_MCP_CONTROL_TIMEOUT_SECS)
+        .max(5)
+        + WEBGPT_DISPATCH_STALE_CUSHION_SECS;
+    StdDuration::from_secs(timeout_secs)
 }
 
 impl Drop for PersistentMcpClient {
@@ -1307,6 +1364,13 @@ impl WebGptDispatcher {
             Self::McpResearch {
                 conversation_id, ..
             } => conversation_id.as_deref(),
+        }
+    }
+
+    const fn timeout_secs(&self) -> u64 {
+        match self {
+            Self::ExternalCommand { .. } => DEFAULT_WEBGPT_TIMEOUT_SECS,
+            Self::McpResearch { timeout_secs, .. } => *timeout_secs,
         }
     }
 
@@ -2370,8 +2434,21 @@ fn dispatch_record_is_stale(value: &serde_json::Value) -> Result<bool> {
     let dispatched_at = DateTime::parse_from_rfc3339(dispatched_at)
         .with_context(|| format!("invalid dispatch timestamp: {dispatched_at}"))?
         .with_timezone(&Utc);
-    Ok(Utc::now().signed_duration_since(dispatched_at)
-        >= ChronoDuration::seconds(STALE_DISPATCH_RETRY_AFTER_SECS))
+    let retry_after_secs = dispatch_retry_after_secs(value)?;
+    Ok(
+        Utc::now().signed_duration_since(dispatched_at)
+            >= ChronoDuration::seconds(retry_after_secs),
+    )
+}
+
+fn dispatch_retry_after_secs(value: &serde_json::Value) -> Result<i64> {
+    let timeout_secs = value
+        .get("timeout_secs")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(DEFAULT_WEBGPT_TIMEOUT_SECS)
+        .max(5)
+        .saturating_add(WEBGPT_DISPATCH_STALE_CUSHION_SECS);
+    i64::try_from(timeout_secs).context("webgpt dispatch timeout_secs exceeds i64")
 }
 
 pub(super) fn safe_file_component(value: &str) -> String {
@@ -2568,6 +2645,34 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
         assert_eq!(value["status"], serde_json::json!("dispatching"));
         assert_eq!(value["attempt"], serde_json::json!("retry"));
+        Ok(())
+    }
+
+    #[test]
+    fn dispatch_claim_keeps_dispatching_record_inside_timeout_lease() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("turn_0001-webgpt.json");
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema_version": "singulari.webgpt_dispatch_record.v1",
+                "status": "dispatching",
+                "turn_id": "turn_0001",
+                "timeout_secs": 900,
+                "dispatched_at": (Utc::now() - ChronoDuration::seconds(120)).to_rfc3339(),
+            }))?,
+        )?;
+
+        let claim = serde_json::json!({
+            "schema_version": "singulari.webgpt_dispatch_record.v1",
+            "status": "dispatching",
+            "turn_id": "turn_0001",
+            "attempt": "retry",
+        });
+
+        assert!(!write_dispatch_claim(&path, &claim)?);
+        let value: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
+        assert_eq!(value["attempt"], serde_json::Value::Null);
         Ok(())
     }
 

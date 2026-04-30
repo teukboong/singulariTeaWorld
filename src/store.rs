@@ -19,10 +19,11 @@ use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
-use std::io::Write as _;
+use std::io::{ErrorKind, Write as _};
 use std::path::{Path, PathBuf};
 
 pub const ACTIVE_WORLD_BINDING_SCHEMA_VERSION: &str = "singulari.active_world.v1";
+pub const WORLD_COMMIT_LOCK_SCHEMA_VERSION: &str = "singulari.world_commit_lock.v1";
 pub const SINGULARI_WORLD_HOME_ENV: &str = "SINGULARI_WORLD_HOME";
 const DEFAULT_STORE_SUBDIR: &str = ".local/share/singulari-world";
 const WORLDS_DIR: &str = "worlds";
@@ -36,6 +37,7 @@ pub(crate) const PLAYER_KNOWLEDGE_FILENAME: &str = "player_knowledge.json";
 pub(crate) const ENTITIES_FILENAME: &str = "entities.json";
 pub(crate) const LATEST_SNAPSHOT_FILENAME: &str = "latest_snapshot.json";
 pub(crate) const TURN_LOG_FILENAME: &str = "turn_log.jsonl";
+const WORLD_COMMIT_LOCK_FILENAME: &str = ".world.lock";
 
 #[derive(Debug, Clone)]
 pub struct StorePaths {
@@ -64,6 +66,49 @@ pub struct ActiveWorldBinding {
     pub world_id: String,
     pub session_id: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorldCommitLockInfo {
+    pub schema_version: String,
+    pub holder: String,
+    pub pid: u32,
+    pub acquired_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorldCommitLockStatus {
+    pub schema_version: String,
+    pub world_id: String,
+    pub lock_path: String,
+    pub locked: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock: Option<WorldCommitLockInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorldCommitLockClearReport {
+    pub schema_version: String,
+    pub world_id: String,
+    pub lock_path: String,
+    pub cleared: bool,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_lock: Option<WorldCommitLockInfo>,
+    pub cleared_at: String,
+}
+
+#[derive(Debug)]
+pub(crate) struct WorldCommitLock {
+    path: PathBuf,
+}
+
+impl Drop for WorldCommitLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
 /// Initialize a file-backed Singulari World world.
@@ -456,8 +501,16 @@ where
 {
     let body = serde_json::to_string_pretty(value)
         .with_context(|| format!("failed to serialize {}", path.display()))?;
-    fs::write(path, format!("{body}\n"))
-        .with_context(|| format!("failed to write {}", path.display()))
+    write_bytes_atomic(path, format!("{body}\n").as_bytes())
+}
+
+pub(crate) fn write_json_new<T>(path: &Path, value: &T) -> Result<()>
+where
+    T: serde::Serialize,
+{
+    let body = serde_json::to_string_pretty(value)
+        .with_context(|| format!("failed to serialize {}", path.display()))?;
+    write_bytes_create_new(path, format!("{body}\n").as_bytes())
 }
 
 pub(crate) fn append_jsonl<T>(path: &Path, value: &T) -> Result<()>
@@ -473,14 +526,208 @@ where
     writeln!(file, "{body}").with_context(|| format!("failed to append {}", path.display()))
 }
 
-pub(crate) fn append_canon_event(path: &Path, event: &CanonEvent) -> Result<()> {
-    let body = serde_json::to_string(event).context("failed to serialize canon event")?;
+pub(crate) fn acquire_world_commit_lock(world_dir: &Path, holder: &str) -> Result<WorldCommitLock> {
+    if !world_dir.is_dir() {
+        bail!(
+            "world commit lock requires existing world dir: {}",
+            world_dir.display()
+        );
+    }
+    let path = world_dir.join(WORLD_COMMIT_LOCK_FILENAME);
+    let info = WorldCommitLockInfo {
+        schema_version: WORLD_COMMIT_LOCK_SCHEMA_VERSION.to_owned(),
+        holder: holder.to_owned(),
+        pid: std::process::id(),
+        acquired_at: Utc::now().to_rfc3339(),
+    };
+    let mut body =
+        serde_json::to_vec_pretty(&info).context("failed to serialize world commit lock")?;
+    body.push(b'\n');
+    let mut file = match OpenOptions::new().write(true).create_new(true).open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            let current = fs::read_to_string(&path)
+                .unwrap_or_else(|read_error| format!("<unreadable lock metadata: {read_error}>"));
+            bail!(
+                "world commit lock already held: path={}, holder={}, current={}",
+                path.display(),
+                holder,
+                current.trim()
+            );
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to create {}", path.display()));
+        }
+    };
+    if let Err(error) = write_and_sync(&mut file, &body) {
+        let _ = fs::remove_file(&path);
+        return Err(error).with_context(|| format!("failed to write {}", path.display()));
+    }
+    Ok(WorldCommitLock { path })
+}
+
+/// Return the current world commit lock state without mutating it.
+///
+/// # Errors
+///
+/// Returns an error when the store root cannot be resolved or the world
+/// directory does not exist.
+pub fn world_commit_lock_status(
+    store_root: Option<&Path>,
+    world_id: &str,
+) -> Result<WorldCommitLockStatus> {
+    validate_safe_id("world_id", world_id)?;
+    let store_paths = resolve_store_paths(store_root)?;
+    let files = world_file_paths(&store_paths, world_id);
+    if !files.dir.is_dir() {
+        bail!("world not found for commit lock status: {world_id}");
+    }
+    let lock_path = files.dir.join(WORLD_COMMIT_LOCK_FILENAME);
+    if !lock_path.exists() {
+        return Ok(WorldCommitLockStatus {
+            schema_version: "singulari.world_commit_lock_status.v1".to_owned(),
+            world_id: world_id.to_owned(),
+            lock_path: lock_path.display().to_string(),
+            locked: false,
+            lock: None,
+            read_error: None,
+        });
+    }
+    match read_world_commit_lock_info(&lock_path) {
+        Ok(lock) => Ok(WorldCommitLockStatus {
+            schema_version: "singulari.world_commit_lock_status.v1".to_owned(),
+            world_id: world_id.to_owned(),
+            lock_path: lock_path.display().to_string(),
+            locked: true,
+            lock: Some(lock),
+            read_error: None,
+        }),
+        Err(error) => Ok(WorldCommitLockStatus {
+            schema_version: "singulari.world_commit_lock_status.v1".to_owned(),
+            world_id: world_id.to_owned(),
+            lock_path: lock_path.display().to_string(),
+            locked: true,
+            lock: None,
+            read_error: Some(format!("{error:#}")),
+        }),
+    }
+}
+
+/// Remove a world commit lock only after an explicit force confirmation.
+///
+/// # Errors
+///
+/// Returns an error when the lock exists and `force` is false, when the store
+/// cannot be resolved, or when the lock file cannot be removed.
+pub fn clear_world_commit_lock(
+    store_root: Option<&Path>,
+    world_id: &str,
+    force: bool,
+    reason: &str,
+) -> Result<WorldCommitLockClearReport> {
+    validate_safe_id("world_id", world_id)?;
+    let store_paths = resolve_store_paths(store_root)?;
+    let files = world_file_paths(&store_paths, world_id);
+    if !files.dir.is_dir() {
+        bail!("world not found for commit lock clear: {world_id}");
+    }
+    let lock_path = files.dir.join(WORLD_COMMIT_LOCK_FILENAME);
+    if !lock_path.exists() {
+        return Ok(WorldCommitLockClearReport {
+            schema_version: "singulari.world_commit_lock_clear.v1".to_owned(),
+            world_id: world_id.to_owned(),
+            lock_path: lock_path.display().to_string(),
+            cleared: false,
+            reason: "lock_absent".to_owned(),
+            previous_lock: None,
+            cleared_at: Utc::now().to_rfc3339(),
+        });
+    }
+    let previous_lock = read_world_commit_lock_info(&lock_path).ok();
+    if !force {
+        bail!(
+            "world commit lock clear requires --force after operator inspection: path={}, holder={}",
+            lock_path.display(),
+            previous_lock
+                .as_ref()
+                .map_or("<unreadable>", |lock| lock.holder.as_str())
+        );
+    }
+    let reason = reason.trim();
+    if reason.is_empty() {
+        bail!("world commit lock clear reason must not be empty");
+    }
+    fs::remove_file(&lock_path)
+        .with_context(|| format!("failed to remove {}", lock_path.display()))?;
+    Ok(WorldCommitLockClearReport {
+        schema_version: "singulari.world_commit_lock_clear.v1".to_owned(),
+        world_id: world_id.to_owned(),
+        lock_path: lock_path.display().to_string(),
+        cleared: true,
+        reason: reason.to_owned(),
+        previous_lock,
+        cleared_at: Utc::now().to_rfc3339(),
+    })
+}
+
+fn read_world_commit_lock_info(path: &Path) -> Result<WorldCommitLockInfo> {
+    read_json(path)
+}
+
+fn write_bytes_atomic(path: &Path, body: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .with_context(|| format!("atomic write path has no parent: {}", path.display()))?;
+    fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+    let file_name = path
+        .file_name()
+        .with_context(|| format!("atomic write path has no filename: {}", path.display()))?
+        .to_string_lossy();
+    for attempt in 0..16 {
+        let tmp = parent.join(format!(
+            ".{file_name}.tmp.{}.{}.{}",
+            std::process::id(),
+            Utc::now().timestamp_micros(),
+            attempt
+        ));
+        let mut file = match OpenOptions::new().write(true).create_new(true).open(&tmp) {
+            Ok(file) => file,
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to create {}", tmp.display()));
+            }
+        };
+        if let Err(error) = write_and_sync(&mut file, body) {
+            let _ = fs::remove_file(&tmp);
+            return Err(error).with_context(|| format!("failed to write {}", tmp.display()));
+        }
+        fs::rename(&tmp, path)
+            .with_context(|| format!("failed to rename {} -> {}", tmp.display(), path.display()))?;
+        return Ok(());
+    }
+    bail!("failed to allocate atomic temp file for {}", path.display());
+}
+
+fn write_bytes_create_new(path: &Path, body: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .with_context(|| format!("create-new write path has no parent: {}", path.display()))?;
+    fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
     let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
+        .write(true)
+        .create_new(true)
         .open(path)
-        .with_context(|| format!("failed to open {}", path.display()))?;
-    writeln!(file, "{body}").with_context(|| format!("failed to append {}", path.display()))
+        .with_context(|| format!("failed to create {}", path.display()))?;
+    write_and_sync(&mut file, body).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn write_and_sync(file: &mut fs::File, body: &[u8]) -> std::io::Result<()> {
+    file.write_all(body)?;
+    file.sync_all()
+}
+
+pub(crate) fn append_canon_event(path: &Path, event: &CanonEvent) -> Result<()> {
+    crate::event_ledger::append_world_event(path, event).map(|_| ())
 }
 
 fn load_world_seed(path: &Path) -> Result<WorldSeed> {
@@ -515,7 +762,7 @@ fn validate_seed_before_init(seed: &WorldSeed) -> Result<()> {
     Ok(())
 }
 
-fn validate_safe_id(label: &str, value: &str) -> Result<()> {
+pub(crate) fn validate_safe_id(label: &str, value: &str) -> Result<()> {
     if value.is_empty() {
         bail!("{label} must not be empty");
     }
@@ -554,8 +801,9 @@ fn render_laws(world: &WorldRecord) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        InitWorldOptions, init_world, load_active_world, load_active_world_if_present,
-        save_active_world,
+        InitWorldOptions, acquire_world_commit_lock, clear_world_commit_lock, init_world,
+        load_active_world, load_active_world_if_present, save_active_world,
+        world_commit_lock_status, write_json_new,
     };
     use crate::models::ANCHOR_CHARACTER_ID;
     use crate::store::read_json;
@@ -661,6 +909,86 @@ premise:
         let active = load_active_world_if_present(Some(store_root.as_path()))?;
 
         assert!(active.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn write_json_new_refuses_to_overwrite_existing_file() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let path = temp.path().join("pending.json");
+        write_json_new(&path, &serde_json::json!({ "turn": 1 }))?;
+        let result = write_json_new(&path, &serde_json::json!({ "turn": 2 }));
+        let Err(error) = result else {
+            anyhow::bail!("create-new JSON write should reject existing files");
+        };
+        assert!(format!("{error:#}").contains("failed to create"));
+        let stored: serde_json::Value = read_json(&path)?;
+        assert_eq!(stored["turn"], 1);
+        Ok(())
+    }
+
+    #[test]
+    fn world_commit_lock_refuses_second_holder() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let world_dir = temp.path().join("world");
+        std::fs::create_dir_all(&world_dir)?;
+        let lock = acquire_world_commit_lock(&world_dir, "first_holder")?;
+
+        let result = acquire_world_commit_lock(&world_dir, "second_holder");
+        let Err(error) = result else {
+            anyhow::bail!("second world commit lock holder should fail");
+        };
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("world commit lock already held"));
+        assert!(rendered.contains("first_holder"));
+
+        drop(lock);
+        let _lock = acquire_world_commit_lock(&world_dir, "third_holder")?;
+        Ok(())
+    }
+
+    #[test]
+    fn world_commit_lock_status_and_force_clear_round_trip() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let world_dir = store.join("worlds").join("stw_lock_status");
+        std::fs::create_dir_all(&world_dir)?;
+        let _lock = acquire_world_commit_lock(&world_dir, "status_holder")?;
+
+        let status = world_commit_lock_status(Some(store.as_path()), "stw_lock_status")?;
+        assert!(status.locked);
+        assert_eq!(
+            status.lock.as_ref().map(|lock| lock.holder.as_str()),
+            Some("status_holder")
+        );
+
+        let result = clear_world_commit_lock(
+            Some(store.as_path()),
+            "stw_lock_status",
+            false,
+            "operator skipped force",
+        );
+        let Err(error) = result else {
+            anyhow::bail!("lock clear without force should fail");
+        };
+        assert!(format!("{error:#}").contains("requires --force"));
+
+        let report = clear_world_commit_lock(
+            Some(store.as_path()),
+            "stw_lock_status",
+            true,
+            "test confirmed stale lock",
+        )?;
+        assert!(report.cleared);
+        assert_eq!(
+            report
+                .previous_lock
+                .as_ref()
+                .map(|lock| lock.holder.as_str()),
+            Some("status_holder")
+        );
+        let status = world_commit_lock_status(Some(store.as_path()), "stw_lock_status")?;
+        assert!(!status.locked);
         Ok(())
     }
 }

@@ -2460,7 +2460,14 @@ function renderLoadError(error) {
 }
 
 async function fetchJson(url, options = {}) {
-  const response = await fetch(url, { cache: "no-store", ...options });
+  const fetchOptions = { cache: "no-store", ...options };
+  const method = String(fetchOptions.method || "GET").toUpperCase();
+  if (method !== "GET" && globalThis.SINGULARI_VN_TOKEN) {
+    const headers = new Headers(fetchOptions.headers || {});
+    headers.set("X-Singulari-VN-Token", globalThis.SINGULARI_VN_TOKEN);
+    fetchOptions.headers = headers;
+  }
+  const response = await fetch(url, fetchOptions);
   const text = await response.text();
   let parsed = null;
   if (text) {
