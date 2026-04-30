@@ -36,6 +36,7 @@ use image::{
 pub(crate) const DEFAULT_WEBGPT_TEXT_CDP_PORT: u16 = 9238;
 pub(crate) const DEFAULT_WEBGPT_IMAGE_CDP_PORT: u16 = 9239;
 pub(crate) const DEFAULT_WEBGPT_REFERENCE_IMAGE_CDP_PORT: u16 = 9240;
+pub(crate) const DEFAULT_WEBGPT_TIMEOUT_SECS: u64 = 900;
 const STALE_DISPATCH_RETRY_AFTER_SECS: i64 = 45;
 const WEBGPT_TEXT_JOB_OWNER: &str = "webgpt_host_worker";
 const MCP_PROTOCOL_VERSION: &str = "2025-03-26";
@@ -785,6 +786,7 @@ fn duration_ms(start: DateTime<Utc>, end: DateTime<Utc>) -> i64 {
 fn text_job_status_from_record(record: &WebGptDispatchRecord) -> WorldJobStatus {
     match record.status.as_str() {
         "completed" => WorldJobStatus::Completed,
+        "waiting_browser" => WorldJobStatus::Running,
         "commit_failed" => WorldJobStatus::FailedTerminal,
         _ => WorldJobStatus::FailedRetryable,
     }
@@ -844,8 +846,17 @@ fn commit_webgpt_dispatch_if_success(
     dispatch_result: &WebGptDispatchResult,
 ) -> WebGptCommitResult {
     if !dispatch_result.success {
+        let status = if dispatch_result
+            .error
+            .as_deref()
+            .is_some_and(is_webgpt_timeout_signal)
+        {
+            "waiting_browser"
+        } else {
+            "failed"
+        };
         return WebGptCommitResult {
-            status: "failed".to_owned(),
+            status: status.to_owned(),
             committed: None,
             error: None,
         };
@@ -2333,11 +2344,20 @@ pub(super) fn existing_dispatch_is_retryable(path: &Path) -> Result<bool> {
         .get("repair_attempts")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
-    Ok(matches!(status, Some("failed"))
-        || (matches!(status, Some("dispatching")) && dispatch_record_is_stale(&value)?)
-        || (matches!(status, Some("commit_failed"))
-            && repair_attempts == 0
-            && is_repairable_webgpt_commit_error(error)))
+    Ok(
+        (matches!(status, Some("failed")) && !is_webgpt_timeout_signal(error))
+            || (matches!(status, Some("dispatching")) && dispatch_record_is_stale(&value)?)
+            || (matches!(status, Some("commit_failed"))
+                && repair_attempts == 0
+                && is_repairable_webgpt_commit_error(error)),
+    )
+}
+
+pub(super) fn is_webgpt_timeout_signal(error: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
+    normalized.contains("timed out")
+        || normalized.contains("timeout")
+        || normalized.contains("deadline exceeded")
 }
 
 fn dispatch_record_is_stale(value: &serde_json::Value) -> Result<bool> {
@@ -2403,6 +2423,33 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
         assert_eq!(value["status"], serde_json::json!("dispatching"));
         assert_eq!(value["attempt"], serde_json::json!("retry"));
+        Ok(())
+    }
+
+    #[test]
+    fn timeout_dispatch_failures_are_not_reprompted() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("turn_0001-webgpt.json");
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema_version": "singulari.webgpt_dispatch_record.v1",
+                "status": "failed",
+                "turn_id": "turn_0001",
+                "error": "worker request 'collect_answer' timed out after 900s",
+            }))?,
+        )?;
+
+        let claim = serde_json::json!({
+            "schema_version": "singulari.webgpt_dispatch_record.v1",
+            "status": "dispatching",
+            "turn_id": "turn_0001",
+            "attempt": "retry",
+        });
+
+        assert!(!write_dispatch_claim(&path, &claim)?);
+        let value: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
+        assert_eq!(value["status"], serde_json::json!("failed"));
         Ok(())
     }
 

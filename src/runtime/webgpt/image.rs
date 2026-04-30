@@ -12,9 +12,9 @@ use std::process::{Child, Command, Stdio};
 use crate::runtime::host_worker::HostWorkerOptions;
 
 use super::{
-    WebGptLaneRuntime, load_webgpt_image_conversation_binding, resolve_webgpt_mcp_wrapper,
-    safe_file_component, save_webgpt_image_conversation_binding, webgpt_conversation_url,
-    write_dispatch_claim,
+    WebGptLaneRuntime, is_webgpt_timeout_signal, load_webgpt_image_conversation_binding,
+    resolve_webgpt_mcp_wrapper, safe_file_component, save_webgpt_image_conversation_binding,
+    webgpt_conversation_url, write_dispatch_claim,
 };
 
 #[derive(Debug, Serialize)]
@@ -260,8 +260,11 @@ pub(in crate::runtime) fn dispatch_visual_job_via_webgpt(
         }
     }
 
+    let waiting_browser = error.as_deref().is_some_and(is_webgpt_timeout_signal);
     let status = if error.is_none() {
         "completed"
+    } else if waiting_browser {
+        "waiting_browser"
     } else {
         "failed"
     }
@@ -298,7 +301,9 @@ pub(in crate::runtime) fn dispatch_visual_job_via_webgpt(
     };
     fs::write(record_path.as_path(), serde_json::to_vec_pretty(&record)?)
         .with_context(|| format!("failed to update {}", record_path.display()))?;
-    if let Some(error) = &record.error {
+    if let Some(error) = &record.error
+        && record.status != "waiting_browser"
+    {
         anyhow::bail!("{error}");
     }
     Ok(record)

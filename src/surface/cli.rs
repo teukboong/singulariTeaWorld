@@ -26,8 +26,8 @@ use std::path::{Path, PathBuf};
 
 use crate::runtime::{
     DEFAULT_WEBGPT_IMAGE_CDP_PORT, DEFAULT_WEBGPT_REFERENCE_IMAGE_CDP_PORT,
-    DEFAULT_WEBGPT_TEXT_CDP_PORT, HostWorkerOptions, HostWorkerTextBackend,
-    HostWorkerVisualBackend, current_turn_visual_jobs, handle_host_worker,
+    DEFAULT_WEBGPT_TEXT_CDP_PORT, DEFAULT_WEBGPT_TIMEOUT_SECS, HostWorkerOptions,
+    HostWorkerTextBackend, HostWorkerVisualBackend, current_turn_visual_jobs, handle_host_worker,
 };
 
 #[derive(Parser)]
@@ -522,7 +522,7 @@ enum Commands {
         #[arg(
             long,
             env = "SINGULARI_WORLD_WEBGPT_TIMEOUT_SECS",
-            default_value_t = 45
+            default_value_t = DEFAULT_WEBGPT_TIMEOUT_SECS
         )]
         webgpt_timeout_secs: u64,
     },

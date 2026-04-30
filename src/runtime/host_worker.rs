@@ -20,7 +20,7 @@ use std::time::Duration;
 use super::webgpt::{
     WebGptDispatchOutcome, WebGptDispatchRecord, WebGptImageDispatchRecord, WebGptImageSessionKind,
     dispatch_pending_agent_turn_via_webgpt, dispatch_visual_job_via_webgpt,
-    ensure_webgpt_lane_runtime_isolated, existing_dispatch_is_retryable,
+    ensure_webgpt_lane_runtime_isolated, existing_dispatch_is_retryable, is_webgpt_timeout_signal,
     prewarm_webgpt_lane_sessions, safe_file_component, visual_dispatch_dir_for_world,
 };
 
@@ -866,6 +866,9 @@ fn claim_next_host_visual_jobs(
         if !claimed_session_kinds.insert(session_kind) {
             continue;
         }
+        if visual_slot_has_unresolved_browser_generation(store_root, world_id, job.slot.as_str())? {
+            continue;
+        }
         if let Some(existing_claim) =
             load_visual_job_claim(store_root, world_id, job.slot.as_str())?
         {
@@ -925,6 +928,11 @@ fn undispatched_owned_visual_claims(
             .with_context(|| format!("failed to parse visual job claim {}", path.display()))?;
         if claim.world_id == world_id
             && claim.claimed_by == claimed_by
+            && !visual_slot_has_unresolved_browser_generation(
+                store_root,
+                world_id,
+                claim.slot.as_str(),
+            )?
             && !visual_dispatch_record_exists_for_claim(store_root, &claim)?
         {
             claims.push(claim);
@@ -932,6 +940,49 @@ fn undispatched_owned_visual_claims(
     }
     claims.sort_by(|left, right| left.claimed_at.cmp(&right.claimed_at));
     Ok(claims)
+}
+
+fn visual_slot_has_unresolved_browser_generation(
+    store_root: Option<&Path>,
+    world_id: &str,
+    slot: &str,
+) -> Result<bool> {
+    let dispatch_dir = visual_dispatch_dir_for_world(store_root, world_id)?;
+    if !dispatch_dir.exists() {
+        return Ok(false);
+    }
+    let slot_prefix = format!("{}-", safe_file_component(slot));
+    for entry in fs::read_dir(&dispatch_dir)
+        .with_context(|| format!("failed to read {}", dispatch_dir.display()))?
+    {
+        let entry =
+            entry.with_context(|| format!("failed to read entry in {}", dispatch_dir.display()))?;
+        let path = entry.path();
+        if path.extension().and_then(OsStr::to_str) != Some("json") {
+            continue;
+        }
+        let Some(file_name) = path.file_name().and_then(OsStr::to_str) else {
+            continue;
+        };
+        if !file_name.starts_with(slot_prefix.as_str()) {
+            continue;
+        }
+        let raw = fs::read_to_string(path.as_path())
+            .with_context(|| format!("failed to read visual dispatch {}", path.display()))?;
+        let value = serde_json::from_str::<serde_json::Value>(raw.as_str())
+            .with_context(|| format!("failed to parse visual dispatch {}", path.display()))?;
+        let status = value.get("status").and_then(serde_json::Value::as_str);
+        let error = value
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if matches!(status, Some("dispatching" | "waiting_browser"))
+            || (matches!(status, Some("failed")) && is_webgpt_timeout_signal(error))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn visual_dispatch_record_exists_for_claim(
@@ -1083,10 +1134,88 @@ mod tests {
     }
 
     #[test]
+    fn timeout_visual_dispatch_record_blocks_claim_retry() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let claim = visual_job_claim_for_test("timeout");
+        write_visual_dispatch_record_for_test(
+            temp.path(),
+            &claim,
+            "failed",
+            None,
+            Some("worker request 'generate_image' timed out after 60s"),
+        )?;
+
+        assert!(
+            visual_dispatch_record_exists_for_claim(Some(temp.path()), &claim)?,
+            "timed-out image generation may still be alive in the browser and must not be re-sent"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn timeout_visual_dispatch_for_slot_blocks_new_claim() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let claim = visual_job_claim_for_test("old-timeout");
+        write_visual_dispatch_record_for_test(
+            temp.path(),
+            &claim,
+            "failed",
+            None,
+            Some("worker request 'generate_image' timed out after 60s"),
+        )?;
+
+        assert!(
+            visual_slot_has_unresolved_browser_generation(
+                Some(temp.path()),
+                claim.world_id.as_str(),
+                claim.slot.as_str()
+            )?,
+            "a released timeout record should still block automatic new claims for the same slot"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn timeout_visual_dispatch_for_slot_blocks_orphaned_claim() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let claim = visual_job_claim_for_test("orphaned-timeout");
+        write_visual_dispatch_record_for_test(
+            temp.path(),
+            &claim,
+            "failed",
+            None,
+            Some("worker request 'generate_image' timed out after 60s"),
+        )?;
+        let claims_dir = temp
+            .path()
+            .join("worlds")
+            .join(claim.world_id.as_str())
+            .join("visual_jobs")
+            .join("claims");
+        fs::create_dir_all(claims_dir.as_path())?;
+        fs::write(
+            claims_dir.join("turn_cg_turn_0001.json"),
+            serde_json::to_vec_pretty(&claim)?,
+        )?;
+
+        let claims = undispatched_owned_visual_claims(
+            Some(temp.path()),
+            claim.world_id.as_str(),
+            claim.claimed_by.as_str(),
+        )?;
+
+        assert!(
+            claims.is_empty(),
+            "orphaned claims must not revive a timed-out browser generation into a duplicate send"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn failed_visual_dispatch_record_does_not_block_claim_retry() -> anyhow::Result<()> {
         let temp = tempfile::tempdir()?;
         let claim = visual_job_claim_for_test("failed");
-        write_visual_dispatch_record_for_test(temp.path(), &claim, "failed", None)?;
+        write_visual_dispatch_record_for_test(temp.path(), &claim, "failed", None, None)?;
 
         assert!(
             !visual_dispatch_record_exists_for_claim(Some(temp.path()), &claim)?,
@@ -1099,7 +1228,7 @@ mod tests {
     fn dispatching_visual_dispatch_record_blocks_duplicate_claim_retry() -> anyhow::Result<()> {
         let temp = tempfile::tempdir()?;
         let claim = visual_job_claim_for_test("dispatching");
-        write_visual_dispatch_record_for_test(temp.path(), &claim, "dispatching", None)?;
+        write_visual_dispatch_record_for_test(temp.path(), &claim, "dispatching", None, None)?;
 
         assert!(
             visual_dispatch_record_exists_for_claim(Some(temp.path()), &claim)?,
@@ -1118,6 +1247,7 @@ mod tests {
             &claim,
             "dispatching",
             Some(stale_at.as_str()),
+            None,
         )?;
 
         assert!(
@@ -1224,6 +1354,7 @@ mod tests {
         claim: &singulari_world::VisualJobClaim,
         status: &str,
         dispatched_at: Option<&str>,
+        error: Option<&str>,
     ) -> anyhow::Result<()> {
         let dispatch_dir =
             visual_dispatch_dir_for_world(Some(store_root), claim.world_id.as_str())?;
@@ -1242,6 +1373,9 @@ mod tests {
         });
         if let Some(dispatched_at) = dispatched_at {
             record["dispatched_at"] = serde_json::json!(dispatched_at);
+        }
+        if let Some(error) = error {
+            record["error"] = serde_json::json!(error);
         }
         fs::write(record_path, serde_json::to_vec_pretty(&record)?)?;
         Ok(())
