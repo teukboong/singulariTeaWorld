@@ -211,9 +211,14 @@ pub use job_ledger::{
     write_visual_job,
 };
 pub use knowledge_ledger::{
-    KNOWLEDGE_CLAIM_SCHEMA_VERSION, KnowledgeClaim, KnowledgeTier, PlayerRenderPermission,
-    TruthStatus, can_render_knowledge_tier_to_player, player_render_permission,
-    render_rule_for_player,
+    KNOWLEDGE_CLAIM_SCHEMA_VERSION, KNOWLEDGE_EVENT_SCHEMA_VERSION, KNOWLEDGE_EVENTS_FILENAME,
+    KNOWLEDGE_LEDGER_FILENAME, KNOWLEDGE_LEDGER_STATE_SCHEMA_VERSION, KnowledgeClaim,
+    KnowledgeClaimEventInput, KnowledgeEventKind, KnowledgeEventRecord, KnowledgeLedgerState,
+    KnowledgeTier, KnowledgeTransferInput, PlayerRenderPermission, TruthStatus,
+    can_render_knowledge_tier_to_player, confirm_claim, contradict_claim, false_belief_claim,
+    infer_claim, load_knowledge_events, observe_claim, player_render_permission,
+    rebuild_knowledge_ledger, render_rule_for_player, replay_knowledge_state, rumor_claim,
+    transfer_claim_between_holders,
 };
 pub use location_graph::{
     LOCATION_EVENT_SCHEMA_VERSION, LOCATION_EVENTS_FILENAME, LOCATION_GRAPH_FILENAME,
