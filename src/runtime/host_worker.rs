@@ -11,7 +11,9 @@ use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
 use std::io::{self, Write};
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
 
@@ -114,6 +116,9 @@ pub(crate) fn handle_host_worker(
     let interval = Duration::from_millis(options.interval_ms.max(250));
     ensure_webgpt_lane_runtime_isolated(options)?;
     let mut emitted = HashSet::new();
+    let (lane_completion_tx, lane_completion_rx) = mpsc::channel();
+    let mut text_inflight = HashSet::new();
+    let mut visual_inflight = HashSet::new();
     let initial_world_id = resolve_host_worker_world_id(store_root, world_id)?;
     let (initial_text_backend, initial_visual_backend) =
         if let Some(initial_world_id) = initial_world_id.as_deref() {
@@ -134,6 +139,11 @@ pub(crate) fn handle_host_worker(
     }))?;
 
     loop {
+        drain_lane_completions(
+            &lane_completion_rx,
+            &mut text_inflight,
+            &mut visual_inflight,
+        );
         let Some(world_id) = resolve_host_worker_world_id(store_root, world_id)? else {
             if emitted.insert("worker-waiting-for-active-world".to_owned()) {
                 emit_host_event(&serde_json::json!({
@@ -172,13 +182,19 @@ pub(crate) fn handle_host_worker(
                 options,
             )
         } else {
+            let mut dispatch_runtime = HostWorkerDispatchRuntime {
+                emitted: &mut emitted,
+                lane_completion_tx: &lane_completion_tx,
+                text_inflight: &mut text_inflight,
+                visual_inflight: &mut visual_inflight,
+            };
             emit_host_text_and_visual_events_parallel(
                 store_root,
                 world_id.as_str(),
-                &mut emitted,
                 text_backend,
                 visual_backend,
                 options,
+                &mut dispatch_runtime,
             )
         };
         match tick_result {
@@ -336,7 +352,114 @@ enum HostVisualDispatchResult {
     Webgpt(WebGptImageDispatchRecord),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostWorkerLane {
+    Text,
+    Visual,
+}
+
+#[derive(Debug)]
+struct HostWorkerLaneCompletion {
+    lane: HostWorkerLane,
+    key: String,
+}
+
+struct HostWorkerDispatchRuntime<'a> {
+    emitted: &'a mut HashSet<String>,
+    lane_completion_tx: &'a Sender<HostWorkerLaneCompletion>,
+    text_inflight: &'a mut HashSet<String>,
+    visual_inflight: &'a mut HashSet<String>,
+}
+
+fn drain_lane_completions(
+    lane_completion_rx: &Receiver<HostWorkerLaneCompletion>,
+    text_inflight: &mut HashSet<String>,
+    visual_inflight: &mut HashSet<String>,
+) {
+    while let Ok(completion) = lane_completion_rx.try_recv() {
+        match completion.lane {
+            HostWorkerLane::Text => {
+                text_inflight.remove(&completion.key);
+            }
+            HostWorkerLane::Visual => {
+                visual_inflight.remove(&completion.key);
+            }
+        }
+    }
+}
+
 fn emit_host_text_and_visual_events_parallel(
+    store_root: Option<&Path>,
+    world_id: &str,
+    text_backend: HostWorkerTextBackend,
+    visual_backend: HostWorkerVisualBackend,
+    options: &HostWorkerOptions,
+    runtime: &mut HostWorkerDispatchRuntime<'_>,
+) -> Result<bool> {
+    if options.once {
+        return emit_host_text_and_visual_events_blocking(
+            store_root,
+            world_id,
+            runtime.emitted,
+            text_backend,
+            visual_backend,
+            options,
+        );
+    }
+
+    let mut emitted_any = false;
+    let pending = load_pending_agent_turn(store_root, world_id).ok();
+    if let Some(pending) = pending.as_ref() {
+        let key = text_dispatch_key(pending);
+        if !runtime.text_inflight.contains(&key) {
+            if let Some(record_path) =
+                existing_non_retryable_text_dispatch_record(store_root, pending)?
+            {
+                if emit_text_dispatch_skipped_once(pending, record_path.as_str(), runtime.emitted)?
+                {
+                    emitted_any = true;
+                }
+            } else {
+                emit_host_text_dispatch_begin(pending, runtime.emitted)?;
+                runtime.text_inflight.insert(key.clone());
+                spawn_text_dispatch_worker(
+                    store_root.map(Path::to_path_buf),
+                    pending.clone(),
+                    options.clone(),
+                    runtime.lane_completion_tx.clone(),
+                    key,
+                );
+                emitted_any = true;
+            }
+        }
+    }
+
+    let visual_claims = match visual_backend {
+        HostWorkerVisualBackend::Webgpt => {
+            claim_next_host_visual_jobs(store_root, world_id, "singulari_webgpt_image_worker")?
+        }
+        HostWorkerVisualBackend::None => Vec::new(),
+    };
+    for claim in visual_claims {
+        let key = visual_dispatch_key(&claim);
+        if runtime.visual_inflight.contains(&key) {
+            continue;
+        }
+        runtime.visual_inflight.insert(key.clone());
+        spawn_visual_dispatch_worker(
+            store_root.map(Path::to_path_buf),
+            claim,
+            options.clone(),
+            runtime.lane_completion_tx.clone(),
+            key,
+        );
+        emitted_any = true;
+    }
+
+    Ok(emitted_any)
+}
+
+fn emit_host_text_and_visual_events_blocking(
     store_root: Option<&Path>,
     world_id: &str,
     emitted: &mut HashSet<String>,
@@ -347,12 +470,6 @@ fn emit_host_text_and_visual_events_parallel(
     let pending = load_pending_agent_turn(store_root, world_id).ok();
     if let Some(pending) = pending.as_ref() {
         emit_host_text_dispatch_begin(pending, emitted)?;
-        let text_result = match text_backend {
-            HostWorkerTextBackend::Webgpt => HostTextDispatchResult::Webgpt {
-                outcome: dispatch_pending_agent_turn_via_webgpt(store_root, pending, options)?,
-            },
-        };
-        return emit_text_dispatch_result(pending, text_result, emitted);
     }
 
     let visual_claims = match visual_backend {
@@ -431,6 +548,82 @@ fn emit_host_text_and_visual_events_parallel(
     Ok(emitted_any)
 }
 
+fn spawn_text_dispatch_worker(
+    store_root: Option<PathBuf>,
+    pending: singulari_world::PendingAgentTurn,
+    options: HostWorkerOptions,
+    lane_completion_tx: Sender<HostWorkerLaneCompletion>,
+    key: String,
+) {
+    thread::spawn(move || {
+        let world_id = pending.world_id.clone();
+        let dispatch = panic::catch_unwind(AssertUnwindSafe(|| {
+            let result = match options.text_backend {
+                HostWorkerTextBackend::Webgpt => HostTextDispatchResult::Webgpt {
+                    outcome: dispatch_pending_agent_turn_via_webgpt(
+                        store_root.as_deref(),
+                        &pending,
+                        &options,
+                    )?,
+                },
+            };
+            emit_text_dispatch_result_without_dedupe(&pending, result)
+        }));
+        match dispatch {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                let _ = emit_host_event(&host_worker_tick_failed_event(world_id.as_str(), &error));
+            }
+            Err(panic) => {
+                let error = thread_panic_error("text dispatch", panic.as_ref());
+                let _ = emit_host_event(&host_worker_tick_failed_event(world_id.as_str(), &error));
+            }
+        }
+        let _ = lane_completion_tx.send(HostWorkerLaneCompletion {
+            lane: HostWorkerLane::Text,
+            key,
+        });
+    });
+}
+
+fn spawn_visual_dispatch_worker(
+    store_root: Option<PathBuf>,
+    claim: singulari_world::VisualJobClaim,
+    options: HostWorkerOptions,
+    lane_completion_tx: Sender<HostWorkerLaneCompletion>,
+    key: String,
+) {
+    thread::spawn(move || {
+        let world_id = claim.world_id.clone();
+        let dispatch = panic::catch_unwind(AssertUnwindSafe(|| {
+            dispatch_visual_job_via_webgpt_with_claim_release(
+                store_root.as_deref(),
+                &claim,
+                &options,
+            )
+            .map(HostVisualDispatchResult::Webgpt)
+        }));
+        match dispatch {
+            Ok(Ok(result)) => {
+                if let Err(error) = emit_visual_dispatch_result(result) {
+                    let _ = emit_host_event(&webgpt_image_failed_event(world_id.as_str(), &error));
+                }
+            }
+            Ok(Err(error)) => {
+                let _ = emit_host_event(&webgpt_image_failed_event(world_id.as_str(), &error));
+            }
+            Err(panic) => {
+                let error = thread_panic_error("image dispatch", panic.as_ref());
+                let _ = emit_host_event(&webgpt_image_failed_event(world_id.as_str(), &error));
+            }
+        }
+        let _ = lane_completion_tx.send(HostWorkerLaneCompletion {
+            lane: HostWorkerLane::Visual,
+            key,
+        });
+    });
+}
+
 fn dispatch_visual_job_via_webgpt_with_claim_release(
     store_root: Option<&Path>,
     claim: &singulari_world::VisualJobClaim,
@@ -476,6 +669,26 @@ fn emit_text_dispatch_result(
     }
 }
 
+fn emit_text_dispatch_result_without_dedupe(
+    pending: &singulari_world::PendingAgentTurn,
+    result: HostTextDispatchResult,
+) -> Result<()> {
+    match result {
+        HostTextDispatchResult::Webgpt { outcome } => match outcome {
+            WebGptDispatchOutcome::Started(record) => {
+                emit_host_event(&webgpt_dispatch_started_event(pending, &record))?;
+            }
+            WebGptDispatchOutcome::AlreadyDispatched(record_path) => {
+                emit_host_event(&webgpt_dispatch_skipped_event(
+                    pending,
+                    record_path.as_str(),
+                ))?;
+            }
+        },
+    }
+    Ok(())
+}
+
 fn emit_webgpt_text_dispatch_result(
     pending: &singulari_world::PendingAgentTurn,
     outcome: WebGptDispatchOutcome,
@@ -501,6 +714,51 @@ fn emit_webgpt_text_dispatch_result(
         }
     }
     Ok(true)
+}
+
+fn emit_text_dispatch_skipped_once(
+    pending: &singulari_world::PendingAgentTurn,
+    record_path: &str,
+    emitted: &mut HashSet<String>,
+) -> Result<bool> {
+    let event_key = format!("webgpt-skipped:{}:{}", pending.world_id, pending.turn_id);
+    if !emitted.insert(event_key) {
+        return Ok(false);
+    }
+    emit_host_event(&webgpt_dispatch_skipped_event(pending, record_path))?;
+    Ok(true)
+}
+
+fn existing_non_retryable_text_dispatch_record(
+    store_root: Option<&Path>,
+    pending: &singulari_world::PendingAgentTurn,
+) -> Result<Option<String>> {
+    let record_path = text_dispatch_record_path(store_root, pending)?;
+    if !record_path.exists() || existing_dispatch_is_retryable(record_path.as_path())? {
+        return Ok(None);
+    }
+    Ok(Some(record_path.display().to_string()))
+}
+
+fn text_dispatch_record_path(
+    store_root: Option<&Path>,
+    pending: &singulari_world::PendingAgentTurn,
+) -> Result<PathBuf> {
+    let paths = resolve_store_paths(store_root)?;
+    Ok(paths
+        .worlds_dir
+        .join(pending.world_id.as_str())
+        .join("agent_bridge")
+        .join("dispatches")
+        .join(format!("{}-webgpt.json", pending.turn_id)))
+}
+
+fn text_dispatch_key(pending: &singulari_world::PendingAgentTurn) -> String {
+    format!("{}:{}", pending.world_id, pending.turn_id)
+}
+
+fn visual_dispatch_key(claim: &singulari_world::VisualJobClaim) -> String {
+    format!("{}:{}:{}", claim.world_id, claim.slot, claim.claim_id)
 }
 
 fn emit_visual_dispatch_result(result: HostVisualDispatchResult) -> Result<bool> {
