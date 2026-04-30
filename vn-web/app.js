@@ -64,6 +64,7 @@ const state = {
   visualPollTimer: null,
   runtimePollTimer: null,
   awaitingAgent: false,
+  awaitingAgentTurnId: "",
   settings: loadSettings(),
   viewMode: DEFAULT_VIEW_MODE,
 };
@@ -229,6 +230,7 @@ async function loadInitialPacket() {
 function renderPacket(packet) {
   state.packet = packet;
   state.awaitingAgent = false;
+  state.awaitingAgentTurnId = "";
   state.activeWorldId = packet.world_id;
   document.title = `${packet.title} · ${packet.turn_id}`;
   els.worldTitle.textContent = packet.title;
@@ -1198,6 +1200,13 @@ async function refreshRuntimeStatus() {
     const status = await fetchJson(runtimeStatusApiUrl);
     state.runtimeStatus = status;
     renderRuntimeStatus(status);
+    if (state.awaitingAgent) {
+      try {
+        await hydrateCommittedAgentTurnFromCurrent(state.awaitingAgentTurnId);
+      } catch (error) {
+        console.warn(`agent committed-turn hydration failed: ${error.message}`);
+      }
+    }
   } catch (error) {
     renderRuntimeStatus({
       narrative: { label: "WebGPT 연결 필요", status: "needs_connection" },
@@ -2364,6 +2373,7 @@ function normalizeNarrativeLevel(value) {
 
 function handleWaitingAgentTurn(pending, options = {}) {
   renderAgentWaitingStage(Boolean(options.initial));
+  state.awaitingAgentTurnId = pending.turn_id || "";
   selectCommand(
     pending.command_hint || `singulari-world agent-next --world-id ${pending.world_id} --json`,
   );
@@ -2397,18 +2407,12 @@ function pollCommittedAgentTurn(turnId, attempt) {
         }
         return;
       }
-      const packet = await fetchJson(currentApiUrl);
-      if (packet.turn_id === turnId) {
-        renderPacket(packet);
-        els.outcomeBadge.textContent = packet.scene.adjudication?.outcome || packet.mode;
+      if (await hydrateCommittedAgentTurnFromCurrent(turnId)) {
         return;
       }
     } catch (error) {
       try {
-        const packet = await fetchJson(currentApiUrl);
-        if (packet.turn_id === turnId) {
-          renderPacket(packet);
-          els.outcomeBadge.textContent = packet.scene.adjudication?.outcome || packet.mode;
+        if (await hydrateCommittedAgentTurnFromCurrent(turnId)) {
           return;
         }
       } catch (refreshError) {
@@ -2421,6 +2425,19 @@ function pollCommittedAgentTurn(turnId, attempt) {
       pollCommittedAgentTurn(turnId, attempt + 1);
     }
   }, AGENT_POLL_MS);
+}
+
+async function hydrateCommittedAgentTurnFromCurrent(turnId) {
+  if (!turnId) {
+    return false;
+  }
+  const packet = await fetchJson(currentApiUrl);
+  if (packet.turn_id !== turnId) {
+    return false;
+  }
+  renderPacket(packet);
+  els.outcomeBadge.textContent = packet.scene.adjudication?.outcome || packet.mode;
+  return true;
 }
 
 function selectCommand(command) {

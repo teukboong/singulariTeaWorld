@@ -1,15 +1,18 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::Serialize;
+use serde_json::Value;
 use singulari_world::{
     AgentCommitTurnOptions, AgentTurnResponse, CompilePromptContextPacketOptions,
     commit_agent_turn, compile_prompt_context_packet, resolve_store_paths,
 };
 use singulari_world::{WorldJobStatus, WriteTextTurnJobOptions, write_text_turn_job};
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use super::host_worker::HostWorkerOptions;
 
@@ -35,6 +38,8 @@ pub(crate) const DEFAULT_WEBGPT_IMAGE_CDP_PORT: u16 = 9239;
 pub(crate) const DEFAULT_WEBGPT_REFERENCE_IMAGE_CDP_PORT: u16 = 9240;
 const STALE_DISPATCH_RETRY_AFTER_SECS: i64 = 45;
 const WEBGPT_TEXT_JOB_OWNER: &str = "webgpt_host_worker";
+const MCP_PROTOCOL_VERSION: &str = "2025-03-26";
+const MCP_CLIENT_VERSION: &str = "0.1.0";
 
 fn ensure_control_safe_runtime_value(field: &str, value: &str) -> Result<()> {
     if value.chars().any(char::is_control) {
@@ -701,6 +706,253 @@ struct WebGptDispatchResult {
     error: Option<String>,
 }
 
+struct PersistentMcpToolResult {
+    pid: u32,
+    first_text: String,
+}
+
+struct PersistentMcpClient {
+    child: Child,
+    stdin: ChildStdin,
+    reader: BufReader<ChildStdout>,
+    next_id: i64,
+    advertised_tools: Option<HashSet<String>>,
+}
+
+thread_local! {
+    static WEBGPT_MCP_CLIENTS: RefCell<HashMap<String, PersistentMcpClient>> =
+        RefCell::new(HashMap::new());
+}
+
+impl PersistentMcpClient {
+    fn spawn(wrapper: &Path, runtime: &WebGptLaneRuntime, client_name: &str) -> Result<Self> {
+        let mut command = Command::new(wrapper);
+        runtime.apply_to_command(&mut command);
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .with_context(|| {
+                format!(
+                    "failed to start resident webgpt-mcp server: wrapper={}, lane={}, cdp_url={}, profile_dir={}",
+                    wrapper.display(),
+                    runtime.lane.as_str(),
+                    runtime.cdp_url(),
+                    runtime.profile_dir.display()
+                )
+            })?;
+        let stdin = child
+            .stdin
+            .take()
+            .context("resident webgpt-mcp stdin unavailable")?;
+        let stdout = child
+            .stdout
+            .take()
+            .context("resident webgpt-mcp stdout unavailable")?;
+        let mut client = Self {
+            child,
+            stdin,
+            reader: BufReader::new(stdout),
+            next_id: 1,
+            advertised_tools: None,
+        };
+        let initialize_id = client.next_jsonrpc_id();
+        client.send_json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": initialize_id,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": client_name, "version": MCP_CLIENT_VERSION},
+            },
+        }))?;
+        client
+            .read_response(initialize_id)
+            .context("resident webgpt-mcp initialize failed")?;
+        client.send_json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+        }))?;
+        Ok(client)
+    }
+
+    fn next_jsonrpc_id(&mut self) -> i64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
+    fn child_id(&self) -> u32 {
+        self.child.id()
+    }
+
+    fn send_json(&mut self, payload: &Value) -> Result<()> {
+        if let Some(status) = self.child.try_wait()? {
+            anyhow::bail!("resident webgpt-mcp exited before request: status={status}");
+        }
+        serde_json::to_writer(&mut self.stdin, payload)
+            .context("failed to serialize resident MCP payload")?;
+        self.stdin
+            .write_all(b"\n")
+            .context("failed to terminate resident MCP payload line")?;
+        self.stdin
+            .flush()
+            .context("failed to flush resident MCP payload")?;
+        Ok(())
+    }
+
+    fn read_response(&mut self, expected_id: i64) -> Result<Value> {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let read = self
+                .reader
+                .read_line(&mut line)
+                .context("failed to read resident MCP response")?;
+            if read == 0 {
+                anyhow::bail!(
+                    "resident webgpt-mcp closed stdout while waiting for id={expected_id}"
+                );
+            }
+            let trimmed = line.trim();
+            let payload: Value = serde_json::from_str(trimmed).with_context(|| {
+                format!(
+                    "invalid resident MCP JSON response while waiting for id={expected_id}: {trimmed}"
+                )
+            })?;
+            if payload.get("id").and_then(Value::as_i64) != Some(expected_id) {
+                continue;
+            }
+            if let Some(error) = payload.get("error") {
+                anyhow::bail!("resident MCP response id={expected_id} returned error: {error}");
+            }
+            return Ok(payload);
+        }
+    }
+
+    fn ensure_tool_advertised(&mut self, tool_name: &str) -> Result<()> {
+        if let Some(tools) = &self.advertised_tools {
+            if tools.contains(tool_name) {
+                return Ok(());
+            }
+            anyhow::bail!(
+                "expected resident MCP tool {tool_name:?} not found in advertised tools {tools:?}"
+            );
+        }
+        let request_id = self.next_jsonrpc_id();
+        self.send_json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "tools/list",
+            "params": {},
+        }))?;
+        let response = self
+            .read_response(request_id)
+            .context("resident webgpt-mcp tools/list failed")?;
+        let tools = response
+            .get("result")
+            .and_then(|value| value.get("tools"))
+            .and_then(Value::as_array)
+            .context("resident webgpt-mcp tools/list response missing tools")?
+            .iter()
+            .filter_map(|item| item.get("name").and_then(Value::as_str))
+            .map(str::to_owned)
+            .collect::<HashSet<_>>();
+        if !tools.contains(tool_name) {
+            anyhow::bail!(
+                "expected resident MCP tool {tool_name:?} not found in advertised tools {tools:?}"
+            );
+        }
+        self.advertised_tools = Some(tools);
+        Ok(())
+    }
+
+    fn call_tool(
+        &mut self,
+        tool_name: &str,
+        arguments: &Value,
+        require_tool: bool,
+    ) -> Result<PersistentMcpToolResult> {
+        if require_tool {
+            self.ensure_tool_advertised(tool_name)?;
+        }
+        let request_id = self.next_jsonrpc_id();
+        self.send_json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "tools/call",
+            "params": {"name": tool_name, "arguments": arguments},
+        }))?;
+        let call_response = self
+            .read_response(request_id)
+            .context("resident webgpt-mcp tools/call failed")?;
+        let first_text = call_response
+            .get("result")
+            .and_then(|value| value.get("content"))
+            .and_then(Value::as_array)
+            .and_then(|items| {
+                items.iter().find_map(|item| {
+                    if item.get("type").and_then(Value::as_str) == Some("text") {
+                        item.get("text").and_then(Value::as_str)
+                    } else {
+                        None
+                    }
+                })
+            })
+            .context("resident webgpt-mcp tool call returned no text content")?
+            .to_owned();
+        Ok(PersistentMcpToolResult {
+            pid: self.child_id(),
+            first_text,
+        })
+    }
+}
+
+impl Drop for PersistentMcpClient {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn persistent_mcp_client_key(wrapper: &Path, runtime: &WebGptLaneRuntime) -> String {
+    format!(
+        "{}|{}|{}|{}",
+        wrapper.display(),
+        runtime.lane.as_str(),
+        runtime.cdp_url(),
+        runtime.profile_dir.display()
+    )
+}
+
+fn call_resident_mcp_tool(
+    wrapper: &Path,
+    runtime: &WebGptLaneRuntime,
+    client_name: &str,
+    tool_name: &str,
+    arguments: &Value,
+    require_tool: bool,
+) -> Result<PersistentMcpToolResult> {
+    WEBGPT_MCP_CLIENTS.with(|clients| {
+        let mut clients = clients.borrow_mut();
+        let key = persistent_mcp_client_key(wrapper, runtime);
+        if !clients.contains_key(key.as_str()) {
+            let client = PersistentMcpClient::spawn(wrapper, runtime, client_name)?;
+            clients.insert(key.clone(), client);
+        }
+        let result = clients
+            .get_mut(key.as_str())
+            .context("resident webgpt-mcp client missing after insert")?
+            .call_tool(tool_name, arguments, require_tool);
+        if result.is_err() {
+            clients.remove(key.as_str());
+        }
+        result
+    })
+}
+
 pub(super) fn prewarm_webgpt_lane_sessions(
     options: &HostWorkerOptions,
     include_text: bool,
@@ -736,6 +988,32 @@ fn prewarm_webgpt_lane_session(
     lane: &'static str,
     runtime: &WebGptLaneRuntime,
 ) -> Result<WebGptLanePrewarmRecord> {
+    if lane == "text" {
+        call_resident_mcp_tool(
+            wrapper,
+            runtime,
+            "singulari-world-webgpt-prewarm-text",
+            "webgpt_health",
+            &serde_json::json!({"probe_live": false, "auto_recover": false}),
+            true,
+        )
+        .with_context(|| {
+            format!(
+                "failed to prewarm resident WebGPT text lane: wrapper={}, cdp_url={}, profile_dir={}",
+                wrapper.display(),
+                runtime.cdp_url(),
+                runtime.profile_dir.display()
+            )
+        })?;
+        return Ok(WebGptLanePrewarmRecord {
+            lane,
+            cdp_port: runtime.cdp_port,
+            cdp_url: runtime.cdp_url(),
+            profile_dir: runtime.profile_dir.display().to_string(),
+            status: "ready",
+            exit_code: None,
+        });
+    }
     let mut command = Command::new(wrapper);
     runtime.apply_to_command(&mut command);
     let output = command
@@ -961,56 +1239,43 @@ fn run_webgpt_mcp_research_turn(
         reasoning_level,
         timeout_secs,
     );
-    let arguments_raw = serde_json::to_string(&arguments)?;
-    let mut command = Command::new(wrapper);
-    runtime.apply_to_command(&mut command);
-    let child = command
-            .arg("client-call")
-            .arg("--wrapper")
-            .arg(wrapper)
-            .arg("--client-name")
-            .arg("singulari-world-webgpt-turn")
-            .arg("--require-tool")
-            .arg("--tool")
-            .arg("webgpt_research")
-            .arg("--arguments")
-            .arg(arguments_raw)
-            .arg("--output")
-            .arg("first-text")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .with_context(|| {
-                format!(
-                    "failed to spawn webgpt-mcp client-call: wrapper={}, lane={}, cdp_url={}, profile_dir={}",
-                    wrapper.display(),
-                    runtime.lane.as_str(),
-                    runtime.cdp_url(),
-                    runtime.profile_dir.display()
-                )
-            })?;
-    let pid = child.id();
-    let output = child
-        .wait_with_output()
-        .context("failed to wait for webgpt-mcp client-call")?;
-    fs::write(paths.stdout_path, &output.stdout)
+    let tool_result = match call_resident_mcp_tool(
+        wrapper,
+        runtime,
+        "singulari-world-webgpt-turn",
+        "webgpt_research",
+        &arguments,
+        true,
+    ) {
+        Ok(result) => result,
+        Err(error) => {
+            fs::write(paths.stdout_path, b"")
+                .with_context(|| format!("failed to write {}", paths.stdout_path.display()))?;
+            fs::write(
+                paths.stderr_path,
+                format!("resident webgpt-mcp call failed: {error:#}").as_bytes(),
+            )
+            .with_context(|| format!("failed to write {}", paths.stderr_path.display()))?;
+            return Ok(WebGptDispatchResult {
+                success: false,
+                pid: 0,
+                exit_code: None,
+                raw_conversation_id: None,
+                current_model: None,
+                current_reasoning_level: None,
+                error: Some(format!("{error:#}")),
+            });
+        }
+    };
+    let server_pid = tool_result.pid;
+    fs::write(paths.stdout_path, tool_result.first_text.as_bytes())
         .with_context(|| format!("failed to write {}", paths.stdout_path.display()))?;
-    fs::write(paths.stderr_path, &output.stderr)
-        .with_context(|| format!("failed to write {}", paths.stderr_path.display()))?;
-    if !output.status.success() {
-        return Ok(WebGptDispatchResult {
-            success: false,
-            pid,
-            exit_code: output.status.code(),
-            raw_conversation_id: None,
-            current_model: None,
-            current_reasoning_level: None,
-            error: Some(String::from_utf8_lossy(&output.stderr).trim().to_owned())
-                .filter(|value| !value.is_empty()),
-        });
-    }
-    let raw_result = String::from_utf8(output.stdout)
-        .context("webgpt-mcp client-call stdout was not valid UTF-8")?;
+    fs::write(
+        paths.stderr_path,
+        b"resident webgpt-mcp client reused; server stderr is inherited by host-worker stderr\n",
+    )
+    .with_context(|| format!("failed to write {}", paths.stderr_path.display()))?;
+    let raw_result = tool_result.first_text;
     fs::write(paths.result_path, raw_result.as_bytes())
         .with_context(|| format!("failed to write {}", paths.result_path.display()))?;
     let result = serde_json::from_str::<serde_json::Value>(&raw_result)
@@ -1025,8 +1290,8 @@ fn run_webgpt_mcp_research_turn(
         .with_context(|| format!("failed to write {}", paths.response_path.display()))?;
     Ok(WebGptDispatchResult {
         success: true,
-        pid,
-        exit_code: output.status.code(),
+        pid: server_pid,
+        exit_code: None,
         raw_conversation_id: result
             .get("raw_conversation_id")
             .and_then(serde_json::Value::as_str)
@@ -2173,6 +2438,9 @@ premise:
             "narrative_turn_packet.visible_context.affordance_graph와 pre_turn_simulation.available_affordances는 slot 1..5의 행동 허가표다.",
             "narrative_turn_packet.adjudication_boundary는 판정 전용이다.",
             "웹 검색, 외부 사이트 탐색, repo 탐색, 소스 파일 읽기를 하지 마라.",
+            "allowed_reference_atoms JSON:",
+            "`target_refs`, `pressure_refs`, `evidence_refs`, `gate_ref`",
+            "정확한 ref가 없으면 `current_turn`, `player_input`, 선택된",
             "\"schema_version\":\"singulari.narrative_turn_packet.v1\"",
             "\"pre_turn_simulation\"",
             "\"available_affordances\"",
@@ -2210,6 +2478,28 @@ premise:
                 "webgpt prompt missing realtime contract: {required}"
             );
         }
+
+        let allowed_marker = "allowed_reference_atoms JSON:";
+        let allowed_marker_index = prompt
+            .find(allowed_marker)
+            .context("allowed reference atoms marker missing")?;
+        let after_allowed_marker = &prompt[allowed_marker_index + allowed_marker.len()..];
+        let allowed_fence_start = after_allowed_marker
+            .find("```json")
+            .context("allowed reference atoms JSON fence start missing")?;
+        let after_allowed_fence = &after_allowed_marker[allowed_fence_start + "```json".len()..];
+        let allowed_fence_end = after_allowed_fence
+            .find("```")
+            .context("allowed reference atoms JSON fence end missing")?;
+        let allowed_refs: Vec<String> =
+            serde_json::from_str(after_allowed_fence[..allowed_fence_end].trim())?;
+        assert!(allowed_refs.iter().any(|value| value == "current_turn"));
+        assert!(allowed_refs.iter().any(|value| value == "player_input"));
+        assert!(allowed_refs.iter().all(|value| {
+            !value.chars().any(|character| character.is_whitespace())
+                && !value.starts_with('/')
+                && !value.starts_with("singulari.")
+        }));
 
         let marker = "narrative turn packet JSON:";
         let marker_index = prompt

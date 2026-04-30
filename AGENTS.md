@@ -93,14 +93,15 @@ scripts/setup-webgpt-runtime.sh
 target/release/singulari-world --store-root .world-store vn-serve --port 4177
 ```
 
-`vn-serve` owns the default deployment UX. When the browser creates a pending
-turn, asks for CG retry, or submits work for the active world, it wakes
-`host-worker --once`. That worker consumes pending text and visual jobs through
-WebGPT, writes validated results back to the store, and exits. Do not require
-`launchd`/KeepAlive for normal play. Visual jobs must close through the
+`vn-serve` owns the default deployment UX. It starts one resident `host-worker`
+for the active store. When the browser creates a pending turn, asks for CG
+retry, or submits work, that resident worker consumes pending text and visual
+jobs through WebGPT and writes validated results back to the store. Do not
+require `launchd`/KeepAlive for normal play. Visual jobs must close through the
 repo-owned visual-job contract: claim -> WebGPT image generation -> PNG saved to
 `destination_path` -> complete. Do not route them through this Codex chat's
-visual generation session.
+visual generation session. Image-lane failures emit retryable worker events;
+they must not kill the resident text worker or delay the next player input.
 
 The VN browser app is the only player-facing frontend. WebGPT is the only
 runtime backend. For diagnostics, the equivalent worker command is:
@@ -135,10 +136,11 @@ WebGPT text and image lanes must run as separate browser sessions, not as one
 window that switches tools. Text defaults to CDP port `9238`, turn CG image
 defaults to `9239`, and reference/design image defaults to `9240`; the profile
 dirs are separate under `~/.hesperides/singulari-world/webgpt/`. Long-running
-diagnostic `host-worker` processes prewarm all three lane sessions once before
-dispatch; browser-triggered `host-worker --once` dispatches directly so player
-input is not delayed by repeated health probes. Starting with a shared port or
-shared profile is a contract violation.
+`host-worker` processes prewarm all three lane sessions once before dispatch;
+browser play reuses the resident worker and the text lane reuses a resident
+MCP stdio client, so player input is not delayed by repeated worker and
+`webgpt-mcp client-call` startup. Starting with a shared port or shared profile
+is a contract violation.
 The VN launcher also writes a locked `agent_bridge/backend_selection.json` on
 world creation. The only valid text/visual backend is WebGPT. Old local
 `codex-app-server` selections are legacy data and must not start Codex App
@@ -340,12 +342,11 @@ singulari-world host-worker \
   --interval-ms 750
 ```
 
-`vn-serve` is the app-facing supervisor for default play. It wakes
-`host-worker --once` on browser-created work instead of relying on a
-long-running keepalive loop. It never starts `codex app-server` and never reads
-Codex thread bindings.
-When no active world exists, `vn-serve` waits for the user to create or load one
-before any one-shot worker is needed.
+`vn-serve` is the app-facing supervisor for default play. It starts a resident
+`host-worker` for browser-created work instead of spawning a worker per click.
+It never starts `codex app-server` and never reads Codex thread bindings. When
+no active world exists, the resident worker waits for the user to create or load
+one.
 
 `launchctl` is not the normal deployment path. If a custom host starts a
 long-running `host-worker`, it still must use the same WebGPT-only flags and
@@ -364,10 +365,14 @@ for ChatGPT image generation and closes visual jobs with the saved extracted
 PNG. The built-in WebGPT lanes must use separate browser sessions: text
 defaults to CDP port `9238`, turn CG image defaults to `9239`, reference/design
 image defaults to `9240`, and each lane has its own profile dir under
-`~/.hesperides/singulari-world/webgpt/`. Long-running `host-worker` processes
-prewarm all three lane sessions for WebGPT/WebGPT worlds before dispatch;
-browser-triggered `host-worker --once` skips blocking prewarm and lets the
-actual text/image call attach to its lane directly.
+`~/.hesperides/singulari-world/webgpt/`. Resident `host-worker` processes
+prewarm all three lane sessions for WebGPT/WebGPT worlds before dispatch; the
+text lane keeps a resident MCP stdio client alive so the actual text call can
+attach to its lane without redoing worker and MCP startup every turn.
+Text prompts also include `allowed_reference_atoms` compiled from the narrative
+turn packet. WebGPT must copy refs from that list for `gate_ref`,
+`evidence_refs`, `target_refs`, and `grounding_ref`; invented free-text refs
+such as `mind:*` labels are audit failures, not normal repair budget.
 Worlds created by the VN launcher write a locked
 `agent_bridge/backend_selection.json`. That file records WebGPT/WebGPT and keeps
 old backend flags from reintroducing a second engine. The default WebGPT cadence

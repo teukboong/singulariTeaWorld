@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use serde_json::Value;
 use singulari_world::{AgentOutputContract, PromptContextPacket};
+use std::collections::BTreeSet;
 
 const NARRATIVE_TURN_PACKET_SCHEMA_VERSION: &str = "singulari.narrative_turn_packet.v1";
 
@@ -447,9 +448,12 @@ pub(super) fn build_webgpt_turn_prompt(prompt_context: &PromptContextPacket) -> 
     let output_contract =
         serde_json::from_value::<AgentOutputContract>(prompt_context.output_contract.clone())
             .context("webgpt prompt context output_contract was not an AgentOutputContract")?;
-    let narrative_turn_packet =
-        serde_json::to_string(&build_narrative_turn_packet(prompt_context)?)
-            .context("failed to serialize webgpt narrative turn packet")?;
+    let narrative_turn_packet_value = build_narrative_turn_packet(prompt_context)?;
+    let allowed_reference_atoms =
+        serde_json::to_string_pretty(&build_allowed_reference_atoms(&narrative_turn_packet_value))
+            .context("failed to serialize webgpt allowed reference atoms")?;
+    let narrative_turn_packet = serde_json::to_string(&narrative_turn_packet_value)
+        .context("failed to serialize webgpt narrative turn packet")?;
     let narrative_budget = &output_contract.narrative_budget;
     Ok(format!(
         r#"Singulari World web frontend에서 pending turn 하나가 들어왔어. 너는 WebGPT narrative engine adapter다.
@@ -488,6 +492,21 @@ pub(super) fn build_webgpt_turn_prompt(prompt_context: &PromptContextPacket) -> 
 - conversation/project context가 compact 되었거나 narrative turn packet과 충돌하면 narrative turn packet을 우선한다.
 - 웹 검색, 외부 사이트 탐색, repo 탐색, 소스 파일 읽기를 하지 마라. 필요한 스키마와 revival packet은 이 프롬프트 안에 있다.
 
+참조 ref 계약:
+- `target_refs`, `pressure_refs`, `evidence_refs`, `gate_ref`,
+  `grounding_ref`, `process_ref`, `effect.target_ref`는 아래
+  `allowed_reference_atoms`에 있는 문자열만 정확히 복사한다.
+- 몸/자원/위치/지식 상태를 설명하고 싶어도 새 ref를 만들지 않는다.
+  정확한 ref가 없으면 `current_turn`, `player_input`, 선택된
+  affordance_id, pressure_id, process_id 중 하나를 쓴다.
+- 사람이 읽는 설명 문구, 상태 요약, JSON pointer, 새 `mind:*`,
+  `body:*`, `rel:*` 같은 임의 ref는 금지한다.
+
+allowed_reference_atoms JSON:
+```json
+{allowed_reference_atoms}
+```
+
 {agent_schema}
 
 narrative turn packet JSON:
@@ -506,11 +525,71 @@ narrative turn packet JSON:
         major_blocks = narrative_budget.major_turn_blocks,
         major_target_chars = narrative_budget.major_target_chars,
         text_design_directive = SEEDLESS_PROSE_CONTRACT,
+        allowed_reference_atoms = allowed_reference_atoms,
         agent_schema = COMPACT_AGENT_TURN_RESPONSE_SCHEMA_GUIDE,
         narrative_turn_packet = narrative_turn_packet,
         world_id = prompt_context.world_id,
         turn_id = prompt_context.turn_id,
     ))
+}
+
+fn build_allowed_reference_atoms(narrative_turn_packet: &Value) -> Vec<String> {
+    let mut refs = BTreeSet::new();
+    refs.insert("current_turn".to_owned());
+    refs.insert("player_input".to_owned());
+    collect_allowed_reference_atoms(None, narrative_turn_packet, &mut refs);
+    refs.into_iter().collect()
+}
+
+fn collect_allowed_reference_atoms(key: Option<&str>, value: &Value, refs: &mut BTreeSet<String>) {
+    match value {
+        Value::Object(map) => {
+            for (child_key, child_value) in map {
+                collect_allowed_reference_atoms(Some(child_key.as_str()), child_value, refs);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_allowed_reference_atoms(key, item, refs);
+            }
+        }
+        Value::String(text) if key.is_some_and(is_reference_key) && is_ref_atom(text) => {
+            refs.insert(text.to_owned());
+        }
+        _ => {}
+    }
+}
+
+fn is_reference_key(key: &str) -> bool {
+    key.ends_with("_id")
+        || key.ends_with("_ids")
+        || key.ends_with("_ref")
+        || key.ends_with("_refs")
+        || matches!(
+            key,
+            "actor_ref" | "source_entity_id" | "target_entity_id" | "character_id"
+        )
+}
+
+fn is_ref_atom(value: &str) -> bool {
+    let trimmed = value.trim();
+    if trimmed != value || trimmed.is_empty() || trimmed.len() > 180 {
+        return false;
+    }
+    if trimmed.starts_with('/') || trimmed.starts_with("singulari.") {
+        return false;
+    }
+    if trimmed
+        .chars()
+        .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return false;
+    }
+    matches!(trimmed, "current_turn" | "player_input")
+        || trimmed.starts_with("turn_")
+        || trimmed.starts_with("stw_")
+        || trimmed.contains(':')
+        || trimmed.contains('.')
 }
 
 fn build_narrative_turn_packet(prompt_context: &PromptContextPacket) -> Result<Value> {

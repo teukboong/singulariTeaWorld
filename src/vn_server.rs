@@ -39,10 +39,8 @@ use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 #[cfg(not(test))]
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
-#[cfg(not(test))]
-use std::thread;
 
 const INDEX_HTML: &str = include_str!("../vn-web/index.html");
 const APP_JS: &str = include_str!("../vn-web/app.js");
@@ -301,6 +299,8 @@ struct VnCgGalleryItem {
 struct VnServerState {
     store_root: Option<PathBuf>,
     world_id: Mutex<String>,
+    #[cfg(not(test))]
+    host_worker: Mutex<Option<Child>>,
 }
 
 #[derive(Debug)]
@@ -329,6 +329,8 @@ pub fn serve_vn(options: &VnServeOptions) -> Result<()> {
     let state = VnServerState {
         store_root: options.store_root.clone(),
         world_id: Mutex::new(world_id),
+        #[cfg(not(test))]
+        host_worker: Mutex::new(None),
     };
     let bind_addr = format!("{}:{}", options.host, options.port);
     let listener = TcpListener::bind(bind_addr.as_str())
@@ -338,7 +340,7 @@ pub fn serve_vn(options: &VnServeOptions) -> Result<()> {
         Ok(world_id) => println!("world: {world_id}"),
         Err(_) => println!("world: <none>"),
     }
-    wake_existing_pending_work_once(&state);
+    wake_host_worker(&state, "vn_serve_start");
     for stream in listener.incoming() {
         match stream {
             Ok(mut stream) => {
@@ -547,7 +549,7 @@ fn commit_agent_turn_response(state: &VnServerState, body: &[u8]) -> HttpRespons
         response,
     }) {
         Ok(committed) => {
-            wake_host_worker_once(state, "agent_commit_visual_jobs");
+            wake_host_worker(state, "agent_commit_visual_jobs");
             json_response(&committed.packet)
         }
         Err(error) => error_response("400 Bad Request", error.to_string()),
@@ -565,7 +567,7 @@ fn cg_retry_response(state: &VnServerState, body: &[u8]) -> HttpResponse {
     };
     match request_turn_cg_retry(state, request) {
         Ok(packet) => {
-            wake_host_worker_once(state, "turn_cg_retry");
+            wake_host_worker(state, "turn_cg_retry");
             json_response(&packet)
         }
         Err(error) => error_response("400 Bad Request", error.to_string()),
@@ -613,7 +615,7 @@ fn choose_agent_pending_response(
         narrative_level: Some(normalize_narrative_level(narrative_level)),
     }) {
         Ok(pending) => {
-            wake_host_worker_once(state, "choose_agent_pending");
+            wake_host_worker(state, "choose_agent_pending");
             json_response(&vn_agent_pending_response(&pending))
         }
         Err(error) => error_response("400 Bad Request", error.to_string()),
@@ -634,25 +636,30 @@ fn vn_agent_pending_response(pending: &PendingAgentTurn) -> VnAgentPendingRespon
     }
 }
 
-fn wake_host_worker_once(state: &VnServerState, reason: &str) {
-    if let Err(error) = spawn_host_worker_once(state, reason) {
+fn wake_host_worker(state: &VnServerState, reason: &str) {
+    if let Err(error) = ensure_host_worker_running(state, reason) {
         eprintln!("vn server host-worker wake failed: reason={reason}, error={error:#}");
     }
 }
 
-fn wake_existing_pending_work_once(state: &VnServerState) {
-    let Ok(world_id) = state.world_id() else {
-        return;
-    };
-    if load_pending_agent_turn(state.store_root.as_deref(), world_id.as_str()).is_ok() {
-        wake_host_worker_once(state, "vn_serve_start_pending_turn");
-    }
-}
-
 #[cfg(not(test))]
-fn spawn_host_worker_once(state: &VnServerState, reason: &str) -> Result<()> {
+fn ensure_host_worker_running(state: &VnServerState, reason: &str) -> Result<()> {
+    let mut supervisor = state
+        .host_worker
+        .lock()
+        .map_err(|_| anyhow::anyhow!("vn server host-worker lock poisoned"))?;
+    if let Some(child) = supervisor.as_mut() {
+        match child.try_wait()? {
+            Some(status) => {
+                eprintln!(
+                    "vn server host-worker exited; restarting: reason={reason}, status={status}"
+                );
+                *supervisor = None;
+            }
+            None => return Ok(()),
+        }
+    }
     let store_paths = resolve_store_paths(state.store_root.as_deref())?;
-    let world_id = state.world_id()?;
     let stdout_path = store_paths.root.join(VN_HOST_WORKER_STDOUT);
     let stderr_path = store_paths.root.join(VN_HOST_WORKER_STDERR);
     if let Some(parent) = stdout_path.parent() {
@@ -674,28 +681,25 @@ fn spawn_host_worker_once(state: &VnServerState, reason: &str) -> Result<()> {
         .open(&stderr_path)
         .with_context(|| format!("failed to open {}", stderr_path.display()))?;
     let exe = std::env::current_exe().context("failed to resolve current singulari-world exe")?;
-    let mut child = Command::new(exe)
+    let mut command = Command::new(exe);
+    command
         .arg("--store-root")
         .arg(store_paths.root.as_os_str())
         .arg("host-worker")
-        .arg("--world-id")
-        .arg(world_id.as_str())
-        .arg("--once")
+        .arg("--interval-ms")
+        .arg("250")
         .env("SINGULARI_WORLD_VN_WORKER_WAKE_REASON", reason)
         .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr))
+        .stderr(Stdio::from(stderr));
+    let child = command
         .spawn()
-        .with_context(|| format!("failed to spawn host-worker --once: reason={reason}"))?;
-    thread::spawn(move || {
-        if let Err(error) = child.wait() {
-            eprintln!("vn server host-worker wait failed: {error}");
-        }
-    });
+        .with_context(|| format!("failed to spawn resident host-worker: reason={reason}"))?;
+    *supervisor = Some(child);
     Ok(())
 }
 
 #[cfg(test)]
-fn spawn_host_worker_once(state: &VnServerState, reason: &str) -> Result<()> {
+fn ensure_host_worker_running(state: &VnServerState, reason: &str) -> Result<()> {
     let _ = reason;
     let _ = resolve_store_paths(state.store_root.as_deref())?;
     Ok(())
@@ -1476,7 +1480,7 @@ fn new_world(state: &VnServerState, request: VnNewWorldRequest) -> Result<VnWorl
             input: INITIAL_AGENT_TURN_INPUT.to_owned(),
             narrative_level: None,
         })?;
-        wake_host_worker_once(state, "new_world_initial_turn");
+        wake_host_worker(state, "new_world_initial_turn");
         Some(vn_agent_pending_response(&pending))
     } else {
         None

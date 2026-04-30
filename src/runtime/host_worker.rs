@@ -163,25 +163,32 @@ pub(crate) fn handle_host_worker(
             effective_host_worker_backends(store_root, world_id.as_str(), options)?;
         prewarm_effective_webgpt_lanes_once(&mut emitted, text_backend, visual_backend, options)?;
         let mut emitted_this_tick = false;
-        if visual_backend == HostWorkerVisualBackend::None {
-            if emit_host_pending_agent_turn_event(
+        let tick_result = if visual_backend == HostWorkerVisualBackend::None {
+            emit_host_pending_agent_turn_event(
                 store_root,
                 world_id.as_str(),
                 &mut emitted,
                 text_backend,
                 options,
-            )? {
+            )
+        } else {
+            emit_host_text_and_visual_events_parallel(
+                store_root,
+                world_id.as_str(),
+                &mut emitted,
+                text_backend,
+                visual_backend,
+                options,
+            )
+        };
+        match tick_result {
+            Ok(true) => emitted_this_tick = true,
+            Ok(false) => {}
+            Err(error) if options.once => return Err(error),
+            Err(error) => {
+                emit_host_event(&host_worker_tick_failed_event(world_id.as_str(), &error))?;
                 emitted_this_tick = true;
             }
-        } else if emit_host_text_and_visual_events_parallel(
-            store_root,
-            world_id.as_str(),
-            &mut emitted,
-            text_backend,
-            visual_backend,
-            options,
-        )? {
-            emitted_this_tick = true;
         }
         if options.once {
             if emitted_this_tick {
@@ -409,8 +416,16 @@ fn emit_host_text_and_visual_events_parallel(
     }
 
     for result in image_results {
-        if emit_visual_dispatch_result(result?)? {
-            emitted_any = true;
+        match result {
+            Ok(result) => {
+                if emit_visual_dispatch_result(result)? {
+                    emitted_any = true;
+                }
+            }
+            Err(error) => {
+                emit_host_event(&webgpt_image_failed_event(world_id, &error))?;
+                emitted_any = true;
+            }
         }
     }
     Ok(emitted_any)
@@ -687,6 +702,16 @@ fn webgpt_image_completed_event(record: &WebGptImageDispatchRecord) -> serde_jso
     })
 }
 
+fn webgpt_image_failed_event(world_id: &str, error: &anyhow::Error) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
+        "event": "webgpt_image_generate_failed",
+        "world_id": world_id,
+        "error": format!("{error:#}"),
+        "consumer": HOST_WORKER_CONSUMER,
+    })
+}
+
 fn current_host_visual_jobs(
     store_root: Option<&Path>,
     world_id: &str,
@@ -729,6 +754,16 @@ fn emit_host_event(event: &serde_json::Value) -> Result<()> {
     writeln!(stdout, "{}", serde_json::to_string(event)?)?;
     stdout.flush()?;
     Ok(())
+}
+
+fn host_worker_tick_failed_event(world_id: &str, error: &anyhow::Error) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
+        "event": "worker_tick_failed",
+        "world_id": world_id,
+        "error": format!("{error:#}"),
+        "consumer": HOST_WORKER_CONSUMER,
+    })
 }
 
 #[cfg(test)]
@@ -820,6 +855,38 @@ mod tests {
             "stale image dispatching records must remain retryable"
         );
         Ok(())
+    }
+
+    #[test]
+    fn visual_dispatch_failure_event_keeps_worker_nonfatal_context() {
+        let error = anyhow::anyhow!("image lane timeout");
+        let event = webgpt_image_failed_event("stw_test", &error);
+
+        assert_eq!(event["event"], "webgpt_image_generate_failed");
+        assert_eq!(event["world_id"], "stw_test");
+        assert_eq!(event["consumer"], HOST_WORKER_CONSUMER);
+        assert!(
+            event["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("image lane timeout")),
+            "failure event should preserve the underlying dispatch error"
+        );
+    }
+
+    #[test]
+    fn host_worker_tick_failure_event_preserves_error_without_exiting_contract() {
+        let error = anyhow::anyhow!("database is locked");
+        let event = host_worker_tick_failed_event("stw_test", &error);
+
+        assert_eq!(event["event"], "worker_tick_failed");
+        assert_eq!(event["world_id"], "stw_test");
+        assert_eq!(event["consumer"], HOST_WORKER_CONSUMER);
+        assert!(
+            event["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("database is locked")),
+            "tick failure event should keep the transient store error visible"
+        );
     }
 
     fn visual_job_claim_for_test(claim_id: &str) -> singulari_world::VisualJobClaim {

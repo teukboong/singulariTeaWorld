@@ -70,19 +70,20 @@ Open:
 http://127.0.0.1:4177/
 ```
 
-`vn-serve` is the normal play supervisor. When the browser creates a pending
-turn, asks for CG retry, or submits work for the active world, it wakes
-`host-worker --once` for the active world. That one-shot worker consumes pending
-text and visual jobs, writes the visible result back to the world store, and
-exits. A long-running `host-worker` is still useful for diagnostics or custom
-embedding hosts, but it is not required for the default deployment UX and does
-not need `launchd`/KeepAlive.
+`vn-serve` is the normal play supervisor. It starts one resident `host-worker`
+for the active store, and browser-created pending turns or CG retry requests are
+picked up by that worker instead of spawning a fresh worker per click. The
+worker consumes pending text and visual jobs, writes the visible result back to
+the world store, and keeps its WebGPT text-lane MCP session warm across turns.
+No `launchd`/KeepAlive setup is required for the default deployment UX.
 
 The worker owns visual jobs through the WebGPT image loop. It claims one pending
 visual job per tick, calls WebGPT MCP `webgpt_generate_image`, extracts the
 generated ChatGPT image as a PNG, writes it to `destination_path`, and completes
 the job. It never uses local placeholders, shell drawing scripts, `~/.codex`
-skills, or the active chat visual session. For explicit text-only testing, pass
+skills, or the active chat visual session. Image-lane failures are emitted as
+worker events and released for retry; they must not kill the resident text
+worker or delay the next player input. For explicit text-only testing, pass
 `--visual-backend none` so CG jobs remain queued. Visual jobs are not gated
 behind pending text-turn completion; text and image dispatch run in parallel
 against their separate browser sessions.
@@ -121,16 +122,23 @@ same image-generation message; local path notes are not treated as a substitute
 for attachment. These lanes also run in separate browser sessions, not by
 switching tabs in one worker: text defaults to CDP port `9238`, turn CG image
 defaults to `9239`, and reference-asset image defaults to `9240`, with separate
-profile roots under `~/.hesperides/singulari-world/webgpt/`. Long-running
-diagnostic `host-worker` processes prewarm all three lane sessions once so the
-three-way split is visible and port/profile collisions fail early. Browser
-play wakes `host-worker --once`, which skips blocking prewarm and dispatches
-directly to the active text/image lane. The worker can
+profile roots under `~/.hesperides/singulari-world/webgpt/`. Resident
+`host-worker` processes prewarm the lanes once so the three-way split is
+visible and port/profile collisions fail early. Browser play reuses that
+resident worker; the text lane also reuses a resident MCP stdio client instead
+of spawning `webgpt-mcp client-call` for every turn. The worker can
 claim one turn-CG job and one reference-asset job in the same tick, so design
 asset generation no longer blocks scene CG. New worlds created from the VN
 launcher write a locked `agent_bridge/backend_selection.json`; the valid
 backend pair is WebGPT/WebGPT. Old local `codex-app-server` selections are
 legacy data and must not start Codex App runtime plumbing.
+
+Text prompts include an explicit `allowed_reference_atoms` list compiled from
+the narrative turn packet. WebGPT must copy refs from that list for
+`gate_ref`, `evidence_refs`, `target_refs`, and `grounding_ref`; free-text refs
+such as invented `mind:*` labels are audit failures, not a repair path to rely
+on during normal play.
+
 Inspect the exact deterministic continuity packet sent to WebGPT text without
 launching a browser:
 
