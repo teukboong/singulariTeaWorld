@@ -150,6 +150,7 @@ const WORLD_COURT_VERDICT_FILENAME: &str = "world_court_verdict.json";
 const WORLD_COURT_REJECTIONS_FILENAME: &str = "world_court_rejections.jsonl";
 const POST_COMMIT_MATERIALIZATION_EVENTS_FILENAME: &str =
     "post_commit_materialization_events.jsonl";
+const ADVISORY_WARNINGS_FILENAME: &str = "advisory_warnings.jsonl";
 
 #[derive(Debug, Clone)]
 pub struct AgentSubmitTurnOptions {
@@ -450,6 +451,17 @@ pub struct PostCommitMaterializationEvent {
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    pub recorded_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdvisoryWarningEvent {
+    pub schema_version: String,
+    pub world_id: String,
+    pub turn_id: String,
+    pub component: String,
+    pub warning_kind: String,
+    pub message: String,
     pub recorded_at: String,
 }
 
@@ -1503,10 +1515,51 @@ fn commit_advisory_post_advance_materialization(
         error,
         recorded_at: Utc::now().to_rfc3339(),
     };
-    let _ = append_jsonl_durable(
+    if let Err(error) = append_jsonl_durable(
         &files.dir.join(POST_COMMIT_MATERIALIZATION_EVENTS_FILENAME),
         &event,
-    );
+    ) {
+        record_advisory_warning(
+            files,
+            world_id,
+            turn_id,
+            component,
+            "advisory_journal_append_failed",
+            format!("{error:#}").as_str(),
+        );
+    }
+}
+
+fn record_advisory_warning(
+    files: &WorldFilePaths,
+    world_id: &str,
+    turn_id: &str,
+    component: &str,
+    warning_kind: &str,
+    message: &str,
+) {
+    let warning = AdvisoryWarningEvent {
+        schema_version: POST_COMMIT_MATERIALIZATION_EVENT_SCHEMA_VERSION.to_owned(),
+        world_id: world_id.to_owned(),
+        turn_id: turn_id.to_owned(),
+        component: component.to_owned(),
+        warning_kind: warning_kind.to_owned(),
+        message: message.to_owned(),
+        recorded_at: Utc::now().to_rfc3339(),
+    };
+    let warning_dir = files.dir.join(AGENT_BRIDGE_DIR);
+    if let Err(error) = fs::create_dir_all(&warning_dir) {
+        eprintln!(
+            "singulari advisory warning dir lost: world_id={world_id}, turn_id={turn_id}, component={component}, warning_kind={warning_kind}, warning={message}, mkdir_error={error:#}"
+        );
+        return;
+    }
+    let warning_path = warning_dir.join(ADVISORY_WARNINGS_FILENAME);
+    if let Err(error) = append_jsonl_durable(&warning_path, &warning) {
+        eprintln!(
+            "singulari advisory warning lost: world_id={world_id}, turn_id={turn_id}, component={component}, warning_kind={warning_kind}, warning={message}, write_error={error:#}"
+        );
+    }
 }
 
 fn validate_agent_response(pending: &PendingAgentTurn, response: &AgentTurnResponse) -> Result<()> {
@@ -2336,14 +2389,14 @@ fn ensure_parent_dir(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AGENT_PENDING_TURN_SCHEMA_VERSION, AGENT_TURN_RESPONSE_SCHEMA_VERSION,
-        AgentCommitTurnOptions, AgentContextRepairRequest, AgentExtraContact, AgentOutputContract,
-        AgentPrivateAdjudicationContext, AgentSubmitTurnOptions, AgentTurnResponse,
-        AgentVisibleContext, PendingAgentTurn, WORLD_COURT_REJECTION_RECORD_SCHEMA_VERSION,
-        WORLD_COURT_REJECTIONS_FILENAME, WorldCourtRejectionRecord, canonical_agent_turn_response,
-        enqueue_agent_turn, load_pending_agent_turn, narrative_budget_for_level,
-        normalize_narrative_level, selected_choice, validate_agent_next_choices,
-        validate_agent_response,
+        ADVISORY_WARNINGS_FILENAME, AGENT_BRIDGE_DIR, AGENT_PENDING_TURN_SCHEMA_VERSION,
+        AGENT_TURN_RESPONSE_SCHEMA_VERSION, AgentCommitTurnOptions, AgentContextRepairRequest,
+        AgentExtraContact, AgentOutputContract, AgentPrivateAdjudicationContext,
+        AgentSubmitTurnOptions, AgentTurnResponse, AgentVisibleContext, PendingAgentTurn,
+        WORLD_COURT_REJECTION_RECORD_SCHEMA_VERSION, WORLD_COURT_REJECTIONS_FILENAME,
+        WorldCourtRejectionRecord, canonical_agent_turn_response, enqueue_agent_turn,
+        load_pending_agent_turn, narrative_budget_for_level, normalize_narrative_level,
+        selected_choice, validate_agent_next_choices, validate_agent_response,
     };
     use crate::actor_agency::ActorAgencyPacket;
     use crate::agent_bridge::{
@@ -3213,6 +3266,14 @@ premise:
         );
 
         assert!(journal_path.is_dir());
+        let warnings = std::fs::read_to_string(
+            files
+                .dir
+                .join(AGENT_BRIDGE_DIR)
+                .join(ADVISORY_WARNINGS_FILENAME),
+        )?;
+        assert!(warnings.contains("advisory_journal_append_failed"));
+        assert!(warnings.contains("hook_ledger_promises"));
         Ok(())
     }
 

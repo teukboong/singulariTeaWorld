@@ -211,7 +211,7 @@ pub use hook_ledger::{
     SESSION_RECEIPT_FILENAME, SessionReceipt, TeaRecap, TouchCondition, UNCHOSEN_ECHOES_FILENAME,
     UnchosenEcho, accepted_agent_hook_events, append_agent_hook_events,
     initialize_hook_ledger_files, load_hook_packet_state, omission_profile_for_choice,
-    rebuild_hook_packet, record_offered_choice_set_and_echo,
+    rebuild_hook_packet, record_offered_choice_set_and_echo, validate_hook_packet_visible_refs,
 };
 pub use host_supervisor::{
     HOST_SUPERVISOR_PLAN_SCHEMA_VERSION, HostSupervisorLaneKind, HostSupervisorLanePlan,

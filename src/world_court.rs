@@ -1,6 +1,8 @@
 use crate::body_resource::BodyResourcePacket;
 use crate::encounter_surface::{EncounterSurfaceKind, EncounterSurfacePacket};
-use crate::hook_ledger::{AgentHookEvent, HookPacket, accepted_agent_hook_events};
+use crate::hook_ledger::{
+    AgentHookEvent, HookPacket, accepted_agent_hook_events, validate_hook_packet_visible_refs,
+};
 use crate::knowledge_ledger::{
     KnowledgeTier, can_render_knowledge_tier_to_player, render_rule_for_player,
     visible_knowledge_text_is_qualified,
@@ -912,6 +914,7 @@ impl CourtReferenceIndex {
             &context.visible_context.active_hook_ledger,
             "active_hook_ledger",
         )? {
+            validate_hook_packet_visible_refs(&packet)?;
             self.index_hook_packet(&packet);
         }
         Ok(())
@@ -2037,6 +2040,58 @@ mod tests {
             verdict
                 .accepted_checks
                 .contains(&"hook_event_visible_refs".to_owned())
+        );
+    }
+
+    #[test]
+    fn rejects_hidden_refs_inside_active_hook_ledger() {
+        let mut context = minimal_context(false);
+        context.visible_context.active_hook_ledger = test_json(HookPacket {
+            world_id: "stw_court".to_owned(),
+            turn_id: "turn_0001".to_owned(),
+            active_promises: vec![HookThread {
+                hook_id: "hook:hidden".to_owned(),
+                kind: HookKind::Mystery,
+                visible_promise: "무언가 아직 설명되지 않았다.".to_owned(),
+                anchor_refs: vec!["secret:door_truth".to_owned()],
+                evidence_refs: vec!["next_choices[slot=1]".to_owned()],
+                opened_by_event: "turn_0001".to_owned(),
+                payoff_contract: PayoffContract::default(),
+                return_rights: HookReturnRights::default(),
+                fatigue_score: 0,
+                status: HookStatus::Opened,
+                opened_turn_id: "turn_0001".to_owned(),
+                last_touched_turn_id: "turn_0001".to_owned(),
+            }],
+            ..HookPacket::default()
+        });
+        let hook_event = AgentHookEvent {
+            schema_version: HOOK_EVENT_SCHEMA_VERSION.to_owned(),
+            event_kind: HookEventKind::Progressed,
+            hook_id: "hook:hidden".to_owned(),
+            kind: HookKind::Mystery,
+            visible_promise: "단서가 조금 움직였다.".to_owned(),
+            anchor_refs: vec!["hook:hidden".to_owned()],
+            evidence_refs: vec!["next_choices[slot=1]".to_owned()],
+            opened_by_event: "turn_0001".to_owned(),
+            payoff_contract: PayoffContract::default(),
+            return_rights: HookReturnRights::default(),
+            summary: "진행".to_owned(),
+        };
+
+        let verdict = adjudicate_world_changes(&WorldCourtInput {
+            context: &context,
+            resolution_proposal: None,
+            next_choices: &[],
+            hook_events: &[hook_event],
+        });
+
+        assert_eq!(verdict.status, WorldCourtVerdictStatus::Reject);
+        assert!(
+            verdict
+                .violations
+                .iter()
+                .any(|violation| violation.check == "hook_event_visible_ref_index")
         );
     }
 

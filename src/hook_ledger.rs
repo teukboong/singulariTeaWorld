@@ -504,12 +504,9 @@ pub fn load_hook_packet_state(
         .unwrap_or_else(|_| HookLedgerState::empty(world_id, turn_id));
     let echo_state = read_json::<EchoLedgerState>(&world_dir.join(UNCHOSEN_ECHOES_FILENAME))
         .unwrap_or_else(|_| EchoLedgerState::empty(world_id, turn_id));
-    Ok(hook_packet_from_states(
-        world_id,
-        turn_id,
-        &hook_state,
-        &echo_state,
-    ))
+    let packet = hook_packet_from_states(world_id, turn_id, &hook_state, &echo_state);
+    validate_hook_packet_visible_refs(&packet)?;
+    Ok(packet)
 }
 
 /// Appends accepted agent-authored promise events and rebuilds the packet.
@@ -608,6 +605,7 @@ pub fn rebuild_hook_packet(world_dir: &Path, world_id: &str, turn_id: &str) -> R
     turn_id.clone_into(&mut echo_state.turn_id);
     write_json(&world_dir.join(UNCHOSEN_ECHOES_FILENAME), &echo_state)?;
     let packet = hook_packet_from_states(world_id, turn_id, &hook_state, &echo_state);
+    validate_hook_packet_visible_refs(&packet)?;
     write_json(
         &world_dir.join(SESSION_RECEIPT_FILENAME),
         &SessionReceipt {
@@ -619,6 +617,49 @@ pub fn rebuild_hook_packet(world_dir: &Path, world_id: &str, turn_id: &str) -> R
         },
     )?;
     Ok(packet)
+}
+
+/// Validates that a player-visible hook packet does not carry hidden-only refs.
+///
+/// # Errors
+///
+/// Returns an error when any hook or echo reference uses hidden/adjudication-only
+/// naming that must not enter prompt, VN, or `WorldCourt` visible context.
+pub fn validate_hook_packet_visible_refs(packet: &HookPacket) -> Result<()> {
+    for thread in packet
+        .active_promises
+        .iter()
+        .chain(packet.due_promises.iter())
+    {
+        for item_ref in thread
+            .anchor_refs
+            .iter()
+            .chain(thread.evidence_refs.iter())
+            .chain(std::iter::once(&thread.opened_by_event))
+        {
+            reject_hidden_hook_ref(item_ref, thread.hook_id.as_str())?;
+        }
+    }
+    for echo in packet
+        .active_echoes
+        .iter()
+        .chain(packet.returning_echoes.iter())
+    {
+        for item_ref in echo.anchor_refs.iter().chain(echo.evidence_refs.iter()) {
+            reject_hidden_hook_ref(item_ref, echo.echo_id.as_str())?;
+        }
+    }
+    for bias in &packet.choice_biases {
+        for item_ref in bias
+            .evidence_refs
+            .iter()
+            .chain(std::iter::once(&bias.source_ref))
+            .chain(std::iter::once(&bias.target_ref))
+        {
+            reject_hidden_hook_ref(item_ref, bias.source_ref.as_str())?;
+        }
+    }
+    Ok(())
 }
 
 /// Validates agent hook events before they enter the authoritative ledger.
@@ -702,6 +743,9 @@ pub fn omission_profile_for_choice(
     risk_tags: &[String],
     evidence_refs: &[String],
 ) -> OmissionProfile {
+    // MVP fallback for compiler-authored ChoiceContract.omission_profile values.
+    // Runtime echo generation should prefer explicit profiles carried by
+    // ChoiceContract over this text/risk heuristic.
     if !(1..=5).contains(&slot) || evidence_refs.is_empty() {
         return OmissionProfile::default();
     }
@@ -948,6 +992,18 @@ fn apply_hook_event_record(threads: &mut Vec<HookThread>, record: HookEventRecor
             }
         }
     }
+}
+
+fn reject_hidden_hook_ref(item_ref: &str, owner_ref: &str) -> Result<()> {
+    let normalized = item_ref.to_ascii_lowercase();
+    if normalized.starts_with("hidden:")
+        || normalized.starts_with("secret:")
+        || normalized.contains("adjudication_only")
+        || normalized.contains("forbidden")
+    {
+        bail!("hook packet contains hidden-only ref: owner_ref={owner_ref}, item_ref={item_ref}");
+    }
+    Ok(())
 }
 
 fn hook_packet_from_states(
@@ -1208,6 +1264,33 @@ mod tests {
         assert!(profile.can_create_echo);
         assert!(!profile.visible_stakes.is_empty());
         assert_eq!(profile.echo_weight, 5);
+    }
+
+    #[test]
+    fn hook_packet_rejects_hidden_refs() {
+        let packet = HookPacket {
+            active_promises: vec![HookThread {
+                hook_id: "hook:hidden".to_owned(),
+                kind: HookKind::Mystery,
+                visible_promise: "무언가 아직 설명되지 않았다.".to_owned(),
+                anchor_refs: vec!["hidden:door_truth".to_owned()],
+                evidence_refs: vec!["next_choices[slot=1]".to_owned()],
+                opened_by_event: "turn_0001".to_owned(),
+                payoff_contract: PayoffContract::default(),
+                return_rights: HookReturnRights::default(),
+                fatigue_score: 0,
+                status: HookStatus::Opened,
+                opened_turn_id: "turn_0001".to_owned(),
+                last_touched_turn_id: "turn_0001".to_owned(),
+            }],
+            ..HookPacket::default()
+        };
+
+        let result = validate_hook_packet_visible_refs(&packet);
+        match result {
+            Ok(()) => panic!("hidden hook ref should fail"),
+            Err(err) => assert!(err.to_string().contains("hidden-only ref")),
+        }
     }
 
     #[test]
