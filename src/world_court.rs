@@ -11,6 +11,7 @@ use crate::resolution::{
 };
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 pub const WORLD_COURT_VERDICT_SCHEMA_VERSION: &str = "singulari.world_court_verdict.v1";
 pub const WORLD_COURT_VIOLATION_SCHEMA_VERSION: &str = "singulari.world_court_violation.v1";
@@ -239,7 +240,14 @@ pub fn adjudicate_world_changes(input: &WorldCourtInput<'_>) -> WorldCourtVerdic
         if resolution_accepted {
             let change_set = world_change_set_from_resolution(proposal);
             audit_world_change_set(&change_set, &mut accepted_checks, &mut violations);
+            audit_world_change_set_against_context(
+                input.context,
+                &change_set,
+                &mut accepted_checks,
+                &mut violations,
+            );
             audit_court_semantic_layers(proposal, &mut accepted_checks, &mut violations);
+            audit_court_causality(proposal, &mut accepted_checks, &mut violations);
             match audit_resolution_choices(input.context, proposal, input.next_choices) {
                 Ok(()) => accepted_checks.push("visible_choice_text".to_owned()),
                 Err(critique) => {
@@ -370,6 +378,44 @@ fn audit_court_semantic_layers(
                 "retarget the tick to an active process:* ref",
             ));
         }
+    }
+}
+
+fn audit_court_causality(
+    proposal: &ResolutionProposal,
+    accepted_checks: &mut Vec<String>,
+    violations: &mut Vec<WorldCourtViolation>,
+) {
+    let blocked_refs = proposal
+        .gate_results
+        .iter()
+        .filter(|gate| gate.status == GateStatus::Blocked)
+        .map(|gate| gate.gate_ref.clone())
+        .collect::<Vec<_>>();
+    if blocked_refs.is_empty() {
+        push_accepted_check(accepted_checks, "blocked_gate_outcome_consistency");
+        return;
+    }
+    if matches!(
+        proposal.outcome.kind,
+        ResolutionOutcomeKind::Success | ResolutionOutcomeKind::CostlySuccess
+    ) {
+        violations.push(WorldCourtViolation {
+            schema_version: WORLD_COURT_VIOLATION_SCHEMA_VERSION.to_owned(),
+            layer: WorldCourtLayer::Causality,
+            severity: WorldCourtViolationSeverity::Blocking,
+            check: "blocked_gate_outcome_consistency".to_owned(),
+            message: "blocked gates cannot produce a full success or costly success outcome"
+                .to_owned(),
+            rejected_refs: blocked_refs,
+            required_changes: vec![
+                "change the outcome to blocked/partial/delayed/escalated or remove the blocked gate"
+                    .to_owned(),
+            ],
+            allowed_repair_scope: vec!["resolution_proposal.outcome".to_owned()],
+        });
+    } else {
+        push_accepted_check(accepted_checks, "blocked_gate_outcome_consistency");
     }
 }
 
@@ -553,6 +599,87 @@ fn audit_world_change_set(
     for claim in &change_set.visibility_claims {
         audit_visibility_claim(claim, accepted_checks, violations);
     }
+}
+
+fn audit_world_change_set_against_context(
+    context: &PromptContextPacket,
+    change_set: &WorldChangeSet,
+    accepted_checks: &mut Vec<String>,
+    violations: &mut Vec<WorldCourtViolation>,
+) {
+    let refs = court_reference_index(context);
+    for event in &change_set.proposed_events {
+        if event.event_kind == WorldChangeEventKind::ProcessTicked
+            && !refs.contains(event.target_ref.as_str())
+        {
+            violations.push(change_set_violation(
+                WorldCourtLayer::Time,
+                "world_change_set_process_tick_due",
+                "process tick events must target a process compiled as due for this turn",
+                event.target_ref.as_str(),
+                "retarget the tick to a due_process or remove the tick",
+            ));
+        }
+    }
+    for cost in &change_set.cost_claims {
+        if cost.cost_kind == CostClaimKind::Affordance && !refs.contains(cost.target_ref.as_str()) {
+            violations.push(change_set_violation(
+                WorldCourtLayer::ChoiceGrounding,
+                "world_change_set_affordance_exists",
+                "affordance costs must reference a compiled available or blocked affordance",
+                cost.target_ref.as_str(),
+                "use an affordance_id from the pre-turn simulation pass",
+            ));
+        }
+    }
+    if !change_set
+        .proposed_events
+        .iter()
+        .any(|event| event.event_kind == WorldChangeEventKind::ProcessTicked)
+        || !violations
+            .iter()
+            .any(|violation| violation.check == "world_change_set_process_tick_due")
+    {
+        push_accepted_check(accepted_checks, "world_change_set_process_tick_due");
+    }
+    if !change_set
+        .cost_claims
+        .iter()
+        .any(|cost| cost.cost_kind == CostClaimKind::Affordance)
+        || !violations
+            .iter()
+            .any(|violation| violation.check == "world_change_set_affordance_exists")
+    {
+        push_accepted_check(accepted_checks, "world_change_set_affordance_exists");
+    }
+}
+
+fn court_reference_index(context: &PromptContextPacket) -> BTreeSet<String> {
+    let mut refs = BTreeSet::from(["current_turn".to_owned()]);
+    refs.extend(context.pre_turn_simulation.source_refs.iter().cloned());
+    if let Some(choice) = &context.pre_turn_simulation.selected_choice {
+        refs.insert(format!("choice:{}", choice.slot));
+    }
+    for affordance in &context.pre_turn_simulation.available_affordances {
+        refs.insert(affordance.affordance_id.clone());
+        refs.extend(affordance.source_refs.iter().cloned());
+        refs.extend(affordance.pressure_refs.iter().cloned());
+    }
+    for affordance in &context.pre_turn_simulation.blocked_affordances {
+        refs.insert(affordance.affordance_id.clone());
+    }
+    for pressure in &context.pre_turn_simulation.pressure_obligations {
+        refs.insert(pressure.pressure_id.clone());
+        refs.extend(pressure.evidence_refs.iter().cloned());
+    }
+    for process in &context.pre_turn_simulation.due_processes {
+        refs.insert(process.process_id.clone());
+        refs.extend(process.evidence_refs.iter().cloned());
+    }
+    for risk in &context.pre_turn_simulation.causal_risks {
+        refs.extend(risk.evidence_refs.iter().cloned());
+    }
+    refs
 }
 
 fn audit_fact_mutation(
@@ -973,11 +1100,13 @@ mod tests {
         enforce_world_court_acceptance,
     };
     use crate::TurnInputKind;
+    use crate::affordance_graph::AffordanceKind;
     use crate::knowledge_ledger::KnowledgeTier;
     use crate::pre_turn_simulation::{
-        HiddenVisibilityBoundary, PRE_TURN_SIMULATION_PASS_SCHEMA_VERSION, PreTurnSimulationPass,
-        PreTurnSimulationPolicy, PressureObligation, RequiredResolutionFields,
-        SIMULATION_SOURCE_BUNDLE_SCHEMA_VERSION,
+        CompiledAffordance, DueProcess, HiddenVisibilityBoundary,
+        PRE_TURN_SIMULATION_PASS_SCHEMA_VERSION, PreTurnSimulationPass, PreTurnSimulationPolicy,
+        PressureObligation, RequiredResolutionFields, SIMULATION_SOURCE_BUNDLE_SCHEMA_VERSION,
+        SimulationVisibility,
     };
     use crate::prompt_context::{
         PROMPT_CONTEXT_PACKET_SCHEMA_VERSION, PromptAdjudicationContext, PromptContextPacket,
@@ -991,6 +1120,7 @@ mod tests {
         ResolutionOutcome, ResolutionOutcomeKind, ResolutionProposal, ResolutionVisibility,
     };
     use crate::scene_pressure::ScenePressureKind;
+    use crate::world_process_clock::WorldProcessTempo;
     use std::collections::BTreeMap;
 
     #[test]
@@ -1292,6 +1422,137 @@ mod tests {
         assert_eq!(violations.len(), 1);
         assert_eq!(violations[0].layer, WorldCourtLayer::BodyResource);
         assert_eq!(violations[0].check, "world_change_set_fact_domains");
+    }
+
+    #[test]
+    fn world_change_set_rejects_process_tick_that_is_not_due() {
+        let mut context = minimal_context(false);
+        context.pre_turn_simulation.due_processes.push(DueProcess {
+            process_id: "process:gate_closing".to_owned(),
+            visibility: SimulationVisibility::PlayerVisible,
+            tempo: WorldProcessTempo::Immediate,
+            tick_condition: "player touches the gate".to_owned(),
+            evidence_refs: vec!["pressure:test".to_owned()],
+        });
+        let change_set = super::WorldChangeSet {
+            schema_version: super::WORLD_CHANGE_SET_SCHEMA_VERSION.to_owned(),
+            world_id: "stw_court".to_owned(),
+            turn_id: "turn_0001".to_owned(),
+            proposed_events: vec![super::WorldChangeEvent {
+                schema_version: super::WORLD_CHANGE_EVENT_SCHEMA_VERSION.to_owned(),
+                event_kind: super::WorldChangeEventKind::ProcessTicked,
+                target_ref: "process:unknown_alarm".to_owned(),
+                summary: "unknown process tick".to_owned(),
+                evidence_refs: vec!["current_turn".to_owned()],
+            }],
+            fact_mutations: Vec::new(),
+            cost_claims: Vec::new(),
+            visibility_claims: Vec::new(),
+            evidence_refs: vec!["current_turn".to_owned()],
+        };
+        let mut accepted_checks = Vec::new();
+        let mut violations = Vec::new();
+
+        super::audit_world_change_set_against_context(
+            &context,
+            &change_set,
+            &mut accepted_checks,
+            &mut violations,
+        );
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].layer, WorldCourtLayer::Time);
+        assert_eq!(violations[0].check, "world_change_set_process_tick_due");
+    }
+
+    #[test]
+    fn world_change_set_accepts_due_process_and_compiled_affordance_refs() {
+        let mut context = minimal_context(false);
+        context
+            .pre_turn_simulation
+            .available_affordances
+            .push(CompiledAffordance {
+                slot: 1,
+                affordance_id: "affordance:inspect_gate".to_owned(),
+                affordance_kind: AffordanceKind::Observe,
+                action_contract: "inspect the gate".to_owned(),
+                source_refs: vec!["current_turn".to_owned()],
+                pressure_refs: Vec::new(),
+            });
+        context.pre_turn_simulation.due_processes.push(DueProcess {
+            process_id: "process:gate_closing".to_owned(),
+            visibility: SimulationVisibility::PlayerVisible,
+            tempo: WorldProcessTempo::Immediate,
+            tick_condition: "player touches the gate".to_owned(),
+            evidence_refs: vec!["pressure:test".to_owned()],
+        });
+        let change_set = super::WorldChangeSet {
+            schema_version: super::WORLD_CHANGE_SET_SCHEMA_VERSION.to_owned(),
+            world_id: "stw_court".to_owned(),
+            turn_id: "turn_0001".to_owned(),
+            proposed_events: vec![super::WorldChangeEvent {
+                schema_version: super::WORLD_CHANGE_EVENT_SCHEMA_VERSION.to_owned(),
+                event_kind: super::WorldChangeEventKind::ProcessTicked,
+                target_ref: "process:gate_closing".to_owned(),
+                summary: "gate clock advances".to_owned(),
+                evidence_refs: vec!["current_turn".to_owned()],
+            }],
+            fact_mutations: Vec::new(),
+            cost_claims: vec![super::CostClaim {
+                schema_version: super::COST_CLAIM_SCHEMA_VERSION.to_owned(),
+                cost_kind: super::CostClaimKind::Affordance,
+                target_ref: "affordance:inspect_gate".to_owned(),
+                status: GateStatus::Passed,
+                visibility: ResolutionVisibility::PlayerVisible,
+                reason: "compiled choice".to_owned(),
+                evidence_refs: vec!["current_turn".to_owned()],
+            }],
+            visibility_claims: Vec::new(),
+            evidence_refs: vec!["current_turn".to_owned()],
+        };
+        let mut accepted_checks = Vec::new();
+        let mut violations = Vec::new();
+
+        super::audit_world_change_set_against_context(
+            &context,
+            &change_set,
+            &mut accepted_checks,
+            &mut violations,
+        );
+
+        assert!(violations.is_empty());
+        assert!(
+            accepted_checks
+                .iter()
+                .any(|check| check == "world_change_set_process_tick_due")
+        );
+        assert!(
+            accepted_checks
+                .iter()
+                .any(|check| check == "world_change_set_affordance_exists")
+        );
+    }
+
+    #[test]
+    fn semantic_causality_rejects_full_success_when_gate_is_blocked() {
+        let mut proposal = semantic_probe();
+        proposal.outcome.kind = ResolutionOutcomeKind::Success;
+        proposal.gate_results.push(GateResult {
+            gate_kind: GateKind::Resource,
+            gate_ref: "inventory:missing_key".to_owned(),
+            visibility: ResolutionVisibility::PlayerVisible,
+            status: GateStatus::Blocked,
+            reason: "missing key".to_owned(),
+            evidence_refs: vec!["current_turn".to_owned()],
+        });
+        let mut accepted_checks = Vec::new();
+        let mut violations = Vec::new();
+
+        super::audit_court_causality(&proposal, &mut accepted_checks, &mut violations);
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].layer, WorldCourtLayer::Causality);
+        assert_eq!(violations[0].check, "blocked_gate_outcome_consistency");
     }
 
     fn minimal_context(resolution_required: bool) -> PromptContextPacket {
