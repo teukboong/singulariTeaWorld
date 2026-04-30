@@ -2,7 +2,7 @@ use crate::store::{append_jsonl, write_json};
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -12,7 +12,7 @@ pub const KNOWLEDGE_LEDGER_STATE_SCHEMA_VERSION: &str = "singulari.knowledge_led
 pub const KNOWLEDGE_EVENTS_FILENAME: &str = "knowledge_events.jsonl";
 pub const KNOWLEDGE_LEDGER_FILENAME: &str = "knowledge_ledger.json";
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KnowledgeTier {
     WorldTrueHidden,
@@ -24,7 +24,7 @@ pub enum KnowledgeTier {
     Contradicted,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TruthStatus {
     True,
@@ -53,7 +53,52 @@ pub struct KnowledgeLedgerState {
     pub world_id: String,
     #[serde(default)]
     pub claims: Vec<KnowledgeClaim>,
+    #[serde(default)]
+    pub holders: Vec<KnowledgeHolderSnapshot>,
+    #[serde(default)]
+    pub conflicts: Vec<KnowledgeConflict>,
     pub rebuilt_at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeHolderKind {
+    Player,
+    Npc,
+    World,
+    System,
+    Other,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KnowledgeHolderSnapshot {
+    pub holder_ref: String,
+    pub holder_kind: KnowledgeHolderKind,
+    pub claim_count: usize,
+    pub hidden_claim_count: usize,
+    pub observed_claim_count: usize,
+    pub inferred_claim_count: usize,
+    pub rumor_claim_count: usize,
+    pub false_belief_count: usize,
+    pub contradicted_claim_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KnowledgeConflict {
+    pub claim_id: String,
+    pub holder_refs: Vec<String>,
+    pub conflict_kinds: Vec<KnowledgeConflictKind>,
+    pub propositions: Vec<String>,
+    pub truth_statuses: Vec<TruthStatus>,
+    pub tiers: Vec<KnowledgeTier>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeConflictKind {
+    PropositionDisagreement,
+    TruthStatusDisagreement,
+    TierDisagreement,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -81,6 +126,7 @@ pub enum KnowledgeEventKind {
     Observed,
     Inferred,
     Rumored,
+    HiddenTruth,
     Confirmed,
     Contradicted,
     FalseBelief,
@@ -198,6 +244,26 @@ pub fn rumor_claim(
         KnowledgeEventKind::Rumored,
         KnowledgeTier::Rumor,
         TruthStatus::Rumored,
+    )
+}
+
+/// Persist a world-true hidden claim. Hidden truth may guide simulation but must
+/// not render directly to player-visible surfaces.
+///
+/// # Errors
+///
+/// Returns an error when the claim input is incomplete or the knowledge event
+/// cannot be appended.
+pub fn hidden_truth_claim(
+    world_dir: &Path,
+    input: KnowledgeClaimEventInput,
+) -> Result<KnowledgeEventRecord> {
+    append_claim_event(
+        world_dir,
+        input,
+        KnowledgeEventKind::HiddenTruth,
+        KnowledgeTier::WorldTrueHidden,
+        TruthStatus::True,
     )
 }
 
@@ -334,10 +400,15 @@ pub fn replay_knowledge_state(
             },
         );
     }
+    let claims = claims.into_values().collect::<Vec<_>>();
+    let holders = compile_holder_snapshots(&claims);
+    let conflicts = compile_knowledge_conflicts(&claims);
     Ok(KnowledgeLedgerState {
         schema_version: KNOWLEDGE_LEDGER_STATE_SCHEMA_VERSION.to_owned(),
         world_id: world_id.to_owned(),
-        claims: claims.into_values().collect(),
+        claims,
+        holders,
+        conflicts,
         rebuilt_at: Utc::now().to_rfc3339(),
     })
 }
@@ -404,6 +475,109 @@ fn contains_any(text: &str, needles: &[&str]) -> bool {
     needles
         .iter()
         .any(|needle| text.contains(needle) || lower.contains(&needle.to_ascii_lowercase()))
+}
+
+fn compile_holder_snapshots(claims: &[KnowledgeClaim]) -> Vec<KnowledgeHolderSnapshot> {
+    let mut holders = BTreeMap::<String, KnowledgeHolderSnapshot>::new();
+    for claim in claims {
+        let snapshot =
+            holders
+                .entry(claim.holder_ref.clone())
+                .or_insert_with(|| KnowledgeHolderSnapshot {
+                    holder_ref: claim.holder_ref.clone(),
+                    holder_kind: holder_kind_for_ref(claim.holder_ref.as_str()),
+                    claim_count: 0,
+                    hidden_claim_count: 0,
+                    observed_claim_count: 0,
+                    inferred_claim_count: 0,
+                    rumor_claim_count: 0,
+                    false_belief_count: 0,
+                    contradicted_claim_count: 0,
+                });
+        snapshot.claim_count += 1;
+        match claim.tier {
+            KnowledgeTier::WorldTrueHidden => snapshot.hidden_claim_count += 1,
+            KnowledgeTier::PlayerObserved => snapshot.observed_claim_count += 1,
+            KnowledgeTier::PlayerInferred => snapshot.inferred_claim_count += 1,
+            KnowledgeTier::Rumor => snapshot.rumor_claim_count += 1,
+            KnowledgeTier::FalseBelief => snapshot.false_belief_count += 1,
+            KnowledgeTier::Contradicted => snapshot.contradicted_claim_count += 1,
+        }
+    }
+    holders.into_values().collect()
+}
+
+fn compile_knowledge_conflicts(claims: &[KnowledgeClaim]) -> Vec<KnowledgeConflict> {
+    let mut by_claim_id = BTreeMap::<String, Vec<&KnowledgeClaim>>::new();
+    for claim in claims {
+        by_claim_id
+            .entry(claim.claim_id.clone())
+            .or_default()
+            .push(claim);
+    }
+
+    by_claim_id
+        .into_iter()
+        .filter_map(|(claim_id, grouped_claims)| {
+            let holder_refs = grouped_claims
+                .iter()
+                .map(|claim| claim.holder_ref.clone())
+                .collect::<BTreeSet<_>>();
+            if holder_refs.len() < 2 {
+                return None;
+            }
+
+            let propositions = grouped_claims
+                .iter()
+                .map(|claim| claim.proposition.clone())
+                .collect::<BTreeSet<_>>();
+            let truth_statuses = grouped_claims
+                .iter()
+                .map(|claim| claim.truth_status)
+                .collect::<BTreeSet<_>>();
+            let tiers = grouped_claims
+                .iter()
+                .map(|claim| claim.tier)
+                .collect::<BTreeSet<_>>();
+
+            let mut conflict_kinds = Vec::new();
+            if propositions.len() > 1 {
+                conflict_kinds.push(KnowledgeConflictKind::PropositionDisagreement);
+            }
+            if truth_statuses.len() > 1 {
+                conflict_kinds.push(KnowledgeConflictKind::TruthStatusDisagreement);
+            }
+            if tiers.len() > 1 {
+                conflict_kinds.push(KnowledgeConflictKind::TierDisagreement);
+            }
+            if conflict_kinds.is_empty() {
+                return None;
+            }
+
+            Some(KnowledgeConflict {
+                claim_id,
+                holder_refs: holder_refs.into_iter().collect(),
+                conflict_kinds,
+                propositions: propositions.into_iter().collect(),
+                truth_statuses: truth_statuses.into_iter().collect(),
+                tiers: tiers.into_iter().collect(),
+            })
+        })
+        .collect()
+}
+
+fn holder_kind_for_ref(holder_ref: &str) -> KnowledgeHolderKind {
+    if holder_ref == "player" || holder_ref.starts_with("player:") {
+        KnowledgeHolderKind::Player
+    } else if holder_ref == "world" || holder_ref.starts_with("world:") {
+        KnowledgeHolderKind::World
+    } else if holder_ref.starts_with("npc:") || holder_ref.starts_with("char:") {
+        KnowledgeHolderKind::Npc
+    } else if holder_ref == "system" || holder_ref.starts_with("system:") {
+        KnowledgeHolderKind::System
+    } else {
+        KnowledgeHolderKind::Other
+    }
 }
 
 fn append_claim_event(
@@ -533,11 +707,12 @@ fn validate_event(expected_world_id: &str, event: &KnowledgeEventRecord) -> Resu
 #[cfg(test)]
 mod tests {
     use super::{
-        KnowledgeClaimEventInput, KnowledgeTier, KnowledgeTransferInput, PlayerRenderPermission,
-        TruthStatus, can_render_knowledge_tier_to_player, confirm_claim, contradict_claim,
-        infer_claim, load_knowledge_events, observe_claim, player_render_permission,
-        rebuild_knowledge_ledger, render_rule_for_player, replay_knowledge_state, rumor_claim,
-        transfer_claim_between_holders,
+        KnowledgeClaimEventInput, KnowledgeConflictKind, KnowledgeHolderKind, KnowledgeTier,
+        KnowledgeTransferInput, PlayerRenderPermission, TruthStatus,
+        can_render_knowledge_tier_to_player, confirm_claim, contradict_claim, false_belief_claim,
+        hidden_truth_claim, infer_claim, load_knowledge_events, observe_claim,
+        player_render_permission, rebuild_knowledge_ledger, render_rule_for_player,
+        replay_knowledge_state, rumor_claim, transfer_claim_between_holders,
     };
     use tempfile::tempdir;
 
@@ -594,6 +769,18 @@ mod tests {
 
         assert_eq!(events.len(), 3);
         assert_eq!(state.claims.len(), 3);
+        assert_eq!(state.holders.len(), 2);
+        let Some(player_holder) = state
+            .holders
+            .iter()
+            .find(|holder| holder.holder_ref == "player")
+        else {
+            anyhow::bail!("player holder snapshot should replay");
+        };
+        assert_eq!(player_holder.holder_kind, KnowledgeHolderKind::Player);
+        assert_eq!(player_holder.claim_count, 2);
+        assert_eq!(player_holder.observed_claim_count, 1);
+        assert_eq!(player_holder.inferred_claim_count, 1);
         assert!(state.claims.iter().any(|claim| {
             claim.claim_id == "claim:latch" && claim.tier == KnowledgeTier::PlayerInferred
         }));
@@ -663,6 +850,63 @@ mod tests {
         assert_eq!(events[0].from_holder_ref.as_deref(), Some("npc:guard"));
         assert_eq!(state.claims[0].holder_ref, "player");
         assert_eq!(state.claims[0].tier, KnowledgeTier::Rumor);
+        Ok(())
+    }
+
+    #[test]
+    fn replay_reports_holder_conflicts_without_collapsing_beliefs() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        hidden_truth_claim(
+            temp.path(),
+            claim_input("claim:ambush", "world", "암살자는 북문 뒤에 숨어 있다"),
+        )?;
+        false_belief_claim(
+            temp.path(),
+            claim_input("claim:ambush", "player", "암살자는 서문 쪽에 있을 것이다"),
+        )?;
+        rumor_claim(
+            temp.path(),
+            claim_input("claim:ambush", "npc:guard", "북문 뒤에 누군가 있다는 소문"),
+        )?;
+
+        let events = load_knowledge_events(temp.path())?;
+        let state = replay_knowledge_state("stw_knowledge", &events)?;
+
+        assert_eq!(state.claims.len(), 3);
+        assert_eq!(state.holders.len(), 3);
+        assert!(state.holders.iter().any(|holder| {
+            holder.holder_ref == "npc:guard" && holder.holder_kind == KnowledgeHolderKind::Npc
+        }));
+        let Some(conflict) = state
+            .conflicts
+            .iter()
+            .find(|conflict| conflict.claim_id == "claim:ambush")
+        else {
+            anyhow::bail!("holder conflict should replay");
+        };
+        assert_eq!(
+            conflict.holder_refs,
+            vec![
+                "npc:guard".to_owned(),
+                "player".to_owned(),
+                "world".to_owned()
+            ]
+        );
+        assert!(
+            conflict
+                .conflict_kinds
+                .contains(&KnowledgeConflictKind::PropositionDisagreement)
+        );
+        assert!(
+            conflict
+                .conflict_kinds
+                .contains(&KnowledgeConflictKind::TruthStatusDisagreement)
+        );
+        assert!(
+            conflict
+                .conflict_kinds
+                .contains(&KnowledgeConflictKind::TierDisagreement)
+        );
         Ok(())
     }
 
