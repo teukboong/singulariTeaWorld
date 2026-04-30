@@ -11,6 +11,7 @@ pub const WORLD_EVENT_HASH_VERSION: &str = "singulari.world_event_hash.v1";
 pub const WORLD_EVENT_HASH_ALGORITHM: &str = "sha256";
 pub const WORLD_EVENT_SEMANTIC_REPLAY_SCHEMA_VERSION: &str =
     "singulari.world_event_semantic_replay.v1";
+pub const WORLD_EVENT_REPLAY_SCHEMA_VERSION: &str = "singulari.world_event_replay.v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorldEventLedgerAppendReport {
@@ -75,6 +76,28 @@ pub struct WorldEventSemanticReplayReport {
     pub location_events: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_turn_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorldEventReplayReport {
+    pub schema_version: String,
+    pub world_id: String,
+    pub event_count: usize,
+    pub semantic_summary: WorldEventSemanticReplayReport,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replayed_turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_location: Option<String>,
+    #[serde(default)]
+    pub observed_entity_refs: Vec<String>,
+    #[serde(default)]
+    pub observed_location_refs: Vec<String>,
+    #[serde(default)]
+    pub body_resource_refs: Vec<String>,
+    #[serde(default)]
+    pub relationship_refs: Vec<String>,
+    #[serde(default)]
+    pub open_consequence_refs: Vec<String>,
 }
 
 pub(crate) fn append_world_event(
@@ -282,6 +305,102 @@ pub fn replay_world_event_semantics(
         }
     }
     Ok(report)
+}
+
+/// Replay the append-only event ledger into a deterministic reducer state.
+///
+/// This reducer intentionally covers only state that is represented by
+/// structured `CanonEvent` fields today. It is therefore a subset replay, but it
+/// gives projection health and validation a real state object to compare against
+/// instead of trusting prose summaries.
+///
+/// # Errors
+///
+/// Returns an error when event shape validation fails.
+pub fn replay_world_events(
+    expected_world_id: &str,
+    events: &[CanonEvent],
+) -> Result<WorldEventReplayReport> {
+    let semantic_summary = replay_world_event_semantics(expected_world_id, events)?;
+    let mut observed_entity_refs = BTreeSet::new();
+    let mut observed_location_refs = BTreeSet::new();
+    let mut body_resource_refs = BTreeSet::new();
+    let mut relationship_refs = BTreeSet::new();
+    let mut open_consequence_refs = BTreeSet::new();
+    let mut replayed_turn_id = None;
+    let mut current_location = None;
+
+    for event in events {
+        validate_event_shape(event, Some(expected_world_id))?;
+        replayed_turn_id = Some(event.turn_id.clone());
+        for entity_ref in &event.entities {
+            observed_entity_refs.insert(entity_ref.clone());
+            index_replay_ref(
+                entity_ref,
+                &mut body_resource_refs,
+                &mut relationship_refs,
+                &mut observed_location_refs,
+            );
+        }
+        if let Some(location) = &event.location {
+            current_location = Some(location.clone());
+            observed_location_refs.insert(location.clone());
+        }
+        for consequence in &event.consequences {
+            index_replay_ref(
+                consequence,
+                &mut body_resource_refs,
+                &mut relationship_refs,
+                &mut observed_location_refs,
+            );
+            if let Some(resolved) = consequence
+                .strip_prefix("resolved:")
+                .or_else(|| consequence.strip_prefix("closed:"))
+            {
+                open_consequence_refs.remove(resolved);
+            } else if consequence.starts_with("consequence:") {
+                open_consequence_refs.insert(consequence.clone());
+            }
+        }
+    }
+
+    Ok(WorldEventReplayReport {
+        schema_version: WORLD_EVENT_REPLAY_SCHEMA_VERSION.to_owned(),
+        world_id: expected_world_id.to_owned(),
+        event_count: events.len(),
+        semantic_summary,
+        replayed_turn_id,
+        current_location,
+        observed_entity_refs: observed_entity_refs.into_iter().collect(),
+        observed_location_refs: observed_location_refs.into_iter().collect(),
+        body_resource_refs: body_resource_refs.into_iter().collect(),
+        relationship_refs: relationship_refs.into_iter().collect(),
+        open_consequence_refs: open_consequence_refs.into_iter().collect(),
+    })
+}
+
+fn index_replay_ref(
+    item_ref: &str,
+    body_resource_refs: &mut BTreeSet<String>,
+    relationship_refs: &mut BTreeSet<String>,
+    observed_location_refs: &mut BTreeSet<String>,
+) {
+    if item_ref.starts_with("body:")
+        || item_ref.starts_with("resource:")
+        || item_ref.starts_with("inventory:")
+    {
+        body_resource_refs.insert(item_ref.to_owned());
+    }
+    if item_ref.starts_with("rel:")
+        || item_ref.starts_with("relationship:")
+        || item_ref.starts_with("stance:")
+        || item_ref.starts_with("social:")
+    {
+        relationship_refs.insert(item_ref.to_owned());
+    }
+    if item_ref.starts_with("place:") || item_ref.starts_with("location:") {
+        observed_location_refs.insert(item_ref.to_owned());
+    }
 }
 
 fn ensure_event_can_append(
@@ -646,7 +765,8 @@ fn hex_lower(bytes: &[u8]) -> String {
 mod tests {
     use super::{
         WorldEventLedgerChainStatus, append_world_event, load_world_events,
-        replay_world_event_semantics, verify_world_event_ledger, verify_world_events,
+        replay_world_event_semantics, replay_world_events, verify_world_event_ledger,
+        verify_world_events,
     };
     use crate::models::{
         CANON_EVENT_SCHEMA_VERSION, CanonEvent, EventAuthority, EventEvidence, WorldEventKind,
@@ -833,6 +953,53 @@ mod tests {
 
         assert_eq!(report.semantic_event_count, 0);
         assert_eq!(report.legacy_only_event_count, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn replays_world_event_state_subset() -> anyhow::Result<()> {
+        let mut initial = event("evt_000000", "turn_0000", "note");
+        initial.event_kind = Some(WorldEventKind::WorldInitialized);
+        initial.location = Some("place:opening_location".to_owned());
+        initial.entities = vec!["char:protagonist".to_owned()];
+        let mut resource = event("evt_000001", "turn_0001", "resource_changed");
+        resource.event_kind = Some(WorldEventKind::ResourceChanged);
+        resource.entities = vec!["resource:inventory:00".to_owned()];
+        resource.consequences = vec!["consequence:spent_entry_token".to_owned()];
+        let mut social = event("evt_000002", "turn_0002", "relationship_changed");
+        social.event_kind = Some(WorldEventKind::RelationshipChanged);
+        social.entities = vec!["rel:guard->protagonist:distance".to_owned()];
+        social.consequences = vec!["resolved:consequence:spent_entry_token".to_owned()];
+
+        let report = replay_world_events("stw_event_ledger", &[initial, resource, social])?;
+
+        assert_eq!(report.event_count, 3);
+        assert_eq!(report.replayed_turn_id.as_deref(), Some("turn_0002"));
+        assert_eq!(
+            report.current_location.as_deref(),
+            Some("place:opening_location")
+        );
+        assert!(
+            report
+                .observed_entity_refs
+                .iter()
+                .any(|item| item == "char:protagonist")
+        );
+        assert!(
+            report
+                .body_resource_refs
+                .iter()
+                .any(|item| item == "resource:inventory:00")
+        );
+        assert!(
+            report
+                .relationship_refs
+                .iter()
+                .any(|item| item == "rel:guard->protagonist:distance")
+        );
+        assert!(report.open_consequence_refs.is_empty());
+        assert_eq!(report.semantic_summary.body_resource_events, 1);
+        assert_eq!(report.semantic_summary.relationship_events, 1);
         Ok(())
     }
 

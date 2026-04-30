@@ -1,4 +1,4 @@
-use crate::event_ledger::{WorldEventLedgerChainStatus, replay_world_event_semantics};
+use crate::event_ledger::{WorldEventLedgerChainStatus, replay_world_events};
 use crate::models::{
     ANCHOR_CHARACTER_ID, ANCHOR_CHARACTER_INVARIANT, CanonEvent, DEFAULT_CHOICE_COUNT,
     ENTITY_RECORDS_SCHEMA_VERSION, EntityRecords, FREEFORM_CHOICE_SLOT, FREEFORM_CHOICE_TAG,
@@ -138,16 +138,15 @@ pub fn validate_world(store_root: Option<&Path>, world_id: &str) -> Result<Valid
         );
     }
     if let Some(snapshot) = &latest_snapshot {
-        check_schema(
-            "latest_snapshot",
-            &snapshot.schema_version,
-            TURN_SNAPSHOT_SCHEMA_VERSION,
-            &mut errors,
-        );
-        check_world_id("latest_snapshot", &snapshot.world_id, world_id, &mut errors);
-        validate_snapshot_choices(snapshot, &mut errors);
+        validate_latest_snapshot_header(world_id, snapshot, &mut errors);
     }
-    validate_world_event_ledger(world_id, &canon_events, &mut errors, &mut warnings);
+    validate_world_event_ledger(
+        world_id,
+        &canon_events,
+        latest_snapshot.as_ref(),
+        &mut errors,
+        &mut warnings,
+    );
     if let Some(entities) = &entities {
         validate_canon_events(world_id, &canon_events, entities, &mut errors);
     }
@@ -351,6 +350,7 @@ fn validate_canon_events(
 fn validate_world_event_ledger(
     world_id: &str,
     events: &[CanonEvent],
+    latest_snapshot: Option<&TurnSnapshot>,
     errors: &mut Vec<String>,
     warnings: &mut Vec<String>,
 ) {
@@ -371,16 +371,49 @@ fn validate_world_event_ledger(
     if !ledger_valid {
         return;
     }
-    match replay_world_event_semantics(world_id, events) {
-        Ok(report) if report.legacy_only_event_count > 0 => {
-            warnings.push(format!(
-                "canon_events.jsonl has {} legacy-only events without typed event_kind semantics",
-                report.legacy_only_event_count
-            ));
+    match replay_world_events(world_id, events) {
+        Ok(report) => {
+            if report.semantic_summary.legacy_only_event_count > 0 {
+                warnings.push(format!(
+                    "canon_events.jsonl has {} legacy-only events without typed event_kind semantics",
+                    report.semantic_summary.legacy_only_event_count
+                ));
+            }
+            if let Some(snapshot) = latest_snapshot {
+                if report.replayed_turn_id.as_deref() != Some(snapshot.turn_id.as_str()) {
+                    errors.push(format!(
+                        "world event replay turn mismatch: latest_snapshot={}, replayed_turn={}",
+                        snapshot.turn_id,
+                        report.replayed_turn_id.as_deref().unwrap_or("<none>")
+                    ));
+                }
+                if let Some(replay_location) = report.current_location.as_deref()
+                    && replay_location != snapshot.protagonist_state.location
+                {
+                    errors.push(format!(
+                        "world event replay location mismatch: latest_snapshot={}, replayed_location={}",
+                        snapshot.protagonist_state.location, replay_location
+                    ));
+                }
+            }
         }
-        Ok(_) => {}
-        Err(error) => errors.push(format!("world event semantic replay invalid: {error:#}")),
+        Err(error) => errors.push(format!("world event replay invalid: {error:#}")),
     }
+}
+
+fn validate_latest_snapshot_header(
+    world_id: &str,
+    snapshot: &TurnSnapshot,
+    errors: &mut Vec<String>,
+) {
+    check_schema(
+        "latest_snapshot",
+        &snapshot.schema_version,
+        TURN_SNAPSHOT_SCHEMA_VERSION,
+        errors,
+    );
+    check_world_id("latest_snapshot", &snapshot.world_id, world_id, errors);
+    validate_snapshot_choices(snapshot, errors);
 }
 
 fn validate_snapshot_choices(snapshot: &TurnSnapshot, errors: &mut Vec<String>) {

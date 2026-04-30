@@ -1,5 +1,5 @@
 use crate::event_ledger::{
-    WorldEventLedgerChainStatus, replay_world_event_semantics, verify_world_event_ledger,
+    WorldEventLedgerChainStatus, replay_world_events, verify_world_event_ledger,
 };
 use crate::extra_memory::{
     failed_projection_records_after_latest_repair, load_extra_memory_projection_records,
@@ -249,30 +249,57 @@ fn event_ledger_replay_health(
             snapshot.turn_id
         ));
     }
-    let semantic_detail = if let Some(events) = canon_events.value.as_ref() {
-        match replay_world_event_semantics(world_id, events) {
-            Ok(semantic_report) => {
-                if semantic_report.legacy_only_event_count > 0 {
+    let replay_detail = if let Some(events) = canon_events.value.as_ref() {
+        match replay_world_events(world_id, events) {
+            Ok(replay_report) => {
+                if replay_report.semantic_summary.legacy_only_event_count > 0 {
                     warnings.push(format!(
                         "event ledger contains {} legacy-only events without typed semantics; replay summary inferred where possible",
-                        semantic_report.legacy_only_event_count
+                        replay_report.semantic_summary.legacy_only_event_count
                     ));
                 }
+                if let Some(snapshot) = latest_snapshot {
+                    if replay_report.replayed_turn_id.as_deref() != Some(snapshot.turn_id.as_str())
+                    {
+                        errors.push(format!(
+                            "event replay turn mismatch: latest_snapshot={}, replayed_turn={}",
+                            snapshot.turn_id,
+                            replay_report
+                                .replayed_turn_id
+                                .as_deref()
+                                .unwrap_or("<none>")
+                        ));
+                    }
+                    if let Some(replay_location) = replay_report.current_location.as_deref()
+                        && replay_location != snapshot.protagonist_state.location
+                    {
+                        errors.push(format!(
+                            "event replay location mismatch: latest_snapshot={}, replayed_location={}",
+                            snapshot.protagonist_state.location, replay_location
+                        ));
+                    }
+                }
                 format!(
-                    ", semantic_events={}, legacy_only={}, action_successes={}, action_failures={}, process_ticks={}, current_turn={}",
-                    semantic_report.semantic_event_count,
-                    semantic_report.legacy_only_event_count,
-                    semantic_report.action_successes,
-                    semantic_report.action_failures,
-                    semantic_report.process_ticks,
-                    semantic_report
-                        .current_turn_id
+                    ", replay_turn={}, replay_location={}, observed_entities={}, observed_locations={}, semantic_events={}, legacy_only={}, action_successes={}, action_failures={}, process_ticks={}",
+                    replay_report
+                        .replayed_turn_id
                         .as_deref()
-                        .unwrap_or("<none>")
+                        .unwrap_or("<none>"),
+                    replay_report
+                        .current_location
+                        .as_deref()
+                        .unwrap_or("<none>"),
+                    replay_report.observed_entity_refs.len(),
+                    replay_report.observed_location_refs.len(),
+                    replay_report.semantic_summary.semantic_event_count,
+                    replay_report.semantic_summary.legacy_only_event_count,
+                    replay_report.semantic_summary.action_successes,
+                    replay_report.semantic_summary.action_failures,
+                    replay_report.semantic_summary.process_ticks
                 )
             }
             Err(error) => {
-                errors.push(format!("event semantic replay failed: {error:#}"));
+                errors.push(format!("event replay failed: {error:#}"));
                 String::new()
             }
         }
@@ -286,7 +313,7 @@ fn event_ledger_replay_health(
             report.event_count,
             report.chain_status,
             report.last_event_hash.as_deref().unwrap_or("<none>"),
-            semantic_detail
+            replay_detail
         ),
         warnings,
         errors,
