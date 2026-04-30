@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use singulari_world::{AgentOutputContract, PromptContextPacket};
 
+#[allow(dead_code)]
 const AGENT_TURN_RESPONSE_SCHEMA_GUIDE: &str = r#"AgentTurnResponse 스키마:
 ```json
 {
@@ -388,6 +389,37 @@ const AGENT_TURN_RESPONSE_SCHEMA_GUIDE: &str = r#"AgentTurnResponse 스키마:
 - extra_contacts 항목을 쓸 때는 surface_label, contact_summary를 반드시 실제 장면 내용으로 채운다. 스키마 설명 문구나 예시 문구를 값으로 복사하지 않는다.
 - 단순 배경 군중은 extra_contacts에 넣지 않는다. 한 번 스쳐간 인물은 memory_action "trace", 다시 떠올릴 이유가 분명하면 "remember"를 쓴다."#;
 
+const COMPACT_AGENT_TURN_RESPONSE_SCHEMA_GUIDE: &str = r#"AgentTurnResponse JSON만 반환한다.
+필수 top-level:
+- schema_version="singulari.agent_turn_response.v1", world_id, turn_id
+- resolution_proposal, visible_scene, next_choices
+- 선택 필드(scene_director_proposal, consequence_proposal, social_exchange_proposal, encounter_proposal, *_updates, *_events, actor_*_events)는 이번 턴에서 실제 변화가 있을 때만 쓴다. 없으면 생략하거나 []/null로 둔다.
+- 선택 배열 이름: "plot_thread_events", "scene_pressure_events", "world_lore_updates", "character_text_design_updates", "body_resource_events", "location_events", "hidden_state_delta".
+
+resolution_proposal 필수:
+- schema_version="singulari.resolution_proposal.v1", world_id, turn_id
+- interpreted_intent: input_kind, summary, target_refs, pressure_refs, evidence_refs, ambiguity
+- outcome: kind, summary, evidence_refs
+- gate_results, proposed_effects, process_ticks
+- pressure_noop_reasons: prompt_context.pre_turn_simulation.pressure_obligations의 각 pressure_id를 움직이지 않으면 반드시 pressure_ref/evidence_refs로 설명
+- narrative_brief: visible_summary, required_beats, forbidden_visible_details
+- next_choice_plan: slot 1..5는 prompt_context.pre_turn_simulation.available_affordances의 같은 slot affordance_id를 grounding_ref/evidence_refs로 사용. slot 6은 freeform/current_turn, slot 7은 delegated_judgment/current_turn.
+
+visible_scene:
+- schema_version="singulari.narrative_scene.v1"
+- text_blocks: 한국어 VN prose 문단 배열
+- tone_notes: 짧게
+
+next_choices:
+- slot 1..5는 이번 visible_scene에서 곧바로 이어지는 구체 행동
+- slot 6 tag="자유서술"
+- slot 7 tag="판단 위임", intent="맡긴다. 세부 내용은 선택 후 드러난다."
+
+엄격 규칙:
+- prompt_context 안에 실제 존재하는 ref만 쓴다. 새 ref나 설명용 JSON pointer를 만들지 않는다.
+- hidden/adjudication-only 내용은 visible_scene, next_choices, canon_event, player-visible summary에 쓰지 않는다.
+- needs_context는 기본 []다. 쓰면 host가 커밋하지 않는다."#;
+
 const SEEDLESS_PROSE_CONTRACT: &str = r"- 이 계약은 seedless style contract다. 여기 있는 문체/작법 규칙은 소재, 사건, 인물, 장소, 장르 장치, 과거사, 상징을 새로 만들 권한이 없다.
 - scene_fact_boundaries: 오직 prompt context packet의 player-visible facts, current player_input, visible canon, selected memory items에서 허용된 사실만 쓴다. style contract, schema examples, previous WebGPT phrasing, UI labels는 장면 사실이 아니다.
 - 캐릭터 voice_anchors는 캐릭터 텍스트 디자인이다. speech는 화법, endings는 어미/말끝, tone은 어투/거리감/어휘, gestures는 반복 제스처, habits는 행동 습관, drift는 변화 방향으로 적용한다.
@@ -412,8 +444,9 @@ pub(super) fn build_webgpt_turn_prompt(prompt_context: &PromptContextPacket) -> 
     let output_contract =
         serde_json::from_value::<AgentOutputContract>(prompt_context.output_contract.clone())
             .context("webgpt prompt context output_contract was not an AgentOutputContract")?;
-    let prompt_context_packet = serde_json::to_string(prompt_context)
-        .context("failed to serialize webgpt prompt context packet")?;
+    let prompt_context_packet =
+        serde_json::to_string(&compact_webgpt_prompt_context(prompt_context)?)
+            .context("failed to serialize webgpt prompt context packet")?;
     let narrative_budget = &output_contract.narrative_budget;
     Ok(format!(
         r#"Singulari World web frontend에서 pending turn 하나가 들어왔어. 너는 WebGPT narrative engine adapter다.
@@ -488,9 +521,70 @@ prompt context packet JSON:
         major_blocks = narrative_budget.major_turn_blocks,
         major_target_chars = narrative_budget.major_target_chars,
         text_design_directive = SEEDLESS_PROSE_CONTRACT,
-        agent_schema = AGENT_TURN_RESPONSE_SCHEMA_GUIDE,
+        agent_schema = COMPACT_AGENT_TURN_RESPONSE_SCHEMA_GUIDE,
         prompt_context_packet = prompt_context_packet,
         world_id = prompt_context.world_id,
         turn_id = prompt_context.turn_id,
     ))
+}
+
+fn compact_webgpt_prompt_context(
+    prompt_context: &PromptContextPacket,
+) -> Result<serde_json::Value> {
+    let mut value = serde_json::to_value(prompt_context)
+        .context("failed to serialize webgpt prompt context for compaction")?;
+    if let Some(pre_turn) = value
+        .get_mut("pre_turn_simulation")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        pre_turn.insert("source_refs".to_owned(), serde_json::json!([]));
+        pre_turn.insert("blocked_affordances".to_owned(), serde_json::json!([]));
+        pre_turn.insert("causal_risks".to_owned(), serde_json::json!([]));
+    }
+    if let Some(visible) = value
+        .get_mut("visible_context")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        for key in [
+            "known_facts",
+            "belief_graph",
+            "world_process_clock",
+            "active_consequence_spine",
+            "active_social_exchange",
+            "active_encounter_surface",
+            "active_change_ledger",
+            "active_pattern_debt",
+            "active_belief_graph",
+            "active_world_process_clock",
+            "active_actor_agency",
+            "active_player_intent_trace",
+            "active_turn_retrieval_controller",
+            "selected_context_capsules",
+            "active_autobiographical_index",
+        ] {
+            visible.insert(
+                key.to_owned(),
+                serde_json::json!({
+                    "compacted": true,
+                    "source": "world_store",
+                    "reason": "not needed for this WebGPT narrative turn"
+                }),
+            );
+        }
+    }
+    if let Some(adjudication) = value
+        .get_mut("adjudication_context")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        adjudication.insert("hidden_scene_pressure".to_owned(), serde_json::json!([]));
+        adjudication.insert(
+            "hidden_world_process_clock".to_owned(),
+            serde_json::json!([]),
+        );
+        adjudication.insert(
+            "selected_adjudication_items".to_owned(),
+            serde_json::json!([]),
+        );
+    }
+    Ok(value)
 }

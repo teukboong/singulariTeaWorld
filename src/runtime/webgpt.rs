@@ -33,7 +33,7 @@ use image::{
 pub(crate) const DEFAULT_WEBGPT_TEXT_CDP_PORT: u16 = 9238;
 pub(crate) const DEFAULT_WEBGPT_IMAGE_CDP_PORT: u16 = 9239;
 pub(crate) const DEFAULT_WEBGPT_REFERENCE_IMAGE_CDP_PORT: u16 = 9240;
-const STALE_DISPATCH_RETRY_AFTER_SECS: i64 = 20 * 60;
+const STALE_DISPATCH_RETRY_AFTER_SECS: i64 = 45;
 const WEBGPT_TEXT_JOB_OWNER: &str = "webgpt_host_worker";
 
 fn ensure_control_safe_runtime_value(field: &str, value: &str) -> Result<()> {
@@ -477,6 +477,7 @@ Prompt context artifact path for audit reference:
 }
 
 fn is_repairable_webgpt_commit_error(error: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
     [
         "resolution proposal audit failed",
         "scene director proposal audit failed",
@@ -485,9 +486,13 @@ fn is_repairable_webgpt_commit_error(error: &str) -> bool {
         "consequence payoff",
         "agent response next_choices",
         "actor agency update",
+        "failed to parse",
+        "missing field",
+        "unknown variant",
+        "invalid type",
     ]
     .iter()
-    .any(|needle| error.contains(needle))
+    .any(|needle| normalized.contains(needle))
 }
 
 fn write_webgpt_text_job(
@@ -1047,7 +1052,7 @@ fn build_webgpt_research_arguments(
 ) -> serde_json::Value {
     let mut arguments = serde_json::json!({
         "prompt": prompt,
-        "timeout_secs": timeout_secs.max(60),
+        "timeout_secs": timeout_secs.max(5),
         "auto_recover": true,
         "recovery_attempts": 1,
     });
@@ -1548,6 +1553,24 @@ mod tests {
     }
 
     #[test]
+    fn parse_schema_commit_failures_are_repairable() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("turn_0002-webgpt.json");
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema_version": "singulari.webgpt_dispatch_record.v1",
+                "status": "commit_failed",
+                "turn_id": "turn_0002",
+                "error": "failed to parse /tmp/turn_0002-webgpt-agent-response.json: missing field `cause` at line 1 column 4061",
+            }))?,
+        )?;
+
+        assert!(existing_dispatch_is_retryable(&path)?);
+        Ok(())
+    }
+
+    #[test]
     fn dispatch_claim_replaces_stale_dispatching_record() -> anyhow::Result<()> {
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("turn_0001-webgpt.json");
@@ -1645,7 +1668,7 @@ premise:
         assert!(arguments.get("new_conversation").is_none());
         assert_eq!(arguments["model"], serde_json::json!("gpt-5.5"));
         assert_eq!(arguments["reasoning_level"], serde_json::json!("high"));
-        assert_eq!(arguments["timeout_secs"], serde_json::json!(60));
+        assert_eq!(arguments["timeout_secs"], serde_json::json!(12));
     }
 
     #[test]
@@ -2176,8 +2199,6 @@ premise:
             "\"ordinary_choice_slots\"",
             "\"forbidden_shortcuts\"",
             "\"belief_graph\"",
-            "\"protagonist_visible_beliefs\"",
-            "\"narrator_knowledge_limits\"",
             "\"world_process_clock\"",
             "\"hidden_world_process_clock\"",
             "\"narrative_style_state\"",
@@ -2188,7 +2209,6 @@ premise:
             "\"active_scene_pressure\"",
             "\"active_plot_threads\"",
             "\"plot_thread_events\"",
-            "\"change\": \"advanced\"",
             "\"scene_pressure_events\"",
             "\"world_lore_updates\"",
             "\"character_text_design_updates\"",
@@ -2200,10 +2220,10 @@ premise:
             "\"active_character_text_design\"",
             "\"source_of_truth_policy\"",
             "\"conflict_rule\":\"revival_packet_wins\"",
-            "AgentTurnResponse 스키마:",
-            "\"schema_version\": \"singulari.agent_turn_response.v1\"",
-            "{\"slot\":6,\"tag\":\"자유서술\"",
-            "{\"slot\":7,\"tag\":\"판단 위임\"",
+            "AgentTurnResponse JSON만 반환한다.",
+            "schema_version=\"singulari.agent_turn_response.v1\"",
+            "slot 6 tag=\"자유서술\"",
+            "slot 7 tag=\"판단 위임\"",
             "world_id는 \"stw_contract\", turn_id는 \"turn_0001\"와 정확히 같아야 한다.",
         ] {
             assert!(

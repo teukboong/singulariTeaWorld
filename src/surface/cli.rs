@@ -522,7 +522,7 @@ enum Commands {
         #[arg(
             long,
             env = "SINGULARI_WORLD_WEBGPT_TIMEOUT_SECS",
-            default_value_t = 900
+            default_value_t = 45
         )]
         webgpt_timeout_secs: u64,
     },
