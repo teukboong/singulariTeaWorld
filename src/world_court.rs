@@ -5,8 +5,9 @@ use crate::knowledge_ledger::{
 use crate::models::TurnChoice;
 use crate::prompt_context::PromptContextPacket;
 use crate::resolution::{
-    GateKind, ProposedEffect, ProposedEffectKind, ResolutionCritique, ResolutionFailureKind,
-    ResolutionProposal, ResolutionVisibility, audit_resolution_choices, audit_resolution_proposal,
+    GateKind, GateResult, GateStatus, ProposedEffect, ProposedEffectKind, ResolutionCritique,
+    ResolutionFailureKind, ResolutionOutcomeKind, ResolutionProposal, ResolutionVisibility,
+    audit_resolution_choices, audit_resolution_proposal,
 };
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
@@ -14,6 +15,11 @@ use serde::{Deserialize, Serialize};
 pub const WORLD_COURT_VERDICT_SCHEMA_VERSION: &str = "singulari.world_court_verdict.v1";
 pub const WORLD_COURT_VIOLATION_SCHEMA_VERSION: &str = "singulari.world_court_violation.v1";
 pub const WORLD_COURT_REPAIR_ACTION_SCHEMA_VERSION: &str = "singulari.world_court_repair_action.v1";
+pub const WORLD_CHANGE_SET_SCHEMA_VERSION: &str = "singulari.world_change_set.v1";
+pub const WORLD_CHANGE_EVENT_SCHEMA_VERSION: &str = "singulari.world_change_event.v1";
+pub const FACT_MUTATION_SCHEMA_VERSION: &str = "singulari.fact_mutation.v1";
+pub const COST_CLAIM_SCHEMA_VERSION: &str = "singulari.cost_claim.v1";
+pub const VISIBILITY_CLAIM_SCHEMA_VERSION: &str = "singulari.visibility_claim.v1";
 
 pub struct WorldCourtInput<'a> {
     pub context: &'a PromptContextPacket,
@@ -84,6 +90,106 @@ pub enum WorldCourtLayer {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorldChangeSet {
+    pub schema_version: String,
+    pub world_id: String,
+    pub turn_id: String,
+    #[serde(default)]
+    pub proposed_events: Vec<WorldChangeEvent>,
+    #[serde(default)]
+    pub fact_mutations: Vec<FactMutation>,
+    #[serde(default)]
+    pub cost_claims: Vec<CostClaim>,
+    #[serde(default)]
+    pub visibility_claims: Vec<VisibilityClaim>,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorldChangeEvent {
+    pub schema_version: String,
+    pub event_kind: WorldChangeEventKind,
+    pub target_ref: String,
+    pub summary: String,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorldChangeEventKind {
+    PlayerActionAttempted,
+    ActionSucceeded,
+    ActionFailed,
+    ProcessTicked,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FactMutation {
+    pub schema_version: String,
+    pub mutation_kind: FactMutationKind,
+    pub target_ref: String,
+    pub visibility: ResolutionVisibility,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knowledge_tier: Option<KnowledgeTier>,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FactMutationKind {
+    ScenePressureDelta,
+    BodyResourceDelta,
+    LocationDelta,
+    RelationshipDelta,
+    BeliefDelta,
+    WorldLoreDelta,
+    PatternDebt,
+    PlayerIntentTrace,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CostClaim {
+    pub schema_version: String,
+    pub cost_kind: CostClaimKind,
+    pub target_ref: String,
+    pub status: GateStatus,
+    pub visibility: ResolutionVisibility,
+    pub reason: String,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CostClaimKind {
+    Body,
+    Resource,
+    Location,
+    SocialPermission,
+    Knowledge,
+    TimePressure,
+    HiddenConstraint,
+    WorldLaw,
+    Affordance,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VisibilityClaim {
+    pub schema_version: String,
+    pub target_ref: String,
+    pub visibility: ResolutionVisibility,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knowledge_tier: Option<KnowledgeTier>,
+    pub summary: String,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorldCourtRepairAction {
     pub schema_version: String,
     pub action_id: String,
@@ -131,6 +237,8 @@ pub fn adjudicate_world_changes(input: &WorldCourtInput<'_>) -> WorldCourtVerdic
             }
         };
         if resolution_accepted {
+            let change_set = world_change_set_from_resolution(proposal);
+            audit_world_change_set(&change_set, &mut accepted_checks, &mut violations);
             audit_court_semantic_layers(proposal, &mut accepted_checks, &mut violations);
             match audit_resolution_choices(input.context, proposal, input.next_choices) {
                 Ok(()) => accepted_checks.push("visible_choice_text".to_owned()),
@@ -262,6 +370,293 @@ fn audit_court_semantic_layers(
                 "retarget the tick to an active process:* ref",
             ));
         }
+    }
+}
+
+#[must_use]
+pub fn world_change_set_from_resolution(proposal: &ResolutionProposal) -> WorldChangeSet {
+    let mut evidence_refs = proposal.interpreted_intent.evidence_refs.clone();
+    evidence_refs.extend(proposal.outcome.evidence_refs.clone());
+    let proposed_events = world_change_events_from_resolution(proposal);
+    let fact_mutations = proposal
+        .proposed_effects
+        .iter()
+        .map(fact_mutation_from_effect)
+        .collect::<Vec<_>>();
+    let cost_claims = proposal
+        .gate_results
+        .iter()
+        .map(cost_claim_from_gate)
+        .collect::<Vec<_>>();
+    let visibility_claims = visibility_claims_from_resolution(proposal);
+    WorldChangeSet {
+        schema_version: WORLD_CHANGE_SET_SCHEMA_VERSION.to_owned(),
+        world_id: proposal.world_id.clone(),
+        turn_id: proposal.turn_id.clone(),
+        proposed_events,
+        fact_mutations,
+        cost_claims,
+        visibility_claims,
+        evidence_refs: dedupe_strings(evidence_refs),
+    }
+}
+
+fn world_change_events_from_resolution(proposal: &ResolutionProposal) -> Vec<WorldChangeEvent> {
+    let mut events = vec![WorldChangeEvent {
+        schema_version: WORLD_CHANGE_EVENT_SCHEMA_VERSION.to_owned(),
+        event_kind: WorldChangeEventKind::PlayerActionAttempted,
+        target_ref: proposal
+            .interpreted_intent
+            .target_refs
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "current_turn".to_owned()),
+        summary: proposal.interpreted_intent.summary.clone(),
+        evidence_refs: proposal.interpreted_intent.evidence_refs.clone(),
+    }];
+    events.push(WorldChangeEvent {
+        schema_version: WORLD_CHANGE_EVENT_SCHEMA_VERSION.to_owned(),
+        event_kind: outcome_event_kind(proposal.outcome.kind),
+        target_ref: "current_turn".to_owned(),
+        summary: proposal.outcome.summary.clone(),
+        evidence_refs: proposal.outcome.evidence_refs.clone(),
+    });
+    events.extend(proposal.process_ticks.iter().map(|tick| WorldChangeEvent {
+        schema_version: WORLD_CHANGE_EVENT_SCHEMA_VERSION.to_owned(),
+        event_kind: WorldChangeEventKind::ProcessTicked,
+        target_ref: tick.process_ref.clone(),
+        summary: tick.summary.clone(),
+        evidence_refs: tick.evidence_refs.clone(),
+    }));
+    events
+}
+
+const fn outcome_event_kind(kind: ResolutionOutcomeKind) -> WorldChangeEventKind {
+    match kind {
+        ResolutionOutcomeKind::Success
+        | ResolutionOutcomeKind::PartialSuccess
+        | ResolutionOutcomeKind::CostlySuccess
+        | ResolutionOutcomeKind::Delayed
+        | ResolutionOutcomeKind::Escalated => WorldChangeEventKind::ActionSucceeded,
+        ResolutionOutcomeKind::Blocked => WorldChangeEventKind::ActionFailed,
+    }
+}
+
+fn fact_mutation_from_effect(effect: &ProposedEffect) -> FactMutation {
+    FactMutation {
+        schema_version: FACT_MUTATION_SCHEMA_VERSION.to_owned(),
+        mutation_kind: fact_mutation_kind_from_effect(effect.effect_kind),
+        target_ref: effect.target_ref.clone(),
+        visibility: effect.visibility,
+        summary: effect.summary.clone(),
+        knowledge_tier: effect.knowledge_tier,
+        evidence_refs: effect.evidence_refs.clone(),
+    }
+}
+
+const fn fact_mutation_kind_from_effect(kind: ProposedEffectKind) -> FactMutationKind {
+    match kind {
+        ProposedEffectKind::ScenePressureDelta => FactMutationKind::ScenePressureDelta,
+        ProposedEffectKind::BodyResourceDelta => FactMutationKind::BodyResourceDelta,
+        ProposedEffectKind::LocationDelta => FactMutationKind::LocationDelta,
+        ProposedEffectKind::RelationshipDelta => FactMutationKind::RelationshipDelta,
+        ProposedEffectKind::BeliefDelta => FactMutationKind::BeliefDelta,
+        ProposedEffectKind::WorldLoreDelta => FactMutationKind::WorldLoreDelta,
+        ProposedEffectKind::PatternDebt => FactMutationKind::PatternDebt,
+        ProposedEffectKind::PlayerIntentTrace => FactMutationKind::PlayerIntentTrace,
+    }
+}
+
+fn cost_claim_from_gate(gate: &GateResult) -> CostClaim {
+    CostClaim {
+        schema_version: COST_CLAIM_SCHEMA_VERSION.to_owned(),
+        cost_kind: cost_claim_kind_from_gate(gate.gate_kind),
+        target_ref: gate.gate_ref.clone(),
+        status: gate.status,
+        visibility: gate.visibility,
+        reason: gate.reason.clone(),
+        evidence_refs: gate.evidence_refs.clone(),
+    }
+}
+
+const fn cost_claim_kind_from_gate(kind: GateKind) -> CostClaimKind {
+    match kind {
+        GateKind::Body => CostClaimKind::Body,
+        GateKind::Resource => CostClaimKind::Resource,
+        GateKind::Location => CostClaimKind::Location,
+        GateKind::SocialPermission => CostClaimKind::SocialPermission,
+        GateKind::Knowledge => CostClaimKind::Knowledge,
+        GateKind::TimePressure => CostClaimKind::TimePressure,
+        GateKind::HiddenConstraint => CostClaimKind::HiddenConstraint,
+        GateKind::WorldLaw => CostClaimKind::WorldLaw,
+        GateKind::Affordance => CostClaimKind::Affordance,
+    }
+}
+
+fn visibility_claims_from_resolution(proposal: &ResolutionProposal) -> Vec<VisibilityClaim> {
+    let mut claims = proposal
+        .proposed_effects
+        .iter()
+        .map(|effect| VisibilityClaim {
+            schema_version: VISIBILITY_CLAIM_SCHEMA_VERSION.to_owned(),
+            target_ref: effect.target_ref.clone(),
+            visibility: effect.visibility,
+            knowledge_tier: effect.knowledge_tier,
+            summary: effect.summary.clone(),
+            evidence_refs: effect.evidence_refs.clone(),
+        })
+        .collect::<Vec<_>>();
+    claims.extend(proposal.process_ticks.iter().map(|tick| VisibilityClaim {
+        schema_version: VISIBILITY_CLAIM_SCHEMA_VERSION.to_owned(),
+        target_ref: tick.process_ref.clone(),
+        visibility: tick.visibility,
+        knowledge_tier: None,
+        summary: tick.summary.clone(),
+        evidence_refs: tick.evidence_refs.clone(),
+    }));
+    claims
+}
+
+fn audit_world_change_set(
+    change_set: &WorldChangeSet,
+    accepted_checks: &mut Vec<String>,
+    violations: &mut Vec<WorldCourtViolation>,
+) {
+    if change_set.proposed_events.is_empty() {
+        violations.push(change_set_violation(
+            WorldCourtLayer::Schema,
+            "world_change_set_events",
+            "world change set must include at least one proposed event",
+            "current_turn",
+            "derive attempted/resolved events before court adjudication",
+        ));
+    } else {
+        push_accepted_check(accepted_checks, "world_change_set_events");
+    }
+    for event in &change_set.proposed_events {
+        if event.evidence_refs.is_empty() {
+            violations.push(change_set_violation(
+                WorldCourtLayer::Evidence,
+                "world_change_event_evidence",
+                "world change events must be evidence-backed",
+                event.target_ref.as_str(),
+                "attach evidence_refs to the event source",
+            ));
+        }
+    }
+    for mutation in &change_set.fact_mutations {
+        audit_fact_mutation(mutation, accepted_checks, violations);
+    }
+    for cost in &change_set.cost_claims {
+        audit_cost_claim(cost, accepted_checks, violations);
+    }
+    for claim in &change_set.visibility_claims {
+        audit_visibility_claim(claim, accepted_checks, violations);
+    }
+}
+
+fn audit_fact_mutation(
+    mutation: &FactMutation,
+    accepted_checks: &mut Vec<String>,
+    violations: &mut Vec<WorldCourtViolation>,
+) {
+    if ref_matches_fact_mutation_kind(mutation.mutation_kind, mutation.target_ref.as_str()) {
+        push_accepted_check(accepted_checks, "world_change_set_fact_domains");
+    } else {
+        violations.push(change_set_violation(
+            layer_for_fact_mutation_kind(mutation.mutation_kind),
+            "world_change_set_fact_domains",
+            "fact mutation kind does not match the target world domain",
+            mutation.target_ref.as_str(),
+            "retarget the fact mutation to the matching world ref domain",
+        ));
+    }
+}
+
+fn audit_cost_claim(
+    cost: &CostClaim,
+    accepted_checks: &mut Vec<String>,
+    violations: &mut Vec<WorldCourtViolation>,
+) {
+    if cost.cost_kind == CostClaimKind::HiddenConstraint
+        && cost.visibility == ResolutionVisibility::PlayerVisible
+    {
+        violations.push(change_set_violation(
+            WorldCourtLayer::Visibility,
+            "world_change_set_hidden_cost_visibility",
+            "hidden constraint costs must stay adjudication-only",
+            cost.target_ref.as_str(),
+            "render symptoms instead of the hidden cost claim",
+        ));
+        return;
+    }
+    if ref_matches_cost_claim_kind(cost.cost_kind, cost.target_ref.as_str()) {
+        push_accepted_check(accepted_checks, "world_change_set_cost_domains");
+    } else {
+        violations.push(change_set_violation(
+            layer_for_cost_claim_kind(cost.cost_kind),
+            "world_change_set_cost_domains",
+            "cost claim kind does not match the target world domain",
+            cost.target_ref.as_str(),
+            "retarget the cost claim to the matching gate domain",
+        ));
+    }
+}
+
+fn audit_visibility_claim(
+    claim: &VisibilityClaim,
+    accepted_checks: &mut Vec<String>,
+    violations: &mut Vec<WorldCourtViolation>,
+) {
+    let tier = claim
+        .knowledge_tier
+        .unwrap_or(KnowledgeTier::PlayerObserved);
+    if claim.visibility != ResolutionVisibility::PlayerVisible {
+        push_accepted_check(accepted_checks, "world_change_set_visibility_scope");
+        return;
+    }
+    if !can_render_knowledge_tier_to_player(tier) {
+        violations.push(change_set_violation(
+            WorldCourtLayer::Visibility,
+            "world_change_set_visibility_tier",
+            "player-visible change claims cannot render world-true hidden knowledge",
+            claim.target_ref.as_str(),
+            "keep hidden knowledge adjudication-only",
+        ));
+        return;
+    }
+    if !visible_knowledge_text_is_qualified(tier, claim.summary.as_str()) {
+        violations.push(change_set_violation(
+            WorldCourtLayer::Visibility,
+            "world_change_set_visibility_render_rule",
+            "player-visible change claim violates knowledge tier render rule",
+            claim.target_ref.as_str(),
+            "rewrite the claim with the required uncertainty/source/belief framing",
+        ));
+        return;
+    }
+    push_accepted_check(accepted_checks, "world_change_set_visibility_claims");
+}
+
+fn change_set_violation(
+    layer: WorldCourtLayer,
+    check: &str,
+    message: &str,
+    rejected_ref: &str,
+    required_change: &str,
+) -> WorldCourtViolation {
+    WorldCourtViolation {
+        schema_version: WORLD_COURT_VIOLATION_SCHEMA_VERSION.to_owned(),
+        layer,
+        severity: WorldCourtViolationSeverity::Blocking,
+        check: check.to_owned(),
+        message: message.to_owned(),
+        rejected_refs: vec![rejected_ref.to_owned()],
+        required_changes: vec![required_change.to_owned()],
+        allowed_repair_scope: vec![
+            "world_change_set".to_owned(),
+            "resolution_proposal".to_owned(),
+        ],
     }
 }
 
@@ -439,6 +834,77 @@ fn ref_matches_effect_kind(effect_kind: ProposedEffectKind, item_ref: &str) -> b
     }
 }
 
+const fn layer_for_fact_mutation_kind(mutation_kind: FactMutationKind) -> WorldCourtLayer {
+    match mutation_kind {
+        FactMutationKind::ScenePressureDelta => WorldCourtLayer::Causality,
+        FactMutationKind::BodyResourceDelta => WorldCourtLayer::BodyResource,
+        FactMutationKind::LocationDelta => WorldCourtLayer::Space,
+        FactMutationKind::RelationshipDelta => WorldCourtLayer::SocialAuthority,
+        FactMutationKind::BeliefDelta => WorldCourtLayer::Evidence,
+        FactMutationKind::WorldLoreDelta => WorldCourtLayer::Ontology,
+        FactMutationKind::PatternDebt => WorldCourtLayer::ConsequenceReturn,
+        FactMutationKind::PlayerIntentTrace => WorldCourtLayer::ProjectionHook,
+    }
+}
+
+fn ref_matches_fact_mutation_kind(mutation_kind: FactMutationKind, item_ref: &str) -> bool {
+    match mutation_kind {
+        FactMutationKind::ScenePressureDelta => ref_has_prefix(item_ref, &["pressure:"]),
+        FactMutationKind::BodyResourceDelta => {
+            ref_has_prefix(item_ref, &["body:", "resource:", "inventory:"])
+        }
+        FactMutationKind::LocationDelta => ref_has_prefix(item_ref, &["place:", "location:"]),
+        FactMutationKind::RelationshipDelta => {
+            ref_has_prefix(item_ref, &["rel:", "relationship:", "stance:", "social:"])
+        }
+        FactMutationKind::BeliefDelta => ref_has_prefix(item_ref, &["belief:", "knowledge:"]),
+        FactMutationKind::WorldLoreDelta => ref_has_prefix(item_ref, &["lore:", "world_fact:"]),
+        FactMutationKind::PatternDebt => ref_has_prefix(item_ref, &["pattern_debt:"]),
+        FactMutationKind::PlayerIntentTrace => {
+            ref_has_prefix(item_ref, &["intent:", "player_intent:", "current_turn"])
+        }
+    }
+}
+
+const fn layer_for_cost_claim_kind(cost_kind: CostClaimKind) -> WorldCourtLayer {
+    match cost_kind {
+        CostClaimKind::Body | CostClaimKind::Resource => WorldCourtLayer::BodyResource,
+        CostClaimKind::Location => WorldCourtLayer::Space,
+        CostClaimKind::SocialPermission => WorldCourtLayer::SocialAuthority,
+        CostClaimKind::Knowledge => WorldCourtLayer::Evidence,
+        CostClaimKind::TimePressure => WorldCourtLayer::Time,
+        CostClaimKind::HiddenConstraint => WorldCourtLayer::Visibility,
+        CostClaimKind::WorldLaw => WorldCourtLayer::Causality,
+        CostClaimKind::Affordance => WorldCourtLayer::ChoiceGrounding,
+    }
+}
+
+fn ref_matches_cost_claim_kind(cost_kind: CostClaimKind, item_ref: &str) -> bool {
+    match cost_kind {
+        CostClaimKind::Body => ref_has_prefix(item_ref, &["body:"]),
+        CostClaimKind::Resource => ref_has_prefix(item_ref, &["resource:", "inventory:"]),
+        CostClaimKind::Location => ref_has_prefix(item_ref, &["place:", "location:"]),
+        CostClaimKind::SocialPermission => ref_has_prefix(
+            item_ref,
+            &[
+                "pressure:social:",
+                "rel:",
+                "relationship:",
+                "stance:",
+                "social:",
+            ],
+        ),
+        CostClaimKind::Knowledge => ref_has_prefix(
+            item_ref,
+            &["belief:", "knowledge:", "visible_scene:", "current_turn"],
+        ),
+        CostClaimKind::TimePressure => ref_has_prefix(item_ref, &["pressure:time:", "process:"]),
+        CostClaimKind::HiddenConstraint => true,
+        CostClaimKind::WorldLaw => ref_has_prefix(item_ref, &["law:", "world_law:"]),
+        CostClaimKind::Affordance => ref_has_prefix(item_ref, &["affordance:"]),
+    }
+}
+
 fn ref_has_prefix(item_ref: &str, prefixes: &[&str]) -> bool {
     prefixes
         .iter()
@@ -457,6 +923,16 @@ fn accepted_resolution_checks() -> Vec<String> {
     .into_iter()
     .map(str::to_owned)
     .collect()
+}
+
+fn dedupe_strings(values: Vec<String>) -> Vec<String> {
+    let mut deduped = Vec::new();
+    for value in values {
+        if !deduped.iter().any(|existing| existing == &value) {
+            deduped.push(value);
+        }
+    }
+    deduped
 }
 
 fn violation_from_resolution_critique(
@@ -734,6 +1210,88 @@ mod tests {
                 .iter()
                 .any(|check| check == "knowledge_tier_render_rule")
         );
+    }
+
+    #[test]
+    fn world_change_set_from_resolution_maps_events_facts_costs_and_visibility() {
+        let mut proposal = semantic_probe();
+        proposal.gate_results.push(GateResult {
+            gate_kind: GateKind::Resource,
+            gate_ref: "inventory:oil".to_owned(),
+            visibility: ResolutionVisibility::PlayerVisible,
+            status: GateStatus::CostImposed,
+            reason: "uses oil".to_owned(),
+            evidence_refs: vec!["current_turn".to_owned()],
+        });
+        proposal.proposed_effects.push(ProposedEffect {
+            effect_kind: ProposedEffectKind::BodyResourceDelta,
+            target_ref: "inventory:oil".to_owned(),
+            visibility: ResolutionVisibility::PlayerVisible,
+            knowledge_tier: None,
+            summary: "oil is spent".to_owned(),
+            evidence_refs: vec!["current_turn".to_owned()],
+        });
+        proposal.process_ticks.push(ProcessTickProposal {
+            process_ref: "process:gate_closing".to_owned(),
+            cause: ProcessTickCause::PlayerActionTouchedProcess,
+            visibility: ResolutionVisibility::PlayerVisible,
+            summary: "gate clock advances".to_owned(),
+            evidence_refs: vec!["current_turn".to_owned()],
+        });
+
+        let change_set = super::world_change_set_from_resolution(&proposal);
+
+        assert_eq!(change_set.proposed_events.len(), 3);
+        assert_eq!(change_set.fact_mutations.len(), 1);
+        assert_eq!(change_set.cost_claims.len(), 1);
+        assert_eq!(change_set.visibility_claims.len(), 2);
+        assert!(
+            change_set
+                .proposed_events
+                .iter()
+                .any(|event| event.event_kind == super::WorldChangeEventKind::ProcessTicked)
+        );
+    }
+
+    #[test]
+    fn world_change_set_rejects_mismatched_fact_mutation_domain() {
+        let change_set = super::WorldChangeSet {
+            schema_version: super::WORLD_CHANGE_SET_SCHEMA_VERSION.to_owned(),
+            world_id: "stw_court".to_owned(),
+            turn_id: "turn_0001".to_owned(),
+            proposed_events: vec![super::WorldChangeEvent {
+                schema_version: super::WORLD_CHANGE_EVENT_SCHEMA_VERSION.to_owned(),
+                event_kind: super::WorldChangeEventKind::PlayerActionAttempted,
+                target_ref: "current_turn".to_owned(),
+                summary: "attempt".to_owned(),
+                evidence_refs: vec!["current_turn".to_owned()],
+            }],
+            fact_mutations: vec![super::FactMutation {
+                schema_version: super::FACT_MUTATION_SCHEMA_VERSION.to_owned(),
+                mutation_kind: super::FactMutationKind::BodyResourceDelta,
+                target_ref: "place:west_gate".to_owned(),
+                visibility: ResolutionVisibility::PlayerVisible,
+                summary: "wrong target domain".to_owned(),
+                knowledge_tier: None,
+                evidence_refs: vec!["current_turn".to_owned()],
+            }],
+            cost_claims: Vec::new(),
+            visibility_claims: Vec::new(),
+            evidence_refs: vec!["current_turn".to_owned()],
+        };
+        let mut accepted_checks = Vec::new();
+        let mut violations = Vec::new();
+
+        super::audit_world_change_set(&change_set, &mut accepted_checks, &mut violations);
+
+        assert!(
+            accepted_checks
+                .iter()
+                .any(|check| check == "world_change_set_events")
+        );
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].layer, WorldCourtLayer::BodyResource);
+        assert_eq!(violations[0].check, "world_change_set_fact_domains");
     }
 
     fn minimal_context(resolution_required: bool) -> PromptContextPacket {
