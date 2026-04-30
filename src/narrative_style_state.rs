@@ -390,6 +390,7 @@ mod tests {
             next_choices: Vec::new(),
             actor_goal_events: Vec::new(),
             actor_move_events: Vec::new(),
+            hook_events: Vec::new(),
         };
         let plan = prepare_narrative_style_event_plan("stw_style_events", "turn_0002", &response);
         append_narrative_style_event_plan(temp.path(), &plan)?;

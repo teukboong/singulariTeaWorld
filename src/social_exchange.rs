@@ -1582,6 +1582,7 @@ mod tests {
             next_choices: Vec::new(),
             actor_goal_events: Vec::new(),
             actor_move_events: Vec::new(),
+            hook_events: Vec::new(),
         }
     }
 

@@ -498,6 +498,7 @@ mod tests {
                 active_consequence_spine: ConsequenceSpinePacket::default(),
                 active_social_exchange: SocialExchangePacket::default(),
                 active_encounter_surface: EncounterSurfacePacket::default(),
+                active_hook_ledger: crate::hook_ledger::HookPacket::default(),
                 active_turn_retrieval_controller: TurnRetrievalControllerPacket::default(),
                 selected_context_capsules: ContextCapsuleSelection::default(),
                 active_autobiographical_index: AutobiographicalIndexPacket::default(),

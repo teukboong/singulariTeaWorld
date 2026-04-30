@@ -881,6 +881,7 @@ mod tests {
                 relationship_refs: vec!["rel:char:guard->player:suspicious".to_owned()],
                 evidence_refs: vec!["visible_scene:guard".to_owned()],
             }],
+            hook_events: Vec::new(),
         }
     }
 }

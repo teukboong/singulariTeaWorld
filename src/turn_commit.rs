@@ -812,6 +812,7 @@ premise:
                 next_choices: scene_specific_choices(),
                 actor_goal_events: Vec::new(),
                 actor_move_events: Vec::new(),
+                hook_events: Vec::new(),
             },
         })?;
 
@@ -1003,6 +1004,7 @@ premise:
                 next_choices: scene_specific_choices(),
                 actor_goal_events: Vec::new(),
                 actor_move_events: Vec::new(),
+                hook_events: Vec::new(),
             },
         })?;
         Ok((pending, committed))

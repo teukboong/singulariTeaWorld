@@ -201,6 +201,7 @@ fn fixture_response(store: &Path, pending: &PendingAgentTurn) -> Result<AgentTur
         next_choices: scene_choices(),
         actor_goal_events: Vec::new(),
         actor_move_events: Vec::new(),
+        hook_events: Vec::new(),
     })
 }
 

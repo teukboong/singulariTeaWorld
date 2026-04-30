@@ -1441,6 +1441,7 @@ mod tests {
                 active_world_process_clock: Value::Null,
                 active_actor_agency: Value::Null,
                 active_player_intent_trace: Value::Null,
+                active_hook_ledger: Value::Null,
                 active_turn_retrieval_controller: Value::Null,
                 selected_context_capsules: Value::Null,
                 active_autobiographical_index: Value::Null,
