@@ -2255,6 +2255,7 @@ fn normalize_location_events(response: &mut serde_json::Map<String, Value>) {
                 .map_or("visited", normalize_location_event_kind);
             event.insert("event_kind".to_owned(), Value::String(kind.to_owned()));
         }
+        normalize_string_enum_field(event, "event_kind", normalize_location_event_kind);
         ensure_string_field(event, "name", "미정");
         ensure_string_field(event, "knowledge_state", "visited");
     }
@@ -2447,7 +2448,7 @@ fn normalize_scene_pressure_change(value: &str) -> &'static str {
 
 fn normalize_location_event_kind(value: &str) -> &'static str {
     match value {
-        "discovered" => "discovered",
+        "discovered" | "opened" | "open" => "discovered",
         "route_opened" => "route_opened",
         "route_blocked" => "route_blocked",
         "visited" | "establish_visible" | "established" => "visited",
@@ -3284,6 +3285,7 @@ premise:
             "next_choices": [],
             "location_events": [{
                 "location_ref": "place:opening_location",
+                "event_kind": "opened",
                 "summary": "test",
                 "evidence_refs": ["player_input"]
             }]
@@ -3317,7 +3319,7 @@ premise:
         );
         assert_eq!(
             value["location_events"][0]["event_kind"],
-            serde_json::json!("visited")
+            serde_json::json!("discovered")
         );
     }
 
