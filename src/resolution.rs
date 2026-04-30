@@ -2,6 +2,7 @@ use crate::affordance_graph::AffordanceGraphPacket;
 use crate::agent_bridge::AgentPrivateAdjudicationContext;
 use crate::belief_graph::BeliefGraphPacket;
 use crate::body_resource::BodyResourcePacket;
+use crate::knowledge_ledger::KnowledgeTier;
 use crate::location_graph::LocationGraphPacket;
 use crate::models::TurnChoice;
 use crate::prompt_context::PromptContextPacket;
@@ -129,6 +130,8 @@ pub struct ProposedEffect {
     pub effect_kind: ProposedEffectKind,
     pub target_ref: String,
     pub visibility: ResolutionVisibility,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knowledge_tier: Option<KnowledgeTier>,
     pub summary: String,
     #[serde(default)]
     pub evidence_refs: Vec<String>,
@@ -1409,6 +1412,7 @@ mod tests {
                         belief_id: "belief:guard:doubt".to_owned(),
                         holder: BeliefHolder::PlayerVisibleNarrator,
                         confidence: BeliefConfidence::Inferred,
+                        knowledge_tier: crate::knowledge_ledger::KnowledgeTier::PlayerInferred,
                         statement: "문지기는 말을 완전히 믿지 않는다.".to_owned(),
                         source_refs: vec!["visible_scene:gate".to_owned()],
                     }],
@@ -1422,6 +1426,7 @@ mod tests {
                     tempo: WorldProcessTempo::Immediate,
                     summary: "문 닫는 시간이 다가온다.".to_owned(),
                     next_tick_contract: "시간이 지나면 문이 닫힌다.".to_owned(),
+                    tick_policy: crate::world_process_clock::WorldProcessTickPolicy::default(),
                     source_refs: vec!["pressure:social:gate".to_owned()],
                 }]),
                 active_scene_director: Value::Null,
@@ -1624,6 +1629,7 @@ mod tests {
                 effect_kind: ProposedEffectKind::ScenePressureDelta,
                 target_ref: "pressure:social:gate".to_owned(),
                 visibility: ResolutionVisibility::PlayerVisible,
+                knowledge_tier: None,
                 summary: "사회적 허가 압력이 약간 누그러진다.".to_owned(),
                 evidence_refs: vec!["pressure:social:gate".to_owned()],
             }],

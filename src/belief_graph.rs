@@ -1,6 +1,7 @@
 #![allow(clippy::missing_errors_doc)]
 
 use crate::agent_bridge::AgentTurnResponse;
+use crate::knowledge_ledger::{KnowledgeTier, can_render_knowledge_tier_to_player};
 use crate::store::{append_jsonl, read_json, write_json};
 use anyhow::Result;
 use chrono::Utc;
@@ -47,6 +48,8 @@ pub struct BeliefNode {
     pub belief_id: String,
     pub holder: BeliefHolder,
     pub confidence: BeliefConfidence,
+    #[serde(default)]
+    pub knowledge_tier: KnowledgeTier,
     pub statement: String,
     #[serde(default)]
     pub source_refs: Vec<String>,
@@ -90,6 +93,8 @@ pub struct BeliefEventRecord {
     pub event_id: String,
     pub holder: BeliefHolder,
     pub confidence: BeliefConfidence,
+    #[serde(default)]
+    pub knowledge_tier: KnowledgeTier,
     pub statement: String,
     #[serde(default)]
     pub source_refs: Vec<String>,
@@ -124,6 +129,7 @@ pub fn compile_belief_graph_packet(
         "known_facts",
     );
     collect_selected_memory_beliefs(&mut beliefs, selected_memory_items);
+    beliefs.retain(|belief| can_render_knowledge_tier_to_player(belief.knowledge_tier));
 
     BeliefGraphPacket {
         schema_version: BELIEF_GRAPH_PACKET_SCHEMA_VERSION.to_owned(),
@@ -204,6 +210,8 @@ pub fn rebuild_belief_graph(
             .take(PERSISTED_BELIEF_BUDGET)
             .map(belief_node_from_event),
     );
+    protagonist_visible_beliefs
+        .retain(|belief| can_render_knowledge_tier_to_player(belief.knowledge_tier));
     protagonist_visible_beliefs.truncate(PERSISTED_BELIEF_BUDGET);
     let packet = BeliefGraphPacket {
         schema_version: BELIEF_GRAPH_PACKET_SCHEMA_VERSION.to_owned(),
@@ -263,6 +271,7 @@ fn belief_event(seed: BeliefEventSeed<'_>) -> BeliefEventRecord {
         event_id: format!("belief_event:{}:{:02}", seed.turn_id, seed.index),
         holder: seed.holder,
         confidence: seed.confidence,
+        knowledge_tier: knowledge_tier_for_confidence(seed.confidence),
         statement: seed.statement.to_owned(),
         source_refs: seed.source_refs,
         recorded_at: seed.recorded_at.to_owned(),
@@ -275,6 +284,7 @@ fn belief_node_from_event(record: BeliefEventRecord) -> BeliefNode {
         belief_id: format!("belief:event:{}", record.event_id),
         holder: record.holder,
         confidence: record.confidence,
+        knowledge_tier: record.knowledge_tier,
         statement: record.statement,
         source_refs: record.source_refs,
     }
@@ -298,6 +308,7 @@ fn collect_array_beliefs(
             belief_id: format!("belief:{source_label}:{index:02}"),
             holder: BeliefHolder::Protagonist,
             confidence,
+            knowledge_tier: knowledge_tier_for_confidence(confidence),
             statement,
             source_refs: vec![format!("{source_label}[{index}]")],
         });
@@ -327,6 +338,7 @@ fn collect_selected_memory_beliefs(beliefs: &mut Vec<BeliefNode>, selected_memor
             belief_id: format!("belief:selected_memory:{index:02}"),
             holder: BeliefHolder::PlayerVisibleNarrator,
             confidence: BeliefConfidence::Reported,
+            knowledge_tier: knowledge_tier_for_confidence(BeliefConfidence::Reported),
             statement,
             source_refs: vec![source_id],
         });
@@ -355,6 +367,14 @@ fn non_empty(text: &str) -> Option<String> {
     }
 }
 
+const fn knowledge_tier_for_confidence(confidence: BeliefConfidence) -> KnowledgeTier {
+    match confidence {
+        BeliefConfidence::Observed => KnowledgeTier::PlayerObserved,
+        BeliefConfidence::Inferred => KnowledgeTier::PlayerInferred,
+        BeliefConfidence::Reported => KnowledgeTier::Rumor,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -377,8 +397,16 @@ mod tests {
             BeliefConfidence::Observed
         );
         assert_eq!(
+            graph.protagonist_visible_beliefs[0].knowledge_tier,
+            KnowledgeTier::PlayerObserved
+        );
+        assert_eq!(
             graph.protagonist_visible_beliefs[1].confidence,
             BeliefConfidence::Reported
+        );
+        assert_eq!(
+            graph.protagonist_visible_beliefs[1].knowledge_tier,
+            KnowledgeTier::Rumor
         );
         assert!(
             graph
@@ -386,5 +414,30 @@ mod tests {
                 .iter()
                 .any(|rule| rule.contains("belief node가 없으면 유보"))
         );
+    }
+
+    #[test]
+    fn filters_hidden_truth_tier_from_visible_beliefs() -> anyhow::Result<()> {
+        let packet = BeliefGraphPacket {
+            schema_version: BELIEF_GRAPH_PACKET_SCHEMA_VERSION.to_owned(),
+            world_id: "stw_belief".to_owned(),
+            turn_id: "turn_0004".to_owned(),
+            protagonist_visible_beliefs: vec![BeliefNode {
+                schema_version: BELIEF_NODE_SCHEMA_VERSION.to_owned(),
+                belief_id: "belief:hidden".to_owned(),
+                holder: BeliefHolder::PlayerVisibleNarrator,
+                confidence: BeliefConfidence::Observed,
+                knowledge_tier: KnowledgeTier::WorldTrueHidden,
+                statement: "암살자가 북문 뒤에 숨어 있다".to_owned(),
+                source_refs: vec!["hidden:assassin".to_owned()],
+            }],
+            narrator_knowledge_limits: Vec::new(),
+            compiler_policy: BeliefGraphPolicy::default(),
+        };
+        let dir = tempfile::tempdir()?;
+        let packet = rebuild_belief_graph(dir.path(), &packet)?;
+
+        assert!(packet.protagonist_visible_beliefs.is_empty());
+        Ok(())
     }
 }

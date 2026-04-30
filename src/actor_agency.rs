@@ -763,6 +763,7 @@ mod tests {
                     expected_return:
                         crate::consequence_spine::ConsequenceReturnWindow::CurrentScene,
                     decay: crate::consequence_spine::ConsequenceDecay::default(),
+                    return_rights: crate::consequence_spine::ConsequenceReturnRights::default(),
                 }],
                 ..crate::consequence_spine::ConsequenceSpinePacket::default()
             },

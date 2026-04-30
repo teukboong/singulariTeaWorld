@@ -24,6 +24,7 @@ use crate::store::{
 };
 use crate::transfer::{ExportWorldOptions, ImportWorldOptions, export_world, import_world};
 use crate::turn::{AdvanceTurnOptions, advance_turn};
+use crate::turn_commit::{TurnCommitJournalRecoveryReport, recover_turn_commit_journal};
 use crate::visual_assets::{
     BuildWorldVisualAssetsOptions, ImageGenerationJob, VN_ASSETS_DIR, build_world_visual_assets,
 };
@@ -280,6 +281,14 @@ struct VnExtraMemoryRepairResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct VnTurnCommitJournalRecoveryResponse {
+    schema_version: String,
+    world_id: String,
+    recovery: TurnCommitJournalRecoveryReport,
+    projection_health: ProjectionHealthReport,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct VnCgGalleryResponse {
     schema_version: String,
     world_id: String,
@@ -409,6 +418,9 @@ fn route_request(state: &VnServerState, request: &HttpRequest) -> HttpResponse {
         ("POST", "/api/vn/cg/retry") => cg_retry_response(state, &request.body),
         ("POST", "/api/vn/repair/world-db") => repair_world_db_response(state),
         ("POST", "/api/vn/repair/extra-memory") => repair_extra_memory_response(state),
+        ("POST", "/api/vn/repair/turn-commit-journal") => {
+            recover_turn_commit_journal_response(state)
+        }
         ("POST", "/api/vn/choose") => choose_response(state, &request.body),
         _ => error_response("404 Not Found", format!("unknown route: {}", request.path)),
     }
@@ -500,6 +512,13 @@ fn repair_world_db_response(state: &VnServerState) -> HttpResponse {
 
 fn repair_extra_memory_response(state: &VnServerState) -> HttpResponse {
     match repair_extra_memory_for_active_world(state) {
+        Ok(response) => json_response(&response),
+        Err(error) => error_response("400 Bad Request", error.to_string()),
+    }
+}
+
+fn recover_turn_commit_journal_response(state: &VnServerState) -> HttpResponse {
+    match recover_turn_commit_journal_for_active_world(state) {
         Ok(response) => json_response(&response),
         Err(error) => error_response("400 Bad Request", error.to_string()),
     }
@@ -942,6 +961,21 @@ fn repair_extra_memory_for_active_world(
         schema_version: "singulari.vn_extra_memory_repair.v1".to_owned(),
         world_id,
         repair,
+        projection_health,
+    })
+}
+
+fn recover_turn_commit_journal_for_active_world(
+    state: &VnServerState,
+) -> Result<VnTurnCommitJournalRecoveryResponse> {
+    let world_id = state.world_id()?;
+    let recovery = recover_turn_commit_journal(state.store_root.as_deref(), world_id.as_str())?;
+    let projection_health =
+        build_projection_health_report(state.store_root.as_deref(), world_id.as_str())?;
+    Ok(VnTurnCommitJournalRecoveryResponse {
+        schema_version: "singulari.vn_turn_commit_journal_recovery.v1".to_owned(),
+        world_id,
+        recovery,
         projection_health,
     })
 }
@@ -2416,6 +2450,55 @@ premise:
         assert_eq!(response.status, "200 OK");
         let body: serde_json::Value = serde_json::from_slice(&response.body)?;
         assert_eq!(body["repair"]["rebuilt"], true);
+        assert_eq!(body["projection_health"]["status"], "healthy");
+        Ok(())
+    }
+
+    #[test]
+    fn recover_turn_commit_journal_route_reports_projection_health() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(
+            &seed_path,
+            r#"
+schema_version: singulari.world_seed.v1
+world_id: stw_vn_recover_commit_journal
+title: "커밋 저널 복구 세계"
+premise:
+  genre: "중세 판타지"
+  protagonist: "변경 순찰자, 남자 주인공"
+"#,
+        )?;
+        init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+        let state = VnServerState {
+            store_root: Some(store),
+            world_id: Mutex::new("stw_vn_recover_commit_journal".to_owned()),
+            vn_token: "test-vn-token".to_owned(),
+        };
+        let request = HttpRequest {
+            method: "POST".to_owned(),
+            path: "/api/vn/repair/turn-commit-journal".to_owned(),
+            headers: vec![(VN_TOKEN_HEADER.to_owned(), "test-vn-token".to_owned())],
+            body: Vec::new(),
+        };
+
+        let response = route_request(&state, &request);
+
+        assert_eq!(response.status, "200 OK");
+        let body: serde_json::Value = serde_json::from_slice(&response.body)?;
+        assert_eq!(
+            body["schema_version"],
+            "singulari.vn_turn_commit_journal_recovery.v1"
+        );
+        assert_eq!(
+            body["recovery"]["schema_version"],
+            "singulari.turn_commit_journal_recovery.v1"
+        );
         assert_eq!(body["projection_health"]["status"], "healthy");
         Ok(())
     }

@@ -444,15 +444,18 @@ singulari-world import-world --bundle <bundle-dir> --activate --json
 singulari-world validate --world-id <world-id> --json
 singulari-world projection-health --world-id <world-id> --json
 singulari-world repair-turn-materializations --world-id <world-id> --json
+singulari-world recover-turn-commit-journal --world-id <world-id> --json
 singulari-world repair-db --world-id <world-id> --json
 singulari-world repair-extra-memory --world-id <world-id> --json
 singulari-world visual-job-release --world-id <world-id> --slot <slot> --json
 ```
 
 Run `projection-health` before repair. It checks world files, world.db, turn
-commit envelopes, extra memory projections, and the unified job ledger. Repair
-only the failed component it names; no fallback or hidden auto-repair during
-normal play.
+commit journal/materializations, extra memory projections, and the unified job
+ledger. Repair only the failed component it names; no fallback or hidden
+auto-repair during normal play. Use `recover-turn-commit-journal` when a crash
+or worker restart left prepared/failed turn envelopes but durable commit records
+already exist.
 
 Older local worlds created before initial VN render packets existed may validate
 but fail `vn-packet` with a missing `sessions/<session>/render_packets/turn_0000.json`.

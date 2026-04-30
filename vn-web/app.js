@@ -12,6 +12,7 @@ const loadWorldApiUrl = "/api/vn/worlds/load";
 const cgRetryApiUrl = "/api/vn/cg/retry";
 const repairWorldDbApiUrl = "/api/vn/repair/world-db";
 const repairExtraMemoryApiUrl = "/api/vn/repair/extra-memory";
+const recoverTurnCommitJournalApiUrl = "/api/vn/repair/turn-commit-journal";
 const launchSeenKey = "singulari.vn.launchSeen";
 const launchTransitionMs = 520;
 const LOG_PAGE_SIZE = 5;
@@ -1544,6 +1545,16 @@ function projectionHealthRow(component) {
     actions.append(repairButton);
     row.append(actions);
   }
+  if (component.component === "turn_commit" && component.status !== "healthy") {
+    const actions = document.createElement("div");
+    actions.className = "projection-health-actions";
+    const repairButton = document.createElement("button");
+    repairButton.type = "button";
+    repairButton.textContent = "커밋 저널 복구";
+    repairButton.addEventListener("click", requestTurnCommitJournalRecovery);
+    actions.append(repairButton);
+    row.append(actions);
+  }
   return row;
 }
 
@@ -1603,6 +1614,25 @@ async function requestExtraMemoryRepair() {
     );
   } catch (error) {
     setWorldOperationStatus(`extra memory 재구축 실패: ${error.message}`);
+  } finally {
+    state.busy = false;
+  }
+}
+
+async function requestTurnCommitJournalRecovery() {
+  if (state.busy || !state.apiAvailable || explicitPacketUrl) {
+    return;
+  }
+  state.busy = true;
+  setWorldOperationStatus("turn commit journal 복구 중");
+  try {
+    const response = await fetchJson(recoverTurnCommitJournalApiUrl, { method: "POST" });
+    await refreshRuntimeStatus();
+    setWorldOperationStatus(
+      `turn commit journal 복구 완료: committed_appended=${response.recovery?.committed_envelopes_appended ?? 0}`,
+    );
+  } catch (error) {
+    setWorldOperationStatus(`turn commit journal 복구 실패: ${error.message}`);
   } finally {
     state.busy = false;
   }

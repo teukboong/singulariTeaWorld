@@ -1,9 +1,13 @@
+use crate::belief_graph::{
+    BELIEF_GRAPH_FILENAME, BeliefConfidence, BeliefGraphPacket, BeliefHolder,
+};
 use crate::extra_memory::{LocalFaceEntry, local_faces_for_codex_view};
+use crate::knowledge_ledger::{KnowledgeTier, can_render_knowledge_tier_to_player};
 use crate::models::{
     CODEX_VIEW_SCHEMA_VERSION, CharacterRecord, CharacterVoiceAnchor, CodexAnalysisEntry,
-    CodexEntityEntry, CodexFactEntry, CodexHiddenFilter, CodexLocalFaceEntry, CodexRecommendation,
-    CodexTimelineEntry, CodexView, CodexVoiceAnchorEntry, EntityRecords, HiddenState,
-    PROTAGONIST_CHARACTER_ID, PlayerKnowledge, TurnSnapshot, WorldRecord,
+    CodexBeliefEntry, CodexEntityEntry, CodexFactEntry, CodexHiddenFilter, CodexLocalFaceEntry,
+    CodexRecommendation, CodexTimelineEntry, CodexView, CodexVoiceAnchorEntry, EntityRecords,
+    HiddenState, PROTAGONIST_CHARACTER_ID, PlayerKnowledge, TurnSnapshot, WorldRecord,
     redact_guide_choice_public_hints,
 };
 use crate::store::{
@@ -28,6 +32,7 @@ pub enum CodexViewSection {
     All,
     Timeline,
     Almanac,
+    Beliefs,
     Blueprint,
     Analysis,
     Related,
@@ -41,11 +46,12 @@ impl FromStr for CodexViewSection {
             "all" => Ok(Self::All),
             "timeline" | "protagonist" | "history" => Ok(Self::Timeline),
             "almanac" | "facts" => Ok(Self::Almanac),
+            "beliefs" | "belief" | "knowledge" => Ok(Self::Beliefs),
             "blueprint" | "entities" => Ok(Self::Blueprint),
             "analysis" | "live" => Ok(Self::Analysis),
             "related" | "recommendations" => Ok(Self::Related),
             other => anyhow::bail!(
-                "unknown Archive View section: {other}; expected all|timeline|almanac|blueprint|analysis|related"
+                "unknown Archive View section: {other}; expected all|timeline|almanac|beliefs|blueprint|analysis|related"
             ),
         }
     }
@@ -57,6 +63,7 @@ impl std::fmt::Display for CodexViewSection {
             Self::All => "all",
             Self::Timeline => "timeline",
             Self::Almanac => "almanac",
+            Self::Beliefs => "beliefs",
             Self::Blueprint => "blueprint",
             Self::Analysis => "analysis",
             Self::Related => "related",
@@ -138,6 +145,7 @@ pub fn build_codex_view(options: &BuildCodexViewOptions) -> Result<CodexView> {
         title: world.title,
         protagonist_timeline: events,
         world_almanac: facts,
+        beliefs: visible_beliefs(&files.dir, limit)?,
         world_blueprint: entities,
         voice_anchors: visible_voice_anchors(&entity_records, limit),
         local_faces: local_faces_for_codex_view(
@@ -179,6 +187,7 @@ pub fn render_codex_view_markdown(view: &CodexView) -> String {
     .ok();
     write_codex_section(&mut markdown, view, CodexViewSection::Timeline);
     write_codex_section(&mut markdown, view, CodexViewSection::Almanac);
+    write_codex_section(&mut markdown, view, CodexViewSection::Beliefs);
     write_codex_section(&mut markdown, view, CodexViewSection::Blueprint);
     write_local_faces(&mut markdown, view);
     write_codex_section(&mut markdown, view, CodexViewSection::Analysis);
@@ -214,12 +223,14 @@ fn write_codex_section(markdown: &mut String, view: &CodexView, section: CodexVi
         CodexViewSection::All => {
             write_codex_section(markdown, view, CodexViewSection::Timeline);
             write_codex_section(markdown, view, CodexViewSection::Almanac);
+            write_codex_section(markdown, view, CodexViewSection::Beliefs);
             write_codex_section(markdown, view, CodexViewSection::Blueprint);
             write_codex_section(markdown, view, CodexViewSection::Analysis);
             write_codex_section(markdown, view, CodexViewSection::Related);
         }
         CodexViewSection::Timeline => write_timeline(markdown, view),
         CodexViewSection::Almanac => write_almanac(markdown, view),
+        CodexViewSection::Beliefs => write_beliefs(markdown, view),
         CodexViewSection::Blueprint => write_blueprint(markdown, view),
         CodexViewSection::Analysis => write_analysis(markdown, view),
         CodexViewSection::Related => write_related(markdown, view),
@@ -253,6 +264,26 @@ fn write_almanac(markdown: &mut String, view: &CodexView) {
             markdown,
             "- `{}` {}.{} = {}",
             fact.fact_id, fact.subject, fact.predicate, fact.object
+        )
+        .ok();
+    }
+}
+
+fn write_beliefs(markdown: &mut String, view: &CodexView) {
+    writeln!(markdown).ok();
+    writeln!(markdown, "## 관측된 믿음과 추론").ok();
+    if view.beliefs.is_empty() {
+        writeln!(markdown, "- 아직 플레이어에게 공개된 믿음/추론 기록이 없다").ok();
+    }
+    for belief in &view.beliefs {
+        writeln!(
+            markdown,
+            "- `{}` [{} / {} / {}] {}",
+            belief.belief_id,
+            belief.holder,
+            belief.confidence,
+            belief.knowledge_tier,
+            belief.statement
         )
         .ok();
     }
@@ -342,6 +373,53 @@ fn codex_timeline_entry(event: CanonEventRow) -> CodexTimelineEntry {
         event_kind: event.event_kind,
         authority: event.authority,
         summary: redact_guide_choice_public_hints(&event.summary),
+    }
+}
+
+fn visible_beliefs(world_dir: &Path, limit: usize) -> Result<Vec<CodexBeliefEntry>> {
+    let path = world_dir.join(BELIEF_GRAPH_FILENAME);
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    let packet: BeliefGraphPacket = read_json(&path)?;
+    Ok(packet
+        .protagonist_visible_beliefs
+        .into_iter()
+        .filter(|belief| can_render_knowledge_tier_to_player(belief.knowledge_tier))
+        .take(limit)
+        .map(|belief| CodexBeliefEntry {
+            belief_id: belief.belief_id,
+            holder: belief_holder_label(belief.holder).to_owned(),
+            confidence: belief_confidence_label(belief.confidence).to_owned(),
+            knowledge_tier: knowledge_tier_label(belief.knowledge_tier).to_owned(),
+            statement: redact_guide_choice_public_hints(&belief.statement),
+        })
+        .collect())
+}
+
+const fn belief_holder_label(holder: BeliefHolder) -> &'static str {
+    match holder {
+        BeliefHolder::Protagonist => "protagonist",
+        BeliefHolder::PlayerVisibleNarrator => "player_visible_narrator",
+    }
+}
+
+const fn belief_confidence_label(confidence: BeliefConfidence) -> &'static str {
+    match confidence {
+        BeliefConfidence::Observed => "observed",
+        BeliefConfidence::Inferred => "inferred",
+        BeliefConfidence::Reported => "reported",
+    }
+}
+
+const fn knowledge_tier_label(tier: KnowledgeTier) -> &'static str {
+    match tier {
+        KnowledgeTier::WorldTrueHidden => "world_true_hidden",
+        KnowledgeTier::PlayerObserved => "player_observed",
+        KnowledgeTier::PlayerInferred => "player_inferred",
+        KnowledgeTier::Rumor => "rumor",
+        KnowledgeTier::FalseBelief => "false_belief",
+        KnowledgeTier::Contradicted => "contradicted",
     }
 }
 
@@ -530,7 +608,12 @@ fn recommendations(
 #[cfg(test)]
 mod tests {
     use super::{BuildCodexViewOptions, build_codex_view, render_codex_view_markdown};
-    use crate::store::{InitWorldOptions, init_world};
+    use crate::belief_graph::{
+        BELIEF_GRAPH_FILENAME, BELIEF_GRAPH_PACKET_SCHEMA_VERSION, BELIEF_NODE_SCHEMA_VERSION,
+        BeliefConfidence, BeliefGraphPacket, BeliefGraphPolicy, BeliefHolder, BeliefNode,
+    };
+    use crate::knowledge_ledger::KnowledgeTier;
+    use crate::store::{InitWorldOptions, init_world, write_json};
     use crate::turn::{AdvanceTurnOptions, advance_turn};
     use tempfile::tempdir;
 
@@ -550,7 +633,7 @@ premise:
   protagonist: "변경 순찰자, 남자 주인공"
 "#,
         )?;
-        init_world(&InitWorldOptions {
+        let initialized = init_world(&InitWorldOptions {
             seed_path,
             store_root: Some(store.clone()),
             session_id: None,
@@ -560,6 +643,36 @@ premise:
             world_id: "stw_codex_view".to_owned(),
             input: "4".to_owned(),
         })?;
+        write_json(
+            &initialized.world_dir.join(BELIEF_GRAPH_FILENAME),
+            &BeliefGraphPacket {
+                schema_version: BELIEF_GRAPH_PACKET_SCHEMA_VERSION.to_owned(),
+                world_id: "stw_codex_view".to_owned(),
+                turn_id: "turn_0001".to_owned(),
+                protagonist_visible_beliefs: vec![
+                    BeliefNode {
+                        schema_version: BELIEF_NODE_SCHEMA_VERSION.to_owned(),
+                        belief_id: "belief:visible:gate".to_owned(),
+                        holder: BeliefHolder::Protagonist,
+                        confidence: BeliefConfidence::Inferred,
+                        knowledge_tier: KnowledgeTier::PlayerInferred,
+                        statement: "북문 뒤쪽에 누군가 있을 가능성이 있다".to_owned(),
+                        source_refs: vec!["visible_scene:turn_0001:block_1".to_owned()],
+                    },
+                    BeliefNode {
+                        schema_version: BELIEF_NODE_SCHEMA_VERSION.to_owned(),
+                        belief_id: "belief:hidden:assassin".to_owned(),
+                        holder: BeliefHolder::PlayerVisibleNarrator,
+                        confidence: BeliefConfidence::Observed,
+                        knowledge_tier: KnowledgeTier::WorldTrueHidden,
+                        statement: "암살자가 북문 뒤에 숨어 있다".to_owned(),
+                        source_refs: vec!["hidden_state:timer:assassin".to_owned()],
+                    },
+                ],
+                narrator_knowledge_limits: Vec::new(),
+                compiler_policy: BeliefGraphPolicy::default(),
+            },
+        )?;
         let mut options = BuildCodexViewOptions::new("stw_codex_view".to_owned());
         options.store_root = Some(store);
         options.query = Some("안내자".to_owned());
@@ -567,6 +680,10 @@ premise:
         let rendered = render_codex_view_markdown(&view);
         assert!(rendered.contains("주인공의 연대기"));
         assert!(rendered.contains("세계 연감"));
+        assert!(rendered.contains("관측된 믿음과 추론"));
+        assert_eq!(view.beliefs.len(), 1);
+        assert!(rendered.contains("북문 뒤쪽에 누군가 있을 가능성이 있다"));
+        assert!(!rendered.contains("암살자가 북문 뒤에 숨어 있다"));
         assert!(rendered.contains("캐릭터 음성 앵커"));
         assert!(!rendered.contains("manifestation rules are world-local"));
         Ok(())

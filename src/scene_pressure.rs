@@ -6,7 +6,10 @@
 #![allow(clippy::too_many_arguments)]
 
 use crate::agent_bridge::{AgentPrivateAdjudicationContext, PendingAgentChoice};
-use crate::consequence_spine::{ActiveConsequence, ConsequenceKind, ConsequenceSpinePacket};
+use crate::consequence_spine::{
+    ActiveConsequence, ConsequenceKind, ConsequenceSpinePacket,
+    consequence_can_return_as_scene_pressure,
+};
 use crate::extra_memory::ExtraMemoryPacket;
 use crate::models::{FREEFORM_CHOICE_SLOT, GUIDE_CHOICE_SLOT, TurnSnapshot};
 use crate::social_exchange::{
@@ -353,6 +356,9 @@ pub fn merge_consequence_scene_pressures(
     for consequence in &consequences.active {
         if packet.visible_active.len() >= packet.compiler_policy.visible_budget {
             break;
+        }
+        if !consequence_can_return_as_scene_pressure(consequence) {
+            continue;
         }
         let pressure = pressure_from_consequence(consequence);
         if existing.insert(pressure.pressure_id.clone()) {
@@ -1132,6 +1138,12 @@ mod tests {
                     expected_return:
                         crate::consequence_spine::ConsequenceReturnWindow::CurrentScene,
                     decay: crate::consequence_spine::ConsequenceDecay::default(),
+                    return_rights: crate::consequence_spine::ConsequenceReturnRights {
+                        triggers: vec![
+                            crate::consequence_spine::ConsequenceReturnTrigger::CurrentScenePressure,
+                        ],
+                        ..crate::consequence_spine::ConsequenceReturnRights::default()
+                    },
                 }],
                 ..ConsequenceSpinePacket::default()
             },
@@ -1146,6 +1158,47 @@ mod tests {
             merged.visible_active[0].urgency,
             ScenePressureUrgency::Immediate
         );
+    }
+
+    #[test]
+    fn search_only_consequence_does_not_return_as_scene_pressure() {
+        let merged = merge_consequence_scene_pressures(
+            ScenePressurePacket {
+                world_id: "world".to_owned(),
+                turn_id: "turn_0004".to_owned(),
+                ..ScenePressurePacket::default()
+            },
+            &ConsequenceSpinePacket {
+                world_id: "world".to_owned(),
+                turn_id: "turn_0004".to_owned(),
+                active: vec![ActiveConsequence {
+                    schema_version: crate::consequence_spine::CONSEQUENCE_SCHEMA_VERSION.to_owned(),
+                    consequence_id: "consequence:turn_0003:trace".to_owned(),
+                    origin_turn_id: "turn_0003".to_owned(),
+                    kind: ConsequenceKind::KnowledgeOpened,
+                    scope: crate::consequence_spine::ConsequenceScope::Knowledge,
+                    status: crate::consequence_spine::ConsequenceStatus::Active,
+                    severity: crate::consequence_spine::ConsequenceSeverity::Trace,
+                    summary: "희미한 단서가 남았다.".to_owned(),
+                    player_visible_signal: "희미한 단서".to_owned(),
+                    source_refs: vec!["choice:2".to_owned()],
+                    linked_entity_refs: Vec::new(),
+                    linked_projection_refs: Vec::new(),
+                    expected_return: crate::consequence_spine::ConsequenceReturnWindow::SearchOnly,
+                    decay: crate::consequence_spine::ConsequenceDecay::default(),
+                    return_rights: crate::consequence_spine::ConsequenceReturnRights {
+                        triggers: vec![
+                            crate::consequence_spine::ConsequenceReturnTrigger::SearchOnly,
+                        ],
+                        remaining_returns: 0,
+                        ..crate::consequence_spine::ConsequenceReturnRights::default()
+                    },
+                }],
+                ..ConsequenceSpinePacket::default()
+            },
+        );
+
+        assert!(merged.visible_active.is_empty());
     }
 
     #[test]

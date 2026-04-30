@@ -586,6 +586,7 @@ mod tests {
             recent_surface_changes: Vec::new(),
             blocked_interactions: Vec::new(),
             required_followups: Vec::new(),
+            choice_contracts: Vec::new(),
             compiler_policy: crate::encounter_surface::EncounterSurfacePolicy::default(),
         };
         let graph = compile_affordance_graph_packet_with_encounter(

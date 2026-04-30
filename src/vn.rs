@@ -21,8 +21,8 @@ use crate::visual_asset_graph::{
 };
 use crate::visual_assets::{
     BuildWorldVisualAssetsOptions, ImageGenerationJob, VN_ASSETS_DIR, VisualArtifactKind,
-    VisualBudgetPolicy, WorldVisualAssets, build_world_visual_assets, compile_turn_visual_prompt,
-    visual_generation_job,
+    VisualBudgetPolicy, WorldVisualAssets, apply_visual_canon_policy, build_world_visual_assets,
+    compile_turn_visual_prompt, visual_generation_job,
 };
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -361,18 +361,21 @@ fn turn_cg_image_generation_job(
     destination_path: &std::path::Path,
     retry_requested: bool,
 ) -> ImageGenerationJob {
-    visual_generation_job(
-        format!("turn_cg:{turn_id}"),
-        VisualArtifactKind::SceneCg,
-        compiled_prompt.prompt.clone(),
-        destination_path.display().to_string(),
-        compiled_prompt.reference_asset_urls.clone(),
-        compiled_prompt.reference_paths.clone(),
-        if retry_requested {
-            "background retry requested; save exactly to destination_path without blocking VN flow"
-        } else {
-            "background auto job; save exactly to destination_path without blocking VN flow"
-        },
+    apply_visual_canon_policy(
+        visual_generation_job(
+            format!("turn_cg:{turn_id}"),
+            VisualArtifactKind::SceneCg,
+            compiled_prompt.prompt.clone(),
+            destination_path.display().to_string(),
+            compiled_prompt.reference_asset_urls.clone(),
+            compiled_prompt.reference_paths.clone(),
+            if retry_requested {
+                "background retry requested; save exactly to destination_path without blocking VN flow"
+            } else {
+                "background auto job; save exactly to destination_path without blocking VN flow"
+            },
+        ),
+        compiled_prompt.visual_canon_policy.clone(),
     )
 }
 

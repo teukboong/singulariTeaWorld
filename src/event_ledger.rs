@@ -7,12 +7,17 @@ use std::io::Write as _;
 use std::path::Path;
 
 pub const WORLD_EVENT_LEDGER_SCHEMA_VERSION: &str = "singulari.world_event_ledger.v1";
+pub const WORLD_EVENT_HASH_VERSION: &str = "singulari.world_event_hash.v1";
+pub const WORLD_EVENT_HASH_ALGORITHM: &str = "sha256";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorldEventLedgerAppendReport {
     pub schema_version: String,
     pub world_id: String,
     pub event_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_event_hash: Option<String>,
+    pub event_hash: String,
     pub path: String,
 }
 
@@ -22,10 +27,33 @@ pub struct WorldEventLedgerVerificationReport {
     pub world_id: String,
     pub path: String,
     pub event_count: usize,
+    pub chain_status: WorldEventLedgerChainStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_event_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_event_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_event_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorldEventLedgerChainStatus {
+    LegacyUnchained,
+    PartiallyChained,
+    FullyChained,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorldEventLedgerChainReport {
+    pub schema_version: String,
+    pub world_id: String,
+    pub event_count: usize,
+    pub chain_status: WorldEventLedgerChainStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_hashed_event_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_event_hash: Option<String>,
 }
 
 pub(crate) fn append_world_event(
@@ -33,15 +61,20 @@ pub(crate) fn append_world_event(
     event: &CanonEvent,
 ) -> Result<WorldEventLedgerAppendReport> {
     validate_event_shape(event, Some(event.world_id.as_str()))?;
-    if path.is_file() {
+    let existing_events = if path.is_file() {
         let existing_events = load_world_events(path)?;
         ensure_event_can_append(path, &existing_events, event)?;
-    }
+        existing_events
+    } else {
+        Vec::new()
+    };
+    let event_to_append = chain_event_for_append(&existing_events, event)?;
     let parent = path
         .parent()
         .with_context(|| format!("world event ledger path has no parent: {}", path.display()))?;
     fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
-    let body = serde_json::to_string(event).context("failed to serialize world event")?;
+    let body =
+        serde_json::to_string(&event_to_append).context("failed to serialize world event")?;
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -53,8 +86,13 @@ pub(crate) fn append_world_event(
         .with_context(|| format!("failed to sync world event ledger {}", path.display()))?;
     Ok(WorldEventLedgerAppendReport {
         schema_version: WORLD_EVENT_LEDGER_SCHEMA_VERSION.to_owned(),
-        world_id: event.world_id.clone(),
-        event_id: event.event_id.clone(),
+        world_id: event_to_append.world_id.clone(),
+        event_id: event_to_append.event_id.clone(),
+        previous_event_hash: event_to_append.previous_event_hash.clone(),
+        event_hash: event_to_append
+            .event_hash
+            .clone()
+            .context("chained world event missing event_hash after append")?,
         path: path.display().to_string(),
     })
 }
@@ -83,19 +121,27 @@ pub fn verify_world_event_ledger(
     expected_world_id: &str,
 ) -> Result<WorldEventLedgerVerificationReport> {
     let events = load_world_events(path)?;
-    verify_world_events(expected_world_id, &events)?;
+    let chain_report = verify_world_events(expected_world_id, &events)?;
     Ok(WorldEventLedgerVerificationReport {
         schema_version: WORLD_EVENT_LEDGER_SCHEMA_VERSION.to_owned(),
         world_id: expected_world_id.to_owned(),
         path: path.display().to_string(),
         event_count: events.len(),
+        chain_status: chain_report.chain_status,
         first_event_id: events.first().map(|event| event.event_id.clone()),
         last_event_id: events.last().map(|event| event.event_id.clone()),
+        last_event_hash: chain_report.last_event_hash,
     })
 }
 
-pub(crate) fn verify_world_events(expected_world_id: &str, events: &[CanonEvent]) -> Result<()> {
+pub(crate) fn verify_world_events(
+    expected_world_id: &str,
+    events: &[CanonEvent],
+) -> Result<WorldEventLedgerChainReport> {
     let mut seen_event_ids = BTreeSet::new();
+    let mut first_hashed_event_id = None;
+    let mut last_event_hash = None;
+    let mut unchained_count = 0usize;
     for event in events {
         validate_event_shape(event, Some(expected_world_id))?;
         if !seen_event_ids.insert(event.event_id.clone()) {
@@ -105,8 +151,39 @@ pub(crate) fn verify_world_events(expected_world_id: &str, events: &[CanonEvent]
                 event.event_id
             );
         }
+        match verify_event_chain_link(event, last_event_hash.as_deref())? {
+            EventChainLink::LegacyUnchained => {
+                if last_event_hash.is_some() {
+                    bail!(
+                        "world event ledger unchained event after hashed chain start: world_id={}, event_id={}",
+                        expected_world_id,
+                        event.event_id
+                    );
+                }
+                unchained_count += 1;
+            }
+            EventChainLink::Chained { event_hash } => {
+                if first_hashed_event_id.is_none() {
+                    first_hashed_event_id = Some(event.event_id.clone());
+                }
+                last_event_hash = Some(event_hash);
+            }
+        }
     }
-    Ok(())
+    let chain_status = match (unchained_count, events.len()) {
+        (_, 0) => WorldEventLedgerChainStatus::LegacyUnchained,
+        (0, _) => WorldEventLedgerChainStatus::FullyChained,
+        (count, total) if count == total => WorldEventLedgerChainStatus::LegacyUnchained,
+        _ => WorldEventLedgerChainStatus::PartiallyChained,
+    };
+    Ok(WorldEventLedgerChainReport {
+        schema_version: WORLD_EVENT_LEDGER_SCHEMA_VERSION.to_owned(),
+        world_id: expected_world_id.to_owned(),
+        event_count: events.len(),
+        chain_status,
+        first_hashed_event_id,
+        last_event_hash,
+    })
 }
 
 fn ensure_event_can_append(
@@ -139,7 +216,8 @@ fn ensure_event_can_append(
             "world event ledger existing entries invalid: {}",
             path.display()
         )
-    })
+    })?;
+    Ok(())
 }
 
 fn validate_event_shape(event: &CanonEvent, expected_world_id: Option<&str>) -> Result<()> {
@@ -196,10 +274,267 @@ fn validate_event_shape(event: &CanonEvent, expected_world_id: Option<&str>) -> 
     Ok(())
 }
 
+fn chain_event_for_append(
+    existing_events: &[CanonEvent],
+    event: &CanonEvent,
+) -> Result<CanonEvent> {
+    let previous_event_hash = existing_events
+        .last()
+        .and_then(|previous| previous.event_hash.clone());
+    let mut event_to_append = event.clone();
+    event_to_append.previous_event_hash = previous_event_hash;
+    event_to_append.event_hash = Some(compute_event_hash(&event_to_append)?);
+    Ok(event_to_append)
+}
+
+enum EventChainLink {
+    LegacyUnchained,
+    Chained { event_hash: String },
+}
+
+fn verify_event_chain_link(
+    event: &CanonEvent,
+    previous_event_hash: Option<&str>,
+) -> Result<EventChainLink> {
+    match (
+        event.previous_event_hash.as_deref(),
+        event.event_hash.as_deref(),
+    ) {
+        (None, None) => Ok(EventChainLink::LegacyUnchained),
+        (Some(_), None) => bail!(
+            "world event ledger previous_event_hash without event_hash: event_id={}",
+            event.event_id
+        ),
+        (stored_previous, Some(stored_event_hash)) => {
+            if stored_previous != previous_event_hash {
+                bail!(
+                    "world event ledger previous_event_hash mismatch: event_id={}, expected={:?}, actual={:?}",
+                    event.event_id,
+                    previous_event_hash,
+                    stored_previous
+                );
+            }
+            let expected_event_hash = compute_event_hash(event)?;
+            if stored_event_hash != expected_event_hash {
+                bail!(
+                    "world event ledger event_hash mismatch: event_id={}, expected={}, actual={}",
+                    event.event_id,
+                    expected_event_hash,
+                    stored_event_hash
+                );
+            }
+            Ok(EventChainLink::Chained {
+                event_hash: stored_event_hash.to_owned(),
+            })
+        }
+    }
+}
+
+fn compute_event_hash(event: &CanonEvent) -> Result<String> {
+    let payload = canonical_event_hash_payload(event)?;
+    let mut input = Vec::new();
+    input.extend_from_slice(WORLD_EVENT_HASH_VERSION.as_bytes());
+    input.push(b'\n');
+    input.extend_from_slice(WORLD_EVENT_HASH_ALGORITHM.as_bytes());
+    input.push(b'\n');
+    input.extend_from_slice(
+        event
+            .previous_event_hash
+            .as_deref()
+            .unwrap_or("")
+            .as_bytes(),
+    );
+    input.push(b'\n');
+    input.extend_from_slice(payload.as_bytes());
+    Ok(format!(
+        "{WORLD_EVENT_HASH_ALGORITHM}:{}",
+        sha256_hex(&input)?
+    ))
+}
+
+fn canonical_event_hash_payload(event: &CanonEvent) -> Result<String> {
+    let mut value =
+        serde_json::to_value(event).context("failed to serialize world event hash payload")?;
+    let object = value
+        .as_object_mut()
+        .context("world event hash payload must be a JSON object")?;
+    object.remove("previous_event_hash");
+    object.remove("event_hash");
+    serde_json::to_string(&value).context("failed to render world event hash payload")
+}
+
+// Fixed-width SHA-256 arithmetic is kept local so the ledger can add tamper-evident
+// hashes without adding a new dependency to this public-alpha runtime.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::many_single_char_names,
+    clippy::too_many_lines
+)]
+fn sha256_hex(input: &[u8]) -> Result<String> {
+    const K: [u32; 64] = [
+        0x428a_2f98,
+        0x7137_4491,
+        0xb5c0_fbcf,
+        0xe9b5_dba5,
+        0x3956_c25b,
+        0x59f1_11f1,
+        0x923f_82a4,
+        0xab1c_5ed5,
+        0xd807_aa98,
+        0x1283_5b01,
+        0x2431_85be,
+        0x550c_7dc3,
+        0x72be_5d74,
+        0x80de_b1fe,
+        0x9bdc_06a7,
+        0xc19b_f174,
+        0xe49b_69c1,
+        0xefbe_4786,
+        0x0fc1_9dc6,
+        0x240c_a1cc,
+        0x2de9_2c6f,
+        0x4a74_84aa,
+        0x5cb0_a9dc,
+        0x76f9_88da,
+        0x983e_5152,
+        0xa831_c66d,
+        0xb003_27c8,
+        0xbf59_7fc7,
+        0xc6e0_0bf3,
+        0xd5a7_9147,
+        0x06ca_6351,
+        0x1429_2967,
+        0x27b7_0a85,
+        0x2e1b_2138,
+        0x4d2c_6dfc,
+        0x5338_0d13,
+        0x650a_7354,
+        0x766a_0abb,
+        0x81c2_c92e,
+        0x9272_2c85,
+        0xa2bf_e8a1,
+        0xa81a_664b,
+        0xc24b_8b70,
+        0xc76c_51a3,
+        0xd192_e819,
+        0xd699_0624,
+        0xf40e_3585,
+        0x106a_a070,
+        0x19a4_c116,
+        0x1e37_6c08,
+        0x2748_774c,
+        0x34b0_bcb5,
+        0x391c_0cb3,
+        0x4ed8_aa4a,
+        0x5b9c_ca4f,
+        0x682e_6ff3,
+        0x748f_82ee,
+        0x78a5_636f,
+        0x84c8_7814,
+        0x8cc7_0208,
+        0x90be_fffa,
+        0xa450_6ceb,
+        0xbef9_a3f7,
+        0xc671_78f2,
+    ];
+    let mut state = [
+        0x6a09_e667u32,
+        0xbb67_ae85,
+        0x3c6e_f372,
+        0xa54f_f53a,
+        0x510e_527f,
+        0x9b05_688c,
+        0x1f83_d9ab,
+        0x5be0_cd19,
+    ];
+    let bit_len = u64::try_from(input.len())
+        .context("world event hash input length out of range")?
+        .checked_mul(8)
+        .context("world event hash input bit length overflow")?;
+    let mut message = input.to_vec();
+    message.push(0x80);
+    while message.len() % 64 != 56 {
+        message.push(0);
+    }
+    message.extend_from_slice(&bit_len.to_be_bytes());
+
+    for chunk in message.chunks_exact(64) {
+        let mut schedule = [0u32; 64];
+        for (index, word) in chunk.chunks_exact(4).take(16).enumerate() {
+            schedule[index] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
+        }
+        let mut index = 16usize;
+        while index < 64 {
+            let s0 = schedule[index - 15].rotate_right(7)
+                ^ schedule[index - 15].rotate_right(18)
+                ^ (schedule[index - 15] >> 3);
+            let s1 = schedule[index - 2].rotate_right(17)
+                ^ schedule[index - 2].rotate_right(19)
+                ^ (schedule[index - 2] >> 10);
+            schedule[index] = schedule[index - 16]
+                .wrapping_add(s0)
+                .wrapping_add(schedule[index - 7])
+                .wrapping_add(s1);
+            index += 1;
+        }
+
+        let mut a = state[0];
+        let mut b = state[1];
+        let mut c = state[2];
+        let mut d = state[3];
+        let mut e = state[4];
+        let mut f = state[5];
+        let mut g = state[6];
+        let mut h = state[7];
+
+        for (index, constant) in K.iter().enumerate() {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let choice = (e & f) ^ ((!e) & g);
+            let temp1 = h
+                .wrapping_add(s1)
+                .wrapping_add(choice)
+                .wrapping_add(*constant)
+                .wrapping_add(schedule[index]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let majority = (a & b) ^ (a & c) ^ (b & c);
+            let temp2 = s0.wrapping_add(majority);
+            h = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(temp1);
+            d = c;
+            c = b;
+            b = a;
+            a = temp1.wrapping_add(temp2);
+        }
+
+        for (value, added) in state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
+            *value = value.wrapping_add(added);
+        }
+    }
+
+    let mut digest = [0u8; 32];
+    for (index, value) in state.iter().enumerate() {
+        digest[index * 4..index * 4 + 4].copy_from_slice(&value.to_be_bytes());
+    }
+    Ok(hex_lower(&digest))
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(char::from(HEX[usize::from(byte >> 4)]));
+        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        append_world_event, load_world_events, verify_world_event_ledger, verify_world_events,
+        WorldEventLedgerChainStatus, append_world_event, load_world_events,
+        verify_world_event_ledger, verify_world_events,
     };
     use crate::models::{
         CANON_EVENT_SCHEMA_VERSION, CanonEvent, EventAuthority, EventEvidence, WorldEventKind,
@@ -215,10 +550,82 @@ mod tests {
 
         let events = load_world_events(&path)?;
         assert_eq!(events.len(), 2);
+        assert_eq!(events[0].previous_event_hash, None);
+        assert!(
+            events[0]
+                .event_hash
+                .as_deref()
+                .is_some_and(|hash| hash.starts_with("sha256:"))
+        );
+        assert_eq!(
+            events[1].previous_event_hash.as_deref(),
+            events[0].event_hash.as_deref()
+        );
+        assert!(
+            events[1]
+                .event_hash
+                .as_deref()
+                .is_some_and(|hash| hash.starts_with("sha256:"))
+        );
         let report = verify_world_event_ledger(&path, "stw_event_ledger")?;
         assert_eq!(report.event_count, 2);
+        assert_eq!(
+            report.chain_status,
+            WorldEventLedgerChainStatus::FullyChained
+        );
         assert_eq!(report.first_event_id.as_deref(), Some("evt_000000"));
         assert_eq!(report.last_event_id.as_deref(), Some("evt_000001"));
+        assert_eq!(
+            report.last_event_hash.as_deref(),
+            events[1].event_hash.as_deref()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn accepts_legacy_unchained_events() -> anyhow::Result<()> {
+        let events = vec![
+            event("evt_000000", "turn_0000", "world:created"),
+            event("evt_000001", "turn_0001", "player:acted"),
+        ];
+
+        let report = verify_world_events("stw_event_ledger", &events)?;
+        assert_eq!(
+            report.chain_status,
+            WorldEventLedgerChainStatus::LegacyUnchained
+        );
+        assert_eq!(report.last_event_hash, None);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_tampered_hashed_event() -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        let path = dir.path().join("canon_events.jsonl");
+        append_world_event(&path, &event("evt_000000", "turn_0000", "world:created"))?;
+        let mut events = load_world_events(&path)?;
+        events[0].summary = "tampered summary".to_owned();
+
+        let Err(error) = verify_world_events("stw_event_ledger", &events) else {
+            panic!("tampered event hash should be rejected");
+        };
+        assert!(format!("{error:#}").contains("event_hash mismatch"));
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_broken_previous_hash_chain() -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        let path = dir.path().join("canon_events.jsonl");
+        append_world_event(&path, &event("evt_000000", "turn_0000", "world:created"))?;
+        append_world_event(&path, &event("evt_000001", "turn_0001", "player:acted"))?;
+        let mut events = load_world_events(&path)?;
+        events[1].previous_event_hash = Some("sha256:not-the-previous-event".to_owned());
+
+        let Err(error) = verify_world_events("stw_event_ledger", &events) else {
+            panic!("broken previous hash chain should be rejected");
+        };
+        assert!(format!("{error:#}").contains("previous_event_hash mismatch"));
         Ok(())
     }
 
@@ -271,6 +678,8 @@ mod tests {
             kind: kind.to_owned(),
             event_kind: WorldEventKind::from_legacy_kind(kind),
             authority: Some(EventAuthority::TurnReducer),
+            previous_event_hash: None,
+            event_hash: None,
             summary: format!("event {event_id}"),
             entities: Vec::new(),
             location: None,

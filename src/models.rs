@@ -264,6 +264,10 @@ pub struct CanonEvent {
     pub event_kind: Option<WorldEventKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authority: Option<EventAuthority>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_event_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_hash: Option<String>,
     pub summary: String,
     #[serde(default)]
     pub entities: Vec<String>,
@@ -751,6 +755,8 @@ pub struct CodexView {
     #[serde(default)]
     pub world_almanac: Vec<CodexFactEntry>,
     #[serde(default)]
+    pub beliefs: Vec<CodexBeliefEntry>,
+    #[serde(default)]
     pub world_blueprint: Vec<CodexEntityEntry>,
     #[serde(default)]
     pub voice_anchors: Vec<CodexVoiceAnchorEntry>,
@@ -782,6 +788,15 @@ pub struct CodexFactEntry {
     pub subject: String,
     pub predicate: String,
     pub object: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodexBeliefEntry {
+    pub belief_id: String,
+    pub holder: String,
+    pub confidence: String,
+    pub knowledge_tier: String,
+    pub statement: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1109,6 +1124,8 @@ pub fn initial_canon_event(world: &WorldRecord) -> CanonEvent {
         kind: "note".to_owned(),
         event_kind: Some(WorldEventKind::WorldInitialized),
         authority: Some(EventAuthority::WorldInit),
+        previous_event_hash: None,
+        event_hash: None,
         summary: "World initialized from seed. Dramatic focus starts unresolved.".to_owned(),
         entities: vec![PROTAGONIST_CHARACTER_ID.to_owned()],
         location: Some(OPENING_LOCATION_ID.to_owned()),

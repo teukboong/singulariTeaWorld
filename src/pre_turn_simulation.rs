@@ -599,6 +599,7 @@ mod tests {
                 tempo: WorldProcessTempo::Immediate,
                 summary: "the gate is closing".to_owned(),
                 next_tick_contract: "tick when time is spent".to_owned(),
+                tick_policy: crate::world_process_clock::WorldProcessTickPolicy::default(),
                 source_refs: vec!["pressure:gate".to_owned()],
             }],
             adjudication_only_processes: Vec::new(),

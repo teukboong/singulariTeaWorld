@@ -1,8 +1,12 @@
+use crate::knowledge_ledger::{
+    KnowledgeTier, can_render_knowledge_tier_to_player, render_rule_for_player,
+    visible_knowledge_text_is_qualified,
+};
 use crate::models::TurnChoice;
 use crate::prompt_context::PromptContextPacket;
 use crate::resolution::{
-    ResolutionCritique, ResolutionFailureKind, ResolutionProposal, audit_resolution_choices,
-    audit_resolution_proposal,
+    GateKind, ProposedEffect, ProposedEffectKind, ResolutionCritique, ResolutionFailureKind,
+    ResolutionProposal, ResolutionVisibility, audit_resolution_choices, audit_resolution_proposal,
 };
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
@@ -127,6 +131,7 @@ pub fn adjudicate_world_changes(input: &WorldCourtInput<'_>) -> WorldCourtVerdic
             }
         };
         if resolution_accepted {
+            audit_court_semantic_layers(proposal, &mut accepted_checks, &mut violations);
             match audit_resolution_choices(input.context, proposal, input.next_choices) {
                 Ok(()) => accepted_checks.push("visible_choice_text".to_owned()),
                 Err(critique) => {
@@ -196,6 +201,250 @@ pub fn render_world_court_verdict(verdict: &WorldCourtVerdict) -> String {
     lines.join("\n")
 }
 
+fn audit_court_semantic_layers(
+    proposal: &ResolutionProposal,
+    accepted_checks: &mut Vec<String>,
+    violations: &mut Vec<WorldCourtViolation>,
+) {
+    for gate in &proposal.gate_results {
+        if gate.gate_kind == GateKind::HiddenConstraint
+            && gate.visibility == ResolutionVisibility::PlayerVisible
+        {
+            violations.push(domain_violation(
+                WorldCourtLayer::Visibility,
+                "hidden_constraint_gate_visibility",
+                "hidden constraint gates must stay adjudication-only",
+                gate.gate_ref.as_str(),
+                "mark hidden constraints adjudication_only and render only symptoms",
+            ));
+            continue;
+        }
+        if ref_matches_gate_kind(gate.gate_kind, gate.gate_ref.as_str()) {
+            push_accepted_check(accepted_checks, semantic_gate_check_name(gate.gate_kind));
+        } else {
+            violations.push(domain_violation(
+                layer_for_gate_kind(gate.gate_kind),
+                semantic_gate_check_name(gate.gate_kind),
+                "gate kind does not match the referenced world domain",
+                gate.gate_ref.as_str(),
+                "use a gate_ref from the matching body/resource/location/social/time domain",
+            ));
+        }
+    }
+
+    for effect in &proposal.proposed_effects {
+        audit_effect_knowledge_tier(effect, accepted_checks, violations);
+        if ref_matches_effect_kind(effect.effect_kind, effect.target_ref.as_str()) {
+            push_accepted_check(
+                accepted_checks,
+                semantic_effect_check_name(effect.effect_kind),
+            );
+        } else {
+            violations.push(domain_violation(
+                layer_for_effect_kind(effect.effect_kind),
+                semantic_effect_check_name(effect.effect_kind),
+                "effect kind does not match the target world domain",
+                effect.target_ref.as_str(),
+                "retarget the effect to the matching projection domain",
+            ));
+        }
+    }
+
+    for tick in &proposal.process_ticks {
+        if tick.process_ref.starts_with("process:") {
+            push_accepted_check(accepted_checks, "time_process_tick_right");
+        } else {
+            violations.push(domain_violation(
+                WorldCourtLayer::Time,
+                "time_process_tick_right",
+                "process ticks must target process refs",
+                tick.process_ref.as_str(),
+                "retarget the tick to an active process:* ref",
+            ));
+        }
+    }
+}
+
+fn audit_effect_knowledge_tier(
+    effect: &ProposedEffect,
+    accepted_checks: &mut Vec<String>,
+    violations: &mut Vec<WorldCourtViolation>,
+) {
+    if effect.effect_kind != ProposedEffectKind::BeliefDelta {
+        if effect.knowledge_tier.is_some() {
+            violations.push(domain_violation(
+                WorldCourtLayer::ProjectionHook,
+                "knowledge_tier_effect_domain",
+                "knowledge_tier may only be attached to belief/knowledge effects",
+                effect.target_ref.as_str(),
+                "remove knowledge_tier or change effect_kind to belief_delta",
+            ));
+        }
+        return;
+    }
+
+    let tier = effect
+        .knowledge_tier
+        .unwrap_or(KnowledgeTier::PlayerObserved);
+    if effect.visibility != ResolutionVisibility::PlayerVisible {
+        push_accepted_check(accepted_checks, "knowledge_tier_adjudication_scope");
+        return;
+    }
+    if !can_render_knowledge_tier_to_player(tier) {
+        violations.push(domain_violation(
+            WorldCourtLayer::Visibility,
+            "knowledge_tier_visibility",
+            "world-true hidden knowledge cannot be rendered to player-visible effects",
+            effect.target_ref.as_str(),
+            "keep hidden knowledge adjudication-only and expose only observable symptoms",
+        ));
+        return;
+    }
+    if !visible_knowledge_text_is_qualified(tier, effect.summary.as_str()) {
+        let message = format!(
+            "player-visible knowledge summary violates tier render rule: tier={tier:?}, rule={}",
+            render_rule_for_player(tier)
+        );
+        violations.push(domain_violation(
+            WorldCourtLayer::Visibility,
+            "knowledge_tier_render_rule",
+            message.as_str(),
+            effect.target_ref.as_str(),
+            "rewrite the visible summary with the required uncertainty/source/belief framing",
+        ));
+        return;
+    }
+    push_accepted_check(accepted_checks, "knowledge_tier_render_rule");
+}
+
+fn push_accepted_check(accepted_checks: &mut Vec<String>, check: &str) {
+    if !accepted_checks.iter().any(|existing| existing == check) {
+        accepted_checks.push(check.to_owned());
+    }
+}
+
+fn domain_violation(
+    layer: WorldCourtLayer,
+    check: &str,
+    message: &str,
+    rejected_ref: &str,
+    required_change: &str,
+) -> WorldCourtViolation {
+    WorldCourtViolation {
+        schema_version: WORLD_COURT_VIOLATION_SCHEMA_VERSION.to_owned(),
+        layer,
+        severity: WorldCourtViolationSeverity::Blocking,
+        check: check.to_owned(),
+        message: message.to_owned(),
+        rejected_refs: vec![rejected_ref.to_owned()],
+        required_changes: vec![required_change.to_owned()],
+        allowed_repair_scope: vec!["resolution_proposal".to_owned()],
+    }
+}
+
+const fn semantic_gate_check_name(gate_kind: GateKind) -> &'static str {
+    match gate_kind {
+        GateKind::Body | GateKind::Resource => "body_resource_gate_ref_domain",
+        GateKind::Location => "space_gate_ref_domain",
+        GateKind::SocialPermission => "social_authority_gate_ref_domain",
+        GateKind::Knowledge => "knowledge_gate_ref_domain",
+        GateKind::TimePressure => "time_gate_ref_domain",
+        GateKind::HiddenConstraint => "hidden_constraint_gate_visibility",
+        GateKind::WorldLaw => "world_law_gate_ref_domain",
+        GateKind::Affordance => "affordance_gate_ref_domain",
+    }
+}
+
+const fn layer_for_gate_kind(gate_kind: GateKind) -> WorldCourtLayer {
+    match gate_kind {
+        GateKind::Body | GateKind::Resource => WorldCourtLayer::BodyResource,
+        GateKind::Location => WorldCourtLayer::Space,
+        GateKind::SocialPermission => WorldCourtLayer::SocialAuthority,
+        GateKind::Knowledge => WorldCourtLayer::Evidence,
+        GateKind::TimePressure => WorldCourtLayer::Time,
+        GateKind::HiddenConstraint => WorldCourtLayer::Visibility,
+        GateKind::WorldLaw => WorldCourtLayer::Causality,
+        GateKind::Affordance => WorldCourtLayer::ChoiceGrounding,
+    }
+}
+
+fn ref_matches_gate_kind(gate_kind: GateKind, item_ref: &str) -> bool {
+    match gate_kind {
+        GateKind::Body => ref_has_prefix(item_ref, &["body:"]),
+        GateKind::Resource => ref_has_prefix(item_ref, &["resource:", "inventory:"]),
+        GateKind::Location => ref_has_prefix(item_ref, &["place:", "location:"]),
+        GateKind::SocialPermission => ref_has_prefix(
+            item_ref,
+            &[
+                "pressure:social:",
+                "rel:",
+                "relationship:",
+                "stance:",
+                "social:",
+            ],
+        ),
+        GateKind::Knowledge => ref_has_prefix(
+            item_ref,
+            &["belief:", "knowledge:", "visible_scene:", "current_turn"],
+        ),
+        GateKind::TimePressure => ref_has_prefix(item_ref, &["pressure:time:", "process:"]),
+        GateKind::HiddenConstraint => true,
+        GateKind::WorldLaw => ref_has_prefix(item_ref, &["law:", "world_law:"]),
+        GateKind::Affordance => ref_has_prefix(item_ref, &["affordance:"]),
+    }
+}
+
+const fn semantic_effect_check_name(effect_kind: ProposedEffectKind) -> &'static str {
+    match effect_kind {
+        ProposedEffectKind::ScenePressureDelta => "scene_pressure_effect_ref_domain",
+        ProposedEffectKind::BodyResourceDelta => "body_resource_effect_ref_domain",
+        ProposedEffectKind::LocationDelta => "space_effect_ref_domain",
+        ProposedEffectKind::RelationshipDelta => "social_authority_effect_ref_domain",
+        ProposedEffectKind::BeliefDelta => "knowledge_effect_ref_domain",
+        ProposedEffectKind::WorldLoreDelta => "world_lore_effect_ref_domain",
+        ProposedEffectKind::PatternDebt => "pattern_debt_effect_ref_domain",
+        ProposedEffectKind::PlayerIntentTrace => "player_intent_effect_ref_domain",
+    }
+}
+
+const fn layer_for_effect_kind(effect_kind: ProposedEffectKind) -> WorldCourtLayer {
+    match effect_kind {
+        ProposedEffectKind::ScenePressureDelta => WorldCourtLayer::Causality,
+        ProposedEffectKind::BodyResourceDelta => WorldCourtLayer::BodyResource,
+        ProposedEffectKind::LocationDelta => WorldCourtLayer::Space,
+        ProposedEffectKind::RelationshipDelta => WorldCourtLayer::SocialAuthority,
+        ProposedEffectKind::BeliefDelta => WorldCourtLayer::Evidence,
+        ProposedEffectKind::WorldLoreDelta => WorldCourtLayer::Ontology,
+        ProposedEffectKind::PatternDebt => WorldCourtLayer::ConsequenceReturn,
+        ProposedEffectKind::PlayerIntentTrace => WorldCourtLayer::ProjectionHook,
+    }
+}
+
+fn ref_matches_effect_kind(effect_kind: ProposedEffectKind, item_ref: &str) -> bool {
+    match effect_kind {
+        ProposedEffectKind::ScenePressureDelta => ref_has_prefix(item_ref, &["pressure:"]),
+        ProposedEffectKind::BodyResourceDelta => {
+            ref_has_prefix(item_ref, &["body:", "resource:", "inventory:"])
+        }
+        ProposedEffectKind::LocationDelta => ref_has_prefix(item_ref, &["place:", "location:"]),
+        ProposedEffectKind::RelationshipDelta => {
+            ref_has_prefix(item_ref, &["rel:", "relationship:", "stance:", "social:"])
+        }
+        ProposedEffectKind::BeliefDelta => ref_has_prefix(item_ref, &["belief:", "knowledge:"]),
+        ProposedEffectKind::WorldLoreDelta => ref_has_prefix(item_ref, &["lore:", "world_fact:"]),
+        ProposedEffectKind::PatternDebt => ref_has_prefix(item_ref, &["pattern_debt:"]),
+        ProposedEffectKind::PlayerIntentTrace => {
+            ref_has_prefix(item_ref, &["intent:", "player_intent:", "current_turn"])
+        }
+    }
+}
+
+fn ref_has_prefix(item_ref: &str, prefixes: &[&str]) -> bool {
+    prefixes
+        .iter()
+        .any(|prefix| item_ref == *prefix || item_ref.starts_with(*prefix))
+}
+
 fn accepted_resolution_checks() -> Vec<String> {
     [
         "resolution_schema",
@@ -248,6 +497,7 @@ mod tests {
         enforce_world_court_acceptance,
     };
     use crate::TurnInputKind;
+    use crate::knowledge_ledger::KnowledgeTier;
     use crate::pre_turn_simulation::{
         HiddenVisibilityBoundary, PRE_TURN_SIMULATION_PASS_SCHEMA_VERSION, PreTurnSimulationPass,
         PreTurnSimulationPolicy, PressureObligation, RequiredResolutionFields,
@@ -258,7 +508,12 @@ mod tests {
         PromptContextPolicy, PromptVisibleContext,
     };
     use crate::prompt_context_budget::{PromptContextBudgetPolicy, PromptContextBudgetReport};
-    use crate::resolution::{ResolutionCritique, ResolutionFailureKind};
+    use crate::resolution::{
+        ActionAmbiguity, ActionInputKind, GateKind, GateResult, GateStatus, NarrativeBrief,
+        ProcessTickCause, ProcessTickProposal, ProposedEffect, ProposedEffectKind,
+        RESOLUTION_PROPOSAL_SCHEMA_VERSION, ResolutionCritique, ResolutionFailureKind,
+        ResolutionOutcome, ResolutionOutcomeKind, ResolutionProposal, ResolutionVisibility,
+    };
     use crate::scene_pressure::ScenePressureKind;
     use std::collections::BTreeMap;
 
@@ -331,6 +586,153 @@ mod tests {
             super::accepted_resolution_checks()
                 .iter()
                 .any(|check| check == "ontology_refs")
+        );
+    }
+
+    #[test]
+    fn semantic_layers_reject_mismatched_body_effect_ref() {
+        let mut proposal = semantic_probe();
+        proposal.proposed_effects.push(ProposedEffect {
+            effect_kind: ProposedEffectKind::BodyResourceDelta,
+            target_ref: "place:west_gate".to_owned(),
+            visibility: ResolutionVisibility::PlayerVisible,
+            knowledge_tier: None,
+            summary: "wrong domain".to_owned(),
+            evidence_refs: vec!["current_turn".to_owned()],
+        });
+        let mut accepted_checks = Vec::new();
+        let mut violations = Vec::new();
+
+        super::audit_court_semantic_layers(&proposal, &mut accepted_checks, &mut violations);
+
+        assert!(accepted_checks.is_empty());
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].layer, WorldCourtLayer::BodyResource);
+        assert_eq!(violations[0].check, "body_resource_effect_ref_domain");
+    }
+
+    #[test]
+    fn semantic_layers_reject_player_visible_hidden_gate() {
+        let mut proposal = semantic_probe();
+        proposal.gate_results.push(GateResult {
+            gate_kind: GateKind::HiddenConstraint,
+            gate_ref: "hidden:assassin_waiting".to_owned(),
+            visibility: ResolutionVisibility::PlayerVisible,
+            status: GateStatus::Blocked,
+            reason: "should not render".to_owned(),
+            evidence_refs: vec!["current_turn".to_owned()],
+        });
+        let mut accepted_checks = Vec::new();
+        let mut violations = Vec::new();
+
+        super::audit_court_semantic_layers(&proposal, &mut accepted_checks, &mut violations);
+
+        assert!(accepted_checks.is_empty());
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].layer, WorldCourtLayer::Visibility);
+        assert_eq!(violations[0].check, "hidden_constraint_gate_visibility");
+    }
+
+    #[test]
+    fn semantic_layers_accept_named_layer_domains() {
+        let mut proposal = semantic_probe();
+        proposal.gate_results.push(GateResult {
+            gate_kind: GateKind::Location,
+            gate_ref: "place:west_gate".to_owned(),
+            visibility: ResolutionVisibility::PlayerVisible,
+            status: GateStatus::Passed,
+            reason: "reachable".to_owned(),
+            evidence_refs: vec!["current_turn".to_owned()],
+        });
+        proposal.proposed_effects.push(ProposedEffect {
+            effect_kind: ProposedEffectKind::RelationshipDelta,
+            target_ref: "rel:guard->protagonist:distance".to_owned(),
+            visibility: ResolutionVisibility::PlayerVisible,
+            knowledge_tier: None,
+            summary: "stance shifts".to_owned(),
+            evidence_refs: vec!["current_turn".to_owned()],
+        });
+        proposal.process_ticks.push(ProcessTickProposal {
+            process_ref: "process:gate_closing".to_owned(),
+            cause: ProcessTickCause::PlayerActionTouchedProcess,
+            visibility: ResolutionVisibility::PlayerVisible,
+            summary: "gate clock advances".to_owned(),
+            evidence_refs: vec!["current_turn".to_owned()],
+        });
+        let mut accepted_checks = Vec::new();
+        let mut violations = Vec::new();
+
+        super::audit_court_semantic_layers(&proposal, &mut accepted_checks, &mut violations);
+
+        assert!(violations.is_empty());
+        assert!(
+            accepted_checks
+                .iter()
+                .any(|item| item == "space_gate_ref_domain")
+        );
+        assert!(
+            accepted_checks
+                .iter()
+                .any(|item| item == "social_authority_effect_ref_domain")
+        );
+        assert!(
+            accepted_checks
+                .iter()
+                .any(|item| item == "time_process_tick_right")
+        );
+    }
+
+    #[test]
+    fn semantic_layers_reject_hidden_knowledge_visible_effect() {
+        let mut proposal = semantic_probe();
+        proposal.proposed_effects.push(ProposedEffect {
+            effect_kind: ProposedEffectKind::BeliefDelta,
+            target_ref: "knowledge:hidden_assassin".to_owned(),
+            visibility: ResolutionVisibility::PlayerVisible,
+            knowledge_tier: Some(KnowledgeTier::WorldTrueHidden),
+            summary: "북문 뒤에 암살자가 숨어 있다.".to_owned(),
+            evidence_refs: vec!["hidden:assassin_waiting".to_owned()],
+        });
+        let mut accepted_checks = Vec::new();
+        let mut violations = Vec::new();
+
+        super::audit_court_semantic_layers(&proposal, &mut accepted_checks, &mut violations);
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].layer, WorldCourtLayer::Visibility);
+        assert_eq!(violations[0].check, "knowledge_tier_visibility");
+    }
+
+    #[test]
+    fn semantic_layers_require_inferred_knowledge_qualification() {
+        let mut proposal = semantic_probe();
+        proposal.proposed_effects.push(ProposedEffect {
+            effect_kind: ProposedEffectKind::BeliefDelta,
+            target_ref: "knowledge:north_gate_noise".to_owned(),
+            visibility: ResolutionVisibility::PlayerVisible,
+            knowledge_tier: Some(KnowledgeTier::PlayerInferred),
+            summary: "북문 뒤에 누군가 있다.".to_owned(),
+            evidence_refs: vec!["signal:metal_noise".to_owned()],
+        });
+        let mut accepted_checks = Vec::new();
+        let mut violations = Vec::new();
+
+        super::audit_court_semantic_layers(&proposal, &mut accepted_checks, &mut violations);
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].check, "knowledge_tier_render_rule");
+
+        proposal.proposed_effects[0].summary = "북문 뒤에 누군가 있을 가능성이 있다.".to_owned();
+        accepted_checks.clear();
+        violations.clear();
+
+        super::audit_court_semantic_layers(&proposal, &mut accepted_checks, &mut violations);
+
+        assert!(violations.is_empty());
+        assert!(
+            accepted_checks
+                .iter()
+                .any(|check| check == "knowledge_tier_render_rule")
         );
     }
 
@@ -421,6 +823,37 @@ mod tests {
                 excluded: Vec::new(),
                 compiler_policy: PromptContextBudgetPolicy::default(),
             },
+        }
+    }
+
+    fn semantic_probe() -> ResolutionProposal {
+        ResolutionProposal {
+            schema_version: RESOLUTION_PROPOSAL_SCHEMA_VERSION.to_owned(),
+            world_id: "stw_court".to_owned(),
+            turn_id: "turn_0001".to_owned(),
+            interpreted_intent: crate::resolution::ActionIntent {
+                input_kind: ActionInputKind::Freeform,
+                summary: "probe".to_owned(),
+                target_refs: Vec::new(),
+                pressure_refs: Vec::new(),
+                evidence_refs: vec!["current_turn".to_owned()],
+                ambiguity: ActionAmbiguity::Clear,
+            },
+            outcome: ResolutionOutcome {
+                kind: ResolutionOutcomeKind::Blocked,
+                summary: "probe".to_owned(),
+                evidence_refs: vec!["current_turn".to_owned()],
+            },
+            gate_results: Vec::new(),
+            proposed_effects: Vec::new(),
+            process_ticks: Vec::new(),
+            pressure_noop_reasons: Vec::new(),
+            narrative_brief: NarrativeBrief {
+                visible_summary: "probe".to_owned(),
+                required_beats: Vec::new(),
+                forbidden_visible_details: Vec::new(),
+            },
+            next_choice_plan: Vec::new(),
         }
     }
 }

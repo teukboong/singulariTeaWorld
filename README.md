@@ -296,15 +296,18 @@ SINGULARI_WORLD_HOME=/path/to/world-store cargo run --bin singulari-world -- act
 singulari-world validate --world-id <world-id> --json
 singulari-world projection-health --world-id <world-id> --json
 singulari-world repair-turn-materializations --world-id <world-id> --json
+singulari-world recover-turn-commit-journal --world-id <world-id> --json
 singulari-world repair-db --world-id <world-id> --json
 singulari-world repair-extra-memory --world-id <world-id> --json
 singulari-world visual-job-release --world-id <world-id> --slot <slot> --json
 ```
 
 `projection-health` is the first diagnostic. It checks world files, world.db,
-turn commit envelopes, extra memory projection records, and the unified job
-ledger. Use repair commands only for the component it names; no hidden repair
-runs during normal play.
+turn commit journal/materializations, extra memory projection records, and the
+unified job ledger. Use repair commands only for the component it names; no
+hidden repair runs during normal play. `recover-turn-commit-journal` is the
+crash-recovery path for prepared/failed turn envelopes that already have durable
+commit records.
 
 ## Public Boundary
 

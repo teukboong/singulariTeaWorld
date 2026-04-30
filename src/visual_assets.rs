@@ -14,6 +14,8 @@ pub const WORLD_VISUAL_ASSETS_SCHEMA_VERSION: &str = "singulari.world_visual_ass
 pub const VISUAL_JOB_CLAIM_SCHEMA_VERSION: &str = "singulari.visual_job_claim.v1";
 pub const VISUAL_JOB_CLAIM_RELEASE_SCHEMA_VERSION: &str = "singulari.visual_job_claim_release.v1";
 pub const VISUAL_JOB_COMPLETION_SCHEMA_VERSION: &str = "singulari.visual_job_completion.v1";
+pub const VISUAL_CANON_POLICY_SCHEMA_VERSION: &str = "singulari.visual_canon_policy.v1";
+pub const VISUAL_CANON_AUDIT_SCHEMA_VERSION: &str = "singulari.visual_canon_audit.v1";
 pub const VISUAL_ASSETS_FILENAME: &str = "visual_assets.json";
 pub const VN_ASSETS_DIR: &str = "assets/vn";
 pub const MENU_BACKGROUND_FILENAME: &str = "menu_background.png";
@@ -165,6 +167,7 @@ pub struct WorldVisualAsset {
     pub canonical_use: String,
     pub display_allowed: bool,
     pub reference_allowed: bool,
+    pub visual_canon_policy: VisualCanonPolicy,
     pub prompt: String,
     pub recommended_path: String,
     pub asset_url: String,
@@ -182,6 +185,7 @@ pub struct VisualEntityAsset {
     pub canonical_use: String,
     pub display_allowed: bool,
     pub reference_allowed: bool,
+    pub visual_canon_policy: VisualCanonPolicy,
     pub prompt: String,
     pub recommended_path: String,
     pub asset_url: String,
@@ -199,6 +203,8 @@ pub struct ImageGenerationJob {
     pub canonical_use: String,
     pub display_allowed: bool,
     pub reference_allowed: bool,
+    #[serde(default)]
+    pub visual_canon_policy: VisualCanonPolicy,
     pub prompt: String,
     pub destination_path: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -217,6 +223,8 @@ pub struct HostImageGenerationCall {
     pub destination_path: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reference_paths: Vec<String>,
+    #[serde(default)]
+    pub visual_canon_policy: VisualCanonPolicy,
     pub overwrite: bool,
 }
 
@@ -250,6 +258,7 @@ pub struct VisualJobCompletion {
     pub source_path: Option<String>,
     pub bytes: u64,
     pub completion_path: String,
+    pub canon_audit: VisualCanonAudit,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -266,7 +275,48 @@ pub struct CompiledVisualPrompt {
     pub prompt: String,
     pub reference_asset_urls: Vec<String>,
     pub reference_paths: Vec<String>,
+    pub visual_canon_policy: VisualCanonPolicy,
     pub prompt_policy: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VisualCanonPolicy {
+    pub schema_version: String,
+    pub authority: String,
+    pub canon_locked_traits: Vec<String>,
+    pub style_free_traits: Vec<String>,
+    pub forbidden_inventions: Vec<String>,
+    pub audit_policy: String,
+    pub source_refs: Vec<String>,
+}
+
+impl Default for VisualCanonPolicy {
+    fn default() -> Self {
+        Self {
+            schema_version: VISUAL_CANON_POLICY_SCHEMA_VERSION.to_owned(),
+            authority: "player_visible_visual_policy".to_owned(),
+            canon_locked_traits: Vec::new(),
+            style_free_traits: default_style_free_traits(),
+            forbidden_inventions: default_forbidden_inventions(),
+            audit_policy: "generated images are visual artifacts only; never promote newly invented details to world canon without explicit accepted event evidence".to_owned(),
+            source_refs: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VisualCanonAudit {
+    pub schema_version: String,
+    pub status: VisualCanonAuditStatus,
+    pub review_required: bool,
+    pub policy_snapshot: VisualCanonPolicy,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VisualCanonAuditStatus {
+    PendingReview,
 }
 
 /// Build or refresh the player-visible visual asset manifest for a world.
@@ -292,6 +342,7 @@ pub fn build_world_visual_assets(
         canonical_use: VisualArtifactKind::UiBackground.canonical_use().to_owned(),
         display_allowed: VisualArtifactKind::UiBackground.display_allowed(),
         reference_allowed: VisualArtifactKind::UiBackground.reference_allowed(),
+        visual_canon_policy: menu_visual_canon_policy(&world),
         prompt: menu_background_prompt(&world, &style_profile),
         recommended_path: menu_path.display().to_string(),
         asset_url: world_asset_url(world.world_id.as_str(), MENU_BACKGROUND_FILENAME),
@@ -304,6 +355,7 @@ pub fn build_world_visual_assets(
         canonical_use: VisualArtifactKind::UiBackground.canonical_use().to_owned(),
         display_allowed: VisualArtifactKind::UiBackground.display_allowed(),
         reference_allowed: VisualArtifactKind::UiBackground.reference_allowed(),
+        visual_canon_policy: stage_visual_canon_policy(&world),
         prompt: stage_background_prompt(&world, &style_profile),
         recommended_path: stage_path.display().to_string(),
         asset_url: world_asset_url(world.world_id.as_str(), STAGE_BACKGROUND_FILENAME),
@@ -362,6 +414,7 @@ pub fn claim_visual_job(options: &ClaimVisualJobOptions) -> Result<VisualJobClai
         options.slot.as_deref(),
     )?;
     for job in jobs {
+        validate_visual_canon_policy_for_job(&job)?;
         let claim_path = visual_job_claim_path(&files.dir, job.slot.as_str());
         if claim_path.exists() && !options.force {
             continue;
@@ -464,6 +517,7 @@ pub fn complete_visual_job(options: &CompleteVisualJobOptions) -> Result<VisualJ
             .map(|path| path.display().to_string()),
         bytes,
         completion_path: completion_path.display().to_string(),
+        canon_audit: pending_visual_canon_audit(&job),
     };
     ensure_parent_dir(&completion_path)?;
     write_json(&completion_path, &completion)?;
@@ -563,26 +617,32 @@ pub fn load_visual_job_claim(
 }
 
 fn image_generation_job(asset: &WorldVisualAsset) -> ImageGenerationJob {
-    visual_generation_job(
-        asset.slot.clone(),
-        asset.artifact_kind,
-        asset.prompt.clone(),
-        asset.recommended_path.clone(),
-        Vec::new(),
-        Vec::new(),
-        "save exactly to destination_path; the VN server auto-detects the file on the next packet refresh",
+    apply_visual_canon_policy(
+        visual_generation_job(
+            asset.slot.clone(),
+            asset.artifact_kind,
+            asset.prompt.clone(),
+            asset.recommended_path.clone(),
+            Vec::new(),
+            Vec::new(),
+            "save exactly to destination_path; the VN server auto-detects the file on the next packet refresh",
+        ),
+        asset.visual_canon_policy.clone(),
     )
 }
 
 fn visual_entity_generation_job(asset: &VisualEntityAsset) -> ImageGenerationJob {
-    visual_generation_job(
-        asset.slot.clone(),
-        asset.artifact_kind,
-        asset.prompt.clone(),
-        asset.recommended_path.clone(),
-        Vec::new(),
-        Vec::new(),
-        "save exactly to destination_path; future turn CG jobs may use this sheet as a reference",
+    apply_visual_canon_policy(
+        visual_generation_job(
+            asset.slot.clone(),
+            asset.artifact_kind,
+            asset.prompt.clone(),
+            asset.recommended_path.clone(),
+            Vec::new(),
+            Vec::new(),
+            "save exactly to destination_path; future turn CG jobs may use this sheet as a reference",
+        ),
+        asset.visual_canon_policy.clone(),
     )
 }
 
@@ -596,6 +656,7 @@ pub fn visual_generation_job(
     reference_paths: Vec<String>,
     register_policy: &str,
 ) -> ImageGenerationJob {
+    let visual_canon_policy = default_visual_canon_policy_for_kind(artifact_kind);
     ImageGenerationJob {
         tool: IMAGE_GENERATION_TOOL.to_owned(),
         image_generation_call: HostImageGenerationCall {
@@ -604,6 +665,7 @@ pub fn visual_generation_job(
             prompt: prompt.clone(),
             destination_path: destination_path.clone(),
             reference_paths: reference_paths.clone(),
+            visual_canon_policy: visual_canon_policy.clone(),
             overwrite: false,
         },
         slot,
@@ -611,6 +673,7 @@ pub fn visual_generation_job(
         canonical_use: artifact_kind.canonical_use().to_owned(),
         display_allowed: artifact_kind.display_allowed(),
         reference_allowed: artifact_kind.reference_allowed(),
+        visual_canon_policy,
         prompt,
         destination_path,
         reference_asset_urls,
@@ -618,6 +681,16 @@ pub fn visual_generation_job(
         overwrite: false,
         register_policy: register_policy.to_owned(),
     }
+}
+
+#[must_use]
+pub fn apply_visual_canon_policy(
+    mut job: ImageGenerationJob,
+    visual_canon_policy: VisualCanonPolicy,
+) -> ImageGenerationJob {
+    job.image_generation_call.visual_canon_policy = visual_canon_policy.clone();
+    job.visual_canon_policy = visual_canon_policy;
+    job
 }
 
 fn selectable_visual_jobs(
@@ -782,6 +855,291 @@ fn ensure_nonempty_human_field(field: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+/// Render the canon policy into the host-facing image prompt.
+#[must_use]
+pub fn visual_canon_policy_prompt(policy: &VisualCanonPolicy) -> String {
+    format!(
+        "Visual canon policy JSON:\n{}\nGenerated pixels are not world truth. If the image seems to add a new fact, treat it as an invalid visual artifact until a later accepted world event explicitly promotes that fact.",
+        serde_json::to_string_pretty(policy).unwrap_or_else(|_| {
+            "{\"error\":\"visual canon policy serialization failed\"}".to_owned()
+        })
+    )
+}
+
+/// Ensure an image job carries a self-consistent canon policy before a host can claim it.
+///
+/// # Errors
+///
+/// Returns an error when the policy is malformed, missing required invention
+/// guards, or diverges between the public job and host call payload.
+pub fn validate_visual_canon_policy_for_job(job: &ImageGenerationJob) -> Result<()> {
+    let policy = &job.visual_canon_policy;
+    if policy.schema_version != VISUAL_CANON_POLICY_SCHEMA_VERSION {
+        bail!(
+            "visual canon policy schema mismatch: slot={}, expected={}, actual={}",
+            job.slot,
+            VISUAL_CANON_POLICY_SCHEMA_VERSION,
+            policy.schema_version
+        );
+    }
+    if job.image_generation_call.visual_canon_policy != *policy {
+        bail!(
+            "visual canon policy diverged between job and host call: slot={}",
+            job.slot
+        );
+    }
+    if policy.canon_locked_traits.is_empty() {
+        bail!(
+            "visual canon policy missing locked traits: slot={}",
+            job.slot
+        );
+    }
+    if policy.style_free_traits.is_empty() {
+        bail!(
+            "visual canon policy missing style-free traits: slot={}",
+            job.slot
+        );
+    }
+    if policy.forbidden_inventions.is_empty() {
+        bail!(
+            "visual canon policy missing forbidden inventions: slot={}",
+            job.slot
+        );
+    }
+    if job.artifact_kind == VisualArtifactKind::SceneCg
+        && !policy_forbids(policy, "new character")
+        && !policy_forbids(policy, "new visible character")
+    {
+        bail!(
+            "scene CG visual canon policy must forbid new character invention: slot={}",
+            job.slot
+        );
+    }
+    if job.artifact_kind == VisualArtifactKind::CharacterDesignSheet
+        && !policy_forbids(policy, "hidden identity")
+    {
+        bail!(
+            "character design visual canon policy must forbid hidden identity invention: slot={}",
+            job.slot
+        );
+    }
+    Ok(())
+}
+
+fn policy_forbids(policy: &VisualCanonPolicy, needle: &str) -> bool {
+    policy
+        .forbidden_inventions
+        .iter()
+        .any(|item| item.to_ascii_lowercase().contains(needle))
+}
+
+fn pending_visual_canon_audit(job: &ImageGenerationJob) -> VisualCanonAudit {
+    VisualCanonAudit {
+        schema_version: VISUAL_CANON_AUDIT_SCHEMA_VERSION.to_owned(),
+        status: VisualCanonAuditStatus::PendingReview,
+        review_required: true,
+        policy_snapshot: job.visual_canon_policy.clone(),
+        message: format!(
+            "completed visual artifact for slot={} is display/reference material only; do not promote generated details into canon without accepted event evidence",
+            job.slot
+        ),
+    }
+}
+
+fn default_style_free_traits() -> Vec<String> {
+    [
+        "lighting",
+        "composition",
+        "camera distance",
+        "weather texture",
+        "brushwork and rendering style",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
+fn default_forbidden_inventions() -> Vec<String> {
+    [
+        "new character not named in player-visible state",
+        "new weapon, item, symbol, insignia, scar, age, or faction mark not locked by policy",
+        "hidden route, hidden identity, secret relationship, or future event",
+        "rendered text or UI words",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
+fn default_visual_canon_policy_for_kind(artifact_kind: VisualArtifactKind) -> VisualCanonPolicy {
+    VisualCanonPolicy {
+        authority: "default_artifact_kind_policy".to_owned(),
+        canon_locked_traits: vec![
+            format!("artifact_kind: {}", artifact_kind.as_str()),
+            format!("canonical_use: {}", artifact_kind.canonical_use()),
+        ],
+        source_refs: vec![format!("artifact_kind:{}", artifact_kind.as_str())],
+        ..VisualCanonPolicy::default()
+    }
+}
+
+fn menu_visual_canon_policy(world: &WorldRecord) -> VisualCanonPolicy {
+    premise_visual_canon_policy(
+        "menu_background",
+        world,
+        "ui background for main menu; negative space for VN controls is allowed",
+    )
+}
+
+fn stage_visual_canon_policy(world: &WorldRecord) -> VisualCanonPolicy {
+    premise_visual_canon_policy(
+        "stage_background",
+        world,
+        "ui background for VN stage layer; atmospheric readability is allowed",
+    )
+}
+
+fn premise_visual_canon_policy(
+    slot: &str,
+    world: &WorldRecord,
+    extra_locked: &str,
+) -> VisualCanonPolicy {
+    VisualCanonPolicy {
+        authority: "player_visible_world_premise".to_owned(),
+        canon_locked_traits: vec![
+            format!("world title: {}", world.title),
+            format!("genre: {}", world.premise.genre),
+            format!("protagonist premise: {}", world.premise.protagonist),
+            format!("opening state: {}", world.premise.opening_state),
+            extra_locked.to_owned(),
+        ],
+        source_refs: vec![
+            format!("world:{}", world.world_id),
+            format!("visual_slot:{slot}"),
+        ],
+        ..VisualCanonPolicy::default()
+    }
+}
+
+fn character_visual_canon_policy(
+    world: &WorldRecord,
+    character: &CharacterRecord,
+    display_name: &str,
+) -> VisualCanonPolicy {
+    let mut locked = vec![
+        format!("character display name: {display_name}"),
+        format!("role: {}", player_visible_character_role(character)),
+    ];
+    locked.extend(
+        player_visible_character_traits(character)
+            .into_iter()
+            .map(|trait_text| format!("confirmed trait: {trait_text}")),
+    );
+    locked.extend(
+        player_visible_gestures(character)
+            .into_iter()
+            .map(|gesture| format!("voice/gesture anchor: {gesture}")),
+    );
+    VisualCanonPolicy {
+        authority: "player_visible_character_record".to_owned(),
+        canon_locked_traits: locked,
+        source_refs: vec![
+            format!("world:{}", world.world_id),
+            format!("entity:{}", character.id),
+        ],
+        forbidden_inventions: [
+            "hidden identity, hidden relationship, or undisclosed motive",
+            "new scar, weapon, insignia, age, injury, body mark, or faction mark not listed in locked traits",
+            "new costume detail that implies social rank or allegiance not listed in locked traits",
+            "rendered text or UI words",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
+        ..VisualCanonPolicy::default()
+    }
+}
+
+fn location_visual_canon_policy(
+    world: &WorldRecord,
+    place: &PlaceRecord,
+    display_name: &str,
+) -> VisualCanonPolicy {
+    let mut locked = vec![
+        format!("location display name: {display_name}"),
+        format!("genre: {}", world.premise.genre),
+    ];
+    locked.extend(
+        place
+            .notes
+            .iter()
+            .filter(|note| !leaks_internal_anchor_or_hidden_text([note.as_str()]))
+            .map(|note| format!("player-visible location note: {note}")),
+    );
+    VisualCanonPolicy {
+        authority: "player_visible_location_record".to_owned(),
+        canon_locked_traits: locked,
+        source_refs: vec![
+            format!("world:{}", world.world_id),
+            format!("place:{}", place.id),
+        ],
+        forbidden_inventions: [
+            "hidden route, secret room, unrevealed symbol, future damage, or faction mark",
+            "new character, creature, weapon, ritual object, or signage not listed in locked traits",
+            "new geography that changes reachable paths",
+            "rendered text or UI words",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
+        ..VisualCanonPolicy::default()
+    }
+}
+
+fn turn_visual_canon_policy(
+    packet: &RenderPacket,
+    references: &[&VisualEntityAsset],
+) -> VisualCanonPolicy {
+    let dashboard = &packet.visible_state.dashboard;
+    let mut locked = vec![
+        format!("turn: {}", packet.turn_id),
+        format!("location: {}", dashboard.location),
+        format!("current event: {}", dashboard.current_event),
+        format!("visible status: {}", dashboard.status),
+    ];
+    locked.extend(
+        packet
+            .visible_state
+            .scan_targets
+            .iter()
+            .take(4)
+            .map(|target| format!("visible focus: {}", player_visible_focus_label(target))),
+    );
+    locked.extend(references.iter().map(|asset| {
+        format!(
+            "accepted reference sheet: {} {} -> {}",
+            asset.entity_type, asset.display_name, asset.recommended_path
+        )
+    }));
+    let mut source_refs = vec![format!("render_packet:{}", packet.turn_id)];
+    source_refs.extend(packet.canon_delta_refs.iter().cloned());
+    VisualCanonPolicy {
+        authority: "player_visible_render_packet".to_owned(),
+        canon_locked_traits: locked,
+        source_refs,
+        forbidden_inventions: [
+            "new character not named in player-visible state or accepted reference sheets",
+            "new weapon, item, symbol, scar, age, injury, faction mark, route, or location not named in visible state",
+            "hidden truth, secret identity, future consequence, or offscreen event not visible this turn",
+            "rendered text or UI words",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
+        ..VisualCanonPolicy::default()
+    }
+}
+
 fn world_asset_url(world_id: &str, filename: &str) -> String {
     format!("/world-assets/{world_id}/{VN_ASSETS_DIR}/{filename}")
 }
@@ -900,6 +1258,7 @@ fn character_sheet_asset(
             .to_owned(),
         display_allowed: VisualArtifactKind::CharacterDesignSheet.display_allowed(),
         reference_allowed: VisualArtifactKind::CharacterDesignSheet.reference_allowed(),
+        visual_canon_policy: character_visual_canon_policy(world, character, display_name.as_str()),
         prompt: character_sheet_prompt(world, character, display_name.as_str()),
         recommended_path: path.display().to_string(),
         asset_url: visual_entity_asset_url(
@@ -939,6 +1298,7 @@ fn location_sheet_asset(
             .to_owned(),
         display_allowed: VisualArtifactKind::LocationDesignSheet.display_allowed(),
         reference_allowed: VisualArtifactKind::LocationDesignSheet.reference_allowed(),
+        visual_canon_policy: location_visual_canon_policy(world, place, display_name.as_str()),
         prompt: location_sheet_prompt(world, place, display_name.as_str()),
         recommended_path: path.display().to_string(),
         asset_url: visual_entity_asset_url(
@@ -1019,6 +1379,7 @@ pub fn compile_turn_visual_prompt(
             .join("; ")
     };
     CompiledVisualPrompt {
+        visual_canon_policy: turn_visual_canon_policy(packet, &references),
         prompt: turn_scene_prompt(
             world,
             packet,
@@ -1250,9 +1611,10 @@ mod tests {
     use super::{
         BuildWorldVisualAssetsOptions, CHARACTER_SHEETS_DIR, ClaimVisualJobOptions,
         CompleteVisualJobOptions, IMAGE_GENERATION_TOOL, ReleaseVisualJobClaimOptions,
-        VN_ASSETS_DIR, VisualArtifactKind, VisualJobClaimOutcome, build_world_visual_assets,
-        claim_visual_job, compile_turn_visual_prompt, complete_visual_job,
-        release_visual_job_claim, turn_cg_scene_hint, visual_generation_job,
+        VN_ASSETS_DIR, VisualArtifactKind, VisualCanonAuditStatus, VisualJobClaimOutcome,
+        build_world_visual_assets, claim_visual_job, compile_turn_visual_prompt,
+        complete_visual_job, release_visual_job_claim, turn_cg_scene_hint,
+        validate_visual_canon_policy_for_job, visual_generation_job,
     };
     use crate::models::{
         DashboardSummary, NarrativeScene, RenderPacket, ScanTarget, TurnChoice, VisibleState,
@@ -1328,6 +1690,18 @@ premise:
                 job.image_generation_call.destination_path,
                 job.destination_path
             );
+            assert_eq!(
+                job.image_generation_call.visual_canon_policy,
+                job.visual_canon_policy
+            );
+            assert!(!job.visual_canon_policy.canon_locked_traits.is_empty());
+            assert!(!job.visual_canon_policy.style_free_traits.is_empty());
+            assert!(
+                job.visual_canon_policy
+                    .forbidden_inventions
+                    .iter()
+                    .any(|item| item.contains("rendered text"))
+            );
             for hidden_marker in [
                 "앵커 인물",
                 "anchor_character",
@@ -1398,6 +1772,17 @@ premise:
         })?;
         assert_eq!(completion.slot, "menu_background");
         assert!(completion.destination_path.ends_with("menu_background.png"));
+        assert_eq!(
+            completion.canon_audit.status,
+            VisualCanonAuditStatus::PendingReview
+        );
+        assert!(completion.canon_audit.review_required);
+        assert!(
+            completion
+                .canon_audit
+                .message
+                .contains("do not promote generated details into canon")
+        );
 
         let manifest = build_world_visual_assets(&BuildWorldVisualAssetsOptions {
             store_root: Some(store.clone()),
@@ -1495,7 +1880,42 @@ premise:
 
         assert_eq!(completion.slot, "turn_cg:turn_0001");
         assert!(turn_cg_path.is_file());
+        assert!(completion.canon_audit.review_required);
+        assert!(
+            completion
+                .canon_audit
+                .policy_snapshot
+                .forbidden_inventions
+                .iter()
+                .any(|item| item.contains("new character"))
+        );
         Ok(())
+    }
+
+    #[test]
+    fn visual_canon_policy_rejects_divergent_host_payload() {
+        let mut job = visual_generation_job(
+            "turn_cg:turn_0001".to_owned(),
+            VisualArtifactKind::SceneCg,
+            "player-visible turn CG prompt".to_owned(),
+            "/tmp/turn_0001.png".to_owned(),
+            Vec::new(),
+            Vec::new(),
+            "test",
+        );
+        job.image_generation_call
+            .visual_canon_policy
+            .canon_locked_traits
+            .clear();
+
+        let Err(error) = validate_visual_canon_policy_for_job(&job) else {
+            panic!("divergent host payload should fail visual canon policy validation");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("diverged between job and host call")
+        );
     }
 
     #[test]
@@ -1601,6 +2021,19 @@ premise:
         let gated_prompt = compile_turn_visual_prompt(&initialized.world, &packet, &manifest);
 
         assert!(gated_prompt.reference_paths.is_empty());
+        assert!(
+            gated_prompt
+                .visual_canon_policy
+                .source_refs
+                .contains(&"render_packet:turn_0001".to_owned())
+        );
+        assert!(
+            gated_prompt
+                .visual_canon_policy
+                .forbidden_inventions
+                .iter()
+                .any(|item| item.contains("new character"))
+        );
         assert!(
             gated_prompt
                 .prompt

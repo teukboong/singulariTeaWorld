@@ -20,6 +20,7 @@ mod event_ledger;
 mod extra_memory;
 mod host_supervisor;
 mod job_ledger;
+mod knowledge_ledger;
 mod location_graph;
 mod memory_revival;
 mod memory_revival_policy;
@@ -142,13 +143,16 @@ pub use codex_view::{
 };
 pub use consequence_spine::{
     ACTIVE_CONSEQUENCES_FILENAME, ActiveConsequence, CONSEQUENCE_EVENT_SCHEMA_VERSION,
-    CONSEQUENCE_EVENTS_FILENAME, CONSEQUENCE_PROPOSAL_SCHEMA_VERSION, CONSEQUENCE_SCHEMA_VERSION,
+    CONSEQUENCE_EVENTS_FILENAME, CONSEQUENCE_PROPOSAL_SCHEMA_VERSION,
+    CONSEQUENCE_RETURN_RIGHTS_SCHEMA_VERSION, CONSEQUENCE_SCHEMA_VERSION,
     CONSEQUENCE_SPINE_PACKET_SCHEMA_VERSION, ConsequenceDecay, ConsequenceEventKind,
     ConsequenceEventPlan, ConsequenceEventRecord, ConsequenceFollowup, ConsequenceKind,
     ConsequenceMemory, ConsequenceMutation, ConsequencePayoff, ConsequencePressureLink,
-    ConsequenceProposal, ConsequenceReturnWindow, ConsequenceScope, ConsequenceSeverity,
-    ConsequenceSpinePacket, ConsequenceSpinePolicy, ConsequenceStatus, EphemeralConsequenceReason,
-    append_consequence_event_plan, audit_consequence_contract, load_consequence_spine_state,
+    ConsequenceProposal, ConsequenceReturnRights, ConsequenceReturnTrigger,
+    ConsequenceReturnWindow, ConsequenceScope, ConsequenceSeverity, ConsequenceSpinePacket,
+    ConsequenceSpinePolicy, ConsequenceStatus, EphemeralConsequenceReason,
+    append_consequence_event_plan, audit_consequence_contract, consequence_can_drive_world_process,
+    consequence_can_return_as_scene_pressure, load_consequence_spine_state,
     prepare_consequence_event_plan, rebuild_consequence_spine,
 };
 pub use context_capsule::{
@@ -164,23 +168,25 @@ pub use context_capsule::{
     rebuild_context_capsule_registry, select_context_capsules,
 };
 pub use encounter_surface::{
-    AffordanceAvailability, BlockedInteraction, ENCOUNTER_AFFORDANCE_SCHEMA_VERSION,
-    ENCOUNTER_CHANGE_POTENTIAL_SCHEMA_VERSION, ENCOUNTER_CONSTRAINT_SCHEMA_VERSION,
-    ENCOUNTER_PROPOSAL_SCHEMA_VERSION, ENCOUNTER_SURFACE_EVENT_SCHEMA_VERSION,
-    ENCOUNTER_SURFACE_EVENTS_FILENAME, ENCOUNTER_SURFACE_FILENAME,
-    ENCOUNTER_SURFACE_PACKET_SCHEMA_VERSION, ENCOUNTER_SURFACE_SCHEMA_VERSION, EncounterActionKind,
-    EncounterAffordance, EncounterChangeKind, EncounterChangePotential, EncounterClosureKind,
-    EncounterConstraint, EncounterConstraintKind, EncounterPersistence, EncounterProposal,
-    EncounterSalience, EncounterSurface, EncounterSurfaceChange, EncounterSurfaceClosure,
-    EncounterSurfaceEventPlan, EncounterSurfaceEventRecord, EncounterSurfaceKind,
-    EncounterSurfaceLifecycle, EncounterSurfaceMutation, EncounterSurfacePacket,
-    EncounterSurfacePolicy, EncounterSurfaceStatus, append_encounter_surface_event_plan,
-    compile_encounter_surface_packet, derive_resolution_gate_mutations, encounter_status,
-    load_encounter_surface_state, prepare_encounter_surface_event_plan, rebuild_encounter_surface,
+    AffordanceAvailability, BlockedInteraction, CHOICE_CONTRACT_SCHEMA_VERSION, ChoiceContract,
+    ChoiceTimeCost, ENCOUNTER_AFFORDANCE_SCHEMA_VERSION, ENCOUNTER_CHANGE_POTENTIAL_SCHEMA_VERSION,
+    ENCOUNTER_CONSTRAINT_SCHEMA_VERSION, ENCOUNTER_PROPOSAL_SCHEMA_VERSION,
+    ENCOUNTER_SURFACE_EVENT_SCHEMA_VERSION, ENCOUNTER_SURFACE_EVENTS_FILENAME,
+    ENCOUNTER_SURFACE_FILENAME, ENCOUNTER_SURFACE_PACKET_SCHEMA_VERSION,
+    ENCOUNTER_SURFACE_SCHEMA_VERSION, EncounterActionKind, EncounterAffordance,
+    EncounterChangeKind, EncounterChangePotential, EncounterClosureKind, EncounterConstraint,
+    EncounterConstraintKind, EncounterPersistence, EncounterProposal, EncounterSalience,
+    EncounterSurface, EncounterSurfaceChange, EncounterSurfaceClosure, EncounterSurfaceEventPlan,
+    EncounterSurfaceEventRecord, EncounterSurfaceKind, EncounterSurfaceLifecycle,
+    EncounterSurfaceMutation, EncounterSurfacePacket, EncounterSurfacePolicy,
+    EncounterSurfaceStatus, append_encounter_surface_event_plan, compile_encounter_surface_packet,
+    derive_resolution_gate_mutations, encounter_status, load_encounter_surface_state,
+    prepare_encounter_surface_event_plan, rebuild_encounter_surface,
 };
 pub use entity_update::{EntityUpdateInput, apply_structured_entity_updates};
 pub use event_ledger::{
-    WORLD_EVENT_LEDGER_SCHEMA_VERSION, WorldEventLedgerAppendReport,
+    WORLD_EVENT_HASH_ALGORITHM, WORLD_EVENT_HASH_VERSION, WORLD_EVENT_LEDGER_SCHEMA_VERSION,
+    WorldEventLedgerAppendReport, WorldEventLedgerChainReport, WorldEventLedgerChainStatus,
     WorldEventLedgerVerificationReport, verify_world_event_ledger,
 };
 pub use extra_memory::{
@@ -203,6 +209,11 @@ pub use job_ledger::{
     ReadWorldJobsOptions, WORLD_JOB_LEDGER_SCHEMA_VERSION, WorldJob, WorldJobKind, WorldJobStatus,
     WriteTextTurnJobOptions, WriteVisualJobOptions, read_world_jobs, write_text_turn_job,
     write_visual_job,
+};
+pub use knowledge_ledger::{
+    KNOWLEDGE_CLAIM_SCHEMA_VERSION, KnowledgeClaim, KnowledgeTier, PlayerRenderPermission,
+    TruthStatus, can_render_knowledge_tier_to_player, player_render_permission,
+    render_rule_for_player,
 };
 pub use location_graph::{
     LOCATION_EVENT_SCHEMA_VERSION, LOCATION_EVENTS_FILENAME, LOCATION_GRAPH_FILENAME,
@@ -386,8 +397,10 @@ pub use transfer::{
 };
 pub use turn::{AdvanceTurnOptions, AdvancedTurn, advance_turn, render_advanced_turn_report};
 pub use turn_commit::{
-    TURN_COMMIT_ENVELOPE_SCHEMA_VERSION, TURN_COMMITS_FILENAME, TurnCommitEnvelope,
-    TurnCommitStatus, TurnMaterializationRepairReport, append_turn_commit_envelope,
+    TURN_COMMIT_ENVELOPE_SCHEMA_VERSION, TURN_COMMIT_JOURNAL_RECOVERY_ACTION_SCHEMA_VERSION,
+    TURN_COMMIT_JOURNAL_RECOVERY_SCHEMA_VERSION, TURN_COMMITS_FILENAME, TurnCommitEnvelope,
+    TurnCommitJournalRecoveryAction, TurnCommitJournalRecoveryReport, TurnCommitStatus,
+    TurnMaterializationRepairReport, append_turn_commit_envelope, recover_turn_commit_journal,
     repair_turn_materializations,
 };
 pub use turn_context::{
@@ -416,14 +429,16 @@ pub use visual_assets::{
     BuildWorldVisualAssetsOptions, CHARACTER_SHEETS_DIR, ClaimVisualJobOptions,
     CompiledVisualPrompt, CompleteVisualJobOptions, HostImageGenerationCall, IMAGE_GENERATION_TOOL,
     ImageGenerationJob, LOCATION_SHEETS_DIR, MENU_BACKGROUND_FILENAME,
-    ReleaseVisualJobClaimOptions, VISUAL_ASSETS_FILENAME, VISUAL_JOB_CLAIM_RELEASE_SCHEMA_VERSION,
+    ReleaseVisualJobClaimOptions, VISUAL_ASSETS_FILENAME, VISUAL_CANON_AUDIT_SCHEMA_VERSION,
+    VISUAL_CANON_POLICY_SCHEMA_VERSION, VISUAL_JOB_CLAIM_RELEASE_SCHEMA_VERSION,
     VISUAL_JOB_CLAIM_SCHEMA_VERSION, VISUAL_JOB_COMPLETION_SCHEMA_VERSION, VN_ASSETS_DIR,
-    VisualArtifactKind, VisualBudgetPolicy, VisualEntityAsset, VisualJobClaim,
-    VisualJobClaimOutcome, VisualJobClaimRelease, VisualJobCompletion,
-    WORLD_VISUAL_ASSETS_SCHEMA_VERSION, WorldVisualAsset, WorldVisualAssets,
-    WorldVisualStyleProfile, build_world_visual_assets, claim_visual_job,
-    compile_turn_visual_prompt, complete_visual_job, load_visual_job_claim,
-    release_visual_job_claim, visual_generation_job,
+    VisualArtifactKind, VisualBudgetPolicy, VisualCanonAudit, VisualCanonAuditStatus,
+    VisualCanonPolicy, VisualEntityAsset, VisualJobClaim, VisualJobClaimOutcome,
+    VisualJobClaimRelease, VisualJobCompletion, WORLD_VISUAL_ASSETS_SCHEMA_VERSION,
+    WorldVisualAsset, WorldVisualAssets, WorldVisualStyleProfile, apply_visual_canon_policy,
+    build_world_visual_assets, claim_visual_job, compile_turn_visual_prompt, complete_visual_job,
+    load_visual_job_claim, release_visual_job_claim, validate_visual_canon_policy_for_job,
+    visual_canon_policy_prompt, visual_generation_job,
 };
 pub use vn::{
     BuildVnPacketOptions, VN_PACKET_SCHEMA_VERSION, VnAdjudication, VnChoice, VnHiddenFilter,
@@ -460,8 +475,8 @@ pub use world_process_clock::{
     WORLD_PROCESS_CLOCK_PACKET_SCHEMA_VERSION, WORLD_PROCESS_EVENT_SCHEMA_VERSION,
     WORLD_PROCESS_EVENTS_FILENAME, WORLD_PROCESS_SCHEMA_VERSION, WORLD_PROCESSES_FILENAME,
     WorldProcess, WorldProcessClockPacket, WorldProcessClockPolicy, WorldProcessEventPlan,
-    WorldProcessEventRecord, WorldProcessTempo, WorldProcessVisibility,
-    append_world_process_event_plan, compile_world_process_clock_packet,
+    WorldProcessEventRecord, WorldProcessTempo, WorldProcessTickPolicy, WorldProcessTickTrigger,
+    WorldProcessVisibility, append_world_process_event_plan, compile_world_process_clock_packet,
     load_world_process_clock_state, merge_consequence_world_processes,
     prepare_world_process_event_plan, rebuild_world_process_clock,
 };

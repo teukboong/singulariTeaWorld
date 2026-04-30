@@ -1,3 +1,4 @@
+use crate::event_ledger::WorldEventLedgerChainStatus;
 use crate::models::{
     ANCHOR_CHARACTER_ID, ANCHOR_CHARACTER_INVARIANT, CanonEvent, DEFAULT_CHOICE_COUNT,
     ENTITY_RECORDS_SCHEMA_VERSION, EntityRecords, FREEFORM_CHOICE_SLOT, FREEFORM_CHOICE_TAG,
@@ -146,7 +147,7 @@ pub fn validate_world(store_root: Option<&Path>, world_id: &str) -> Result<Valid
         check_world_id("latest_snapshot", &snapshot.world_id, world_id, &mut errors);
         validate_snapshot_choices(snapshot, &mut errors);
     }
-    validate_world_event_ledger(world_id, &canon_events, &mut errors);
+    validate_world_event_ledger(world_id, &canon_events, &mut errors, &mut warnings);
     if let Some(entities) = &entities {
         validate_canon_events(world_id, &canon_events, entities, &mut errors);
     }
@@ -347,9 +348,23 @@ fn validate_canon_events(
     }
 }
 
-fn validate_world_event_ledger(world_id: &str, events: &[CanonEvent], errors: &mut Vec<String>) {
-    if let Err(error) = crate::event_ledger::verify_world_events(world_id, events) {
-        errors.push(format!("world event ledger invalid: {error:#}"));
+fn validate_world_event_ledger(
+    world_id: &str,
+    events: &[CanonEvent],
+    errors: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+) {
+    match crate::event_ledger::verify_world_events(world_id, events) {
+        Ok(report) if report.chain_status == WorldEventLedgerChainStatus::LegacyUnchained => {
+            warnings.push(
+                "canon_events.jsonl is a legacy unchained ledger; new appends will add event hashes"
+                    .to_owned(),
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            errors.push(format!("world event ledger invalid: {error:#}"));
+        }
     }
 }
 

@@ -171,7 +171,7 @@ pub(crate) fn advance_turn_without_world_lock_with_authority(
         created_at,
     };
 
-    persist_turn_artifacts(&PersistTurnInput {
+    let canon_event = persist_turn_artifacts(&PersistTurnInput {
         files,
         world: &world,
         entities: &entities,
@@ -227,10 +227,10 @@ fn build_turn_artifact_paths(
     }
 }
 
-fn persist_turn_artifacts(input: &PersistTurnInput<'_>) -> Result<()> {
+fn persist_turn_artifacts(input: &PersistTurnInput<'_>) -> Result<CanonEvent> {
     ensure_parent_dir(&input.paths.snapshot)?;
     ensure_parent_dir(&input.paths.render_packet)?;
-    append_canon_event(&input.files.canon_events, input.canon_event)?;
+    let canon_event = append_canon_event(&input.files.canon_events, input.canon_event)?;
     append_jsonl(&input.files.entity_updates, input.structured_updates)?;
     write_json(&input.files.entities, input.entities)?;
     write_json(&input.paths.snapshot, input.snapshot)?;
@@ -242,11 +242,12 @@ fn persist_turn_artifacts(input: &PersistTurnInput<'_>) -> Result<()> {
         world: input.world,
         entities: input.entities,
         snapshot: input.snapshot,
-        canon_event: input.canon_event,
+        canon_event: &canon_event,
         render_packet: input.render_packet,
         turn_log_entry: input.turn_log_entry,
         structured_updates: input.structured_updates,
-    })
+    })?;
+    Ok(canon_event)
 }
 
 fn ensure_parent_dir(path: &Path) -> Result<()> {
@@ -512,6 +513,8 @@ fn build_canon_event(
         kind: input.kind.as_wire().to_owned(),
         event_kind: Some(WorldEventKind::from_turn_input_kind(input.kind)),
         authority: Some(authority),
+        previous_event_hash: None,
+        event_hash: None,
         summary: event_summary(input),
         entities: vec![
             PROTAGONIST_CHARACTER_ID.to_owned(),

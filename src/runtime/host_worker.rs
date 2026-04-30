@@ -1088,8 +1088,7 @@ mod tests {
         DEFAULT_WEBGPT_TEXT_CDP_PORT,
     };
     use singulari_world::{
-        HostImageGenerationCall, VisualArtifactKind, WorldBackendSelection,
-        save_world_backend_selection,
+        VisualArtifactKind, WorldBackendSelection, save_world_backend_selection,
     };
 
     #[test]
@@ -1293,14 +1292,17 @@ mod tests {
         let slot = "turn_cg:turn_0001".to_owned();
         let destination_path = "/tmp/singulari-world-test-turn-cg.png".to_owned();
         let prompt = "quiet rain over a stone road".to_owned();
-        let image_generation_call = HostImageGenerationCall {
-            capability: "image_generation".to_owned(),
-            slot: slot.clone(),
-            prompt: prompt.clone(),
-            destination_path: destination_path.clone(),
-            reference_paths: Vec::new(),
-            overwrite: true,
-        };
+        let mut job = singulari_world::visual_generation_job(
+            slot.clone(),
+            VisualArtifactKind::SceneCg,
+            prompt,
+            destination_path,
+            Vec::new(),
+            Vec::new(),
+            "turn_cg",
+        );
+        job.overwrite = true;
+        job.image_generation_call.overwrite = true;
         singulari_world::VisualJobClaim {
             schema_version: "singulari.visual_job_claim.v1".to_owned(),
             world_id: "stw_test".to_owned(),
@@ -1308,21 +1310,7 @@ mod tests {
             claim_id: claim_id.to_owned(),
             claimed_by: "singulari_webgpt_image_worker".to_owned(),
             claimed_at: "2026-04-30T00:00:00Z".to_owned(),
-            job: ImageGenerationJob {
-                tool: "image_generation".to_owned(),
-                image_generation_call,
-                slot,
-                artifact_kind: VisualArtifactKind::SceneCg,
-                canonical_use: "turn_cg".to_owned(),
-                display_allowed: true,
-                reference_allowed: false,
-                prompt,
-                destination_path,
-                reference_asset_urls: Vec::new(),
-                reference_paths: Vec::new(),
-                overwrite: true,
-                register_policy: "turn_cg".to_owned(),
-            },
+            job,
             claim_path: "/tmp/singulari-world-test-claim.json".to_owned(),
         }
     }

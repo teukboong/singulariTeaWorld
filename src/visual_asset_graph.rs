@@ -222,8 +222,8 @@ const fn boundary_for(display_allowed: bool, reference_allowed: bool) -> VisualA
 mod tests {
     use super::*;
     use crate::visual_assets::{
-        VisualBudgetPolicy, VisualEntityAsset, WorldVisualAsset, WorldVisualAssets,
-        WorldVisualStyleProfile,
+        VisualBudgetPolicy, VisualCanonPolicy, VisualEntityAsset, WorldVisualAsset,
+        WorldVisualAssets, WorldVisualStyleProfile,
     };
 
     #[test]
@@ -251,6 +251,7 @@ mod tests {
                     .to_owned(),
                 display_allowed: false,
                 reference_allowed: true,
+                visual_canon_policy: VisualCanonPolicy::default(),
                 prompt: String::new(),
                 recommended_path: "char.png".to_owned(),
                 asset_url: "/assets/char.png".to_owned(),
@@ -279,6 +280,7 @@ mod tests {
             canonical_use: VisualArtifactKind::UiBackground.canonical_use().to_owned(),
             display_allowed: true,
             reference_allowed: false,
+            visual_canon_policy: VisualCanonPolicy::default(),
             prompt: String::new(),
             recommended_path: format!("{slot}.png"),
             asset_url: format!("/assets/{slot}.png"),

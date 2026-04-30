@@ -2,7 +2,7 @@ use crate::agent_bridge::{CommittedAgentTurn, PendingAgentTurn};
 use crate::models::{
     ADJUDICATION_SCHEMA_VERSION, AdjudicationReport, DashboardSummary,
     NARRATIVE_SCENE_SCHEMA_VERSION, NarrativeScene, RENDER_PACKET_SCHEMA_VERSION, RenderPacket,
-    TurnChoice, VisibleState,
+    TurnChoice, TurnSnapshot, VisibleState,
 };
 use crate::store::{
     acquire_world_commit_lock, append_jsonl, read_json, resolve_store_paths, world_file_paths,
@@ -15,7 +15,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub const TURN_COMMIT_ENVELOPE_SCHEMA_VERSION: &str = "singulari.turn_commit.v1";
+pub const TURN_COMMIT_JOURNAL_RECOVERY_SCHEMA_VERSION: &str =
+    "singulari.turn_commit_journal_recovery.v1";
+pub const TURN_COMMIT_JOURNAL_RECOVERY_ACTION_SCHEMA_VERSION: &str =
+    "singulari.turn_commit_journal_recovery_action.v1";
 pub const TURN_COMMITS_FILENAME: &str = "turn_commits.jsonl";
+const AGENT_BRIDGE_DIR: &str = "agent_bridge";
+const AGENT_COMMITTED_TURNS_DIR: &str = "committed_turns";
+const AGENT_PENDING_TURN_FILENAME: &str = "pending_turn.json";
+const AGENT_COMMIT_RECORD_FILENAME: &str = "commit_record.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -57,6 +65,27 @@ pub struct TurnMaterializationRepairReport {
     pub render_packets_repaired: usize,
     pub commit_records_repaired: usize,
     pub repaired_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TurnCommitJournalRecoveryReport {
+    pub schema_version: String,
+    pub world_id: String,
+    pub inspected_envelopes: usize,
+    pub committed_envelopes_appended: usize,
+    pub stale_pending_files_removed: usize,
+    #[serde(default)]
+    pub actions: Vec<TurnCommitJournalRecoveryAction>,
+    pub materialization_repair: TurnMaterializationRepairReport,
+    pub recovered_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TurnCommitJournalRecoveryAction {
+    pub schema_version: String,
+    pub turn_id: String,
+    pub action: String,
+    pub detail: String,
 }
 
 impl TurnCommitEnvelope {
@@ -129,6 +158,29 @@ impl TurnCommitEnvelope {
             created_at,
         }
     }
+
+    #[must_use]
+    pub fn committed_from_existing_record(
+        source: &TurnCommitEnvelope,
+        committed: &CommittedAgentTurn,
+    ) -> Self {
+        Self {
+            schema_version: TURN_COMMIT_ENVELOPE_SCHEMA_VERSION.to_owned(),
+            world_id: source.world_id.clone(),
+            turn_id: source.turn_id.clone(),
+            parent_turn_id: source.parent_turn_id.clone(),
+            player_input: source.player_input.clone(),
+            status: TurnCommitStatus::Committed,
+            pending_ref: source.pending_ref.clone(),
+            response_path: Some(committed.response_path.clone()),
+            render_packet_path: Some(committed.render_packet_path.clone()),
+            commit_record_path: Some(committed.commit_record_path.clone()),
+            world_court_verdict_path: committed.world_court_verdict_path.clone(),
+            failed_stage: None,
+            error: None,
+            created_at: committed.committed_at.clone(),
+        }
+    }
 }
 
 /// Append a turn commit envelope to the per-world commit ledger.
@@ -138,6 +190,154 @@ impl TurnCommitEnvelope {
 /// Returns an error when the JSONL append fails.
 pub fn append_turn_commit_envelope(world_dir: &Path, envelope: &TurnCommitEnvelope) -> Result<()> {
     append_jsonl(&world_dir.join(TURN_COMMITS_FILENAME), envelope)
+}
+
+/// Recover idempotent turn-commit journal state after a crash or worker restart.
+///
+/// The recovery is intentionally conservative: it appends a missing committed
+/// envelope only when the durable `CommittedAgentTurn` record already exists for
+/// that turn. It never invents a committed turn from prose, snapshots, or
+/// projection files alone.
+///
+/// # Errors
+///
+/// Returns an error when the world cannot be loaded, an existing durable commit
+/// record disagrees with the journal turn, or materialization repair fails.
+pub fn recover_turn_commit_journal(
+    store_root: Option<&Path>,
+    world_id: &str,
+) -> Result<TurnCommitJournalRecoveryReport> {
+    let store_paths = resolve_store_paths(store_root)?;
+    let files = world_file_paths(&store_paths, world_id);
+    let world_lock = acquire_world_commit_lock(&files.dir, "recover_turn_commit_journal")?;
+    let ledger_path = files.dir.join(TURN_COMMITS_FILENAME);
+    let envelopes = if ledger_path.is_file() {
+        read_turn_commit_envelopes(&ledger_path)?
+    } else {
+        Vec::new()
+    };
+    let latest_snapshot: Option<TurnSnapshot> = read_json(&files.latest_snapshot).ok();
+    let mut actions = Vec::new();
+    let mut committed_envelopes_appended = 0usize;
+    let mut stale_pending_files_removed = 0usize;
+
+    for envelope in envelopes.iter().filter(|envelope| {
+        matches!(
+            envelope.status,
+            TurnCommitStatus::Prepared | TurnCommitStatus::Failed
+        )
+    }) {
+        if envelope.world_id != world_id {
+            bail!(
+                "turn commit journal recovery world mismatch: expected={world_id}, actual={}, turn={}",
+                envelope.world_id,
+                envelope.turn_id
+            );
+        }
+        if turn_has_committed_envelope(&envelopes, envelope.turn_id.as_str()) {
+            continue;
+        }
+        let commit_record_path = standard_commit_record_path(&files.dir, envelope.turn_id.as_str());
+        if commit_record_path.is_file() {
+            let committed: CommittedAgentTurn = read_json(&commit_record_path)?;
+            ensure_committed_record_matches(envelope, &committed)?;
+            append_turn_commit_envelope(
+                files.dir.as_path(),
+                &TurnCommitEnvelope::committed_from_existing_record(envelope, &committed),
+            )?;
+            committed_envelopes_appended += 1;
+            actions.push(recovery_action(
+                envelope.turn_id.as_str(),
+                "append_committed_envelope",
+                format!(
+                    "durable commit record already existed: {}",
+                    commit_record_path.display()
+                ),
+            ));
+            if remove_matching_pending_file(&files.dir, envelope)? {
+                stale_pending_files_removed += 1;
+                actions.push(recovery_action(
+                    envelope.turn_id.as_str(),
+                    "remove_stale_pending",
+                    "pending turn matched a durable committed turn".to_owned(),
+                ));
+            }
+        } else {
+            let latest_turn = latest_snapshot
+                .as_ref()
+                .map_or("<unknown>", |snapshot| snapshot.turn_id.as_str());
+            actions.push(recovery_action(
+                envelope.turn_id.as_str(),
+                "no_recovery_action",
+                format!(
+                    "no durable commit record found; status={:?}, latest_snapshot={latest_turn}, pending_ref={}",
+                    envelope.status, envelope.pending_ref
+                ),
+            ));
+        }
+    }
+
+    if let Some(action) =
+        remove_stale_standard_pending_after_committed_envelope(&files.dir, &envelopes)?
+    {
+        stale_pending_files_removed += 1;
+        actions.push(action);
+    }
+
+    let inspected_envelopes = envelopes.len();
+    drop(world_lock);
+    let materialization_repair = recovery_materialization_repair(
+        store_root,
+        world_id,
+        &ledger_path,
+        committed_envelopes_appended,
+    )?;
+    Ok(TurnCommitJournalRecoveryReport {
+        schema_version: TURN_COMMIT_JOURNAL_RECOVERY_SCHEMA_VERSION.to_owned(),
+        world_id: world_id.to_owned(),
+        inspected_envelopes,
+        committed_envelopes_appended,
+        stale_pending_files_removed,
+        actions,
+        materialization_repair,
+        recovered_at: chrono::Utc::now().to_rfc3339(),
+    })
+}
+
+fn remove_stale_standard_pending_after_committed_envelope(
+    world_dir: &Path,
+    envelopes: &[TurnCommitEnvelope],
+) -> Result<Option<TurnCommitJournalRecoveryAction>> {
+    let Some(pending) = load_standard_pending_turn(world_dir)? else {
+        return Ok(None);
+    };
+    if !turn_has_committed_envelope(envelopes, pending.turn_id.as_str()) {
+        return Ok(None);
+    }
+    fs::remove_file(standard_pending_turn_path(world_dir)).with_context(|| {
+        format!(
+            "failed to remove stale pending turn after committed envelope: world_id={}, turn_id={}",
+            pending.world_id, pending.turn_id
+        )
+    })?;
+    Ok(Some(recovery_action(
+        pending.turn_id.as_str(),
+        "remove_stale_pending",
+        "pending turn already had committed journal envelope".to_owned(),
+    )))
+}
+
+fn recovery_materialization_repair(
+    store_root: Option<&Path>,
+    world_id: &str,
+    ledger_path: &Path,
+    committed_envelopes_appended: usize,
+) -> Result<TurnMaterializationRepairReport> {
+    if ledger_path.is_file() || committed_envelopes_appended > 0 {
+        repair_turn_materializations(store_root, world_id)
+    } else {
+        Ok(empty_materialization_repair_report(world_id))
+    }
 }
 
 /// Rebuild missing materialized files referenced by committed turn envelopes.
@@ -245,6 +445,100 @@ fn read_turn_commit_envelopes(path: &Path) -> Result<Vec<TurnCommitEnvelope>> {
         .collect()
 }
 
+fn ensure_committed_record_matches(
+    envelope: &TurnCommitEnvelope,
+    committed: &CommittedAgentTurn,
+) -> Result<()> {
+    if committed.world_id != envelope.world_id || committed.turn_id != envelope.turn_id {
+        bail!(
+            "turn commit journal recovery record mismatch: expected={}/{}, actual={}/{}",
+            envelope.world_id,
+            envelope.turn_id,
+            committed.world_id,
+            committed.turn_id
+        );
+    }
+    Ok(())
+}
+
+fn turn_has_committed_envelope(envelopes: &[TurnCommitEnvelope], turn_id: &str) -> bool {
+    envelopes.iter().any(|envelope| {
+        envelope.turn_id == turn_id && envelope.status == TurnCommitStatus::Committed
+    })
+}
+
+fn standard_commit_record_path(world_dir: &Path, turn_id: &str) -> PathBuf {
+    world_dir
+        .join(AGENT_BRIDGE_DIR)
+        .join(AGENT_COMMITTED_TURNS_DIR)
+        .join(turn_id)
+        .join(AGENT_COMMIT_RECORD_FILENAME)
+}
+
+fn standard_pending_turn_path(world_dir: &Path) -> PathBuf {
+    world_dir
+        .join(AGENT_BRIDGE_DIR)
+        .join(AGENT_PENDING_TURN_FILENAME)
+}
+
+fn pending_ref_path(world_dir: &Path, pending_ref: &str) -> PathBuf {
+    let path = PathBuf::from(pending_ref);
+    if path.is_absolute() {
+        path
+    } else {
+        world_dir.join(path)
+    }
+}
+
+fn load_standard_pending_turn(world_dir: &Path) -> Result<Option<PendingAgentTurn>> {
+    let path = standard_pending_turn_path(world_dir);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    read_json(&path).map(Some)
+}
+
+fn remove_matching_pending_file(world_dir: &Path, envelope: &TurnCommitEnvelope) -> Result<bool> {
+    let pending_path = pending_ref_path(world_dir, envelope.pending_ref.as_str());
+    if !pending_path.is_file() {
+        return Ok(false);
+    }
+    let pending: PendingAgentTurn = read_json(&pending_path)?;
+    if pending.world_id != envelope.world_id || pending.turn_id != envelope.turn_id {
+        bail!(
+            "turn commit journal recovery refused to remove nonmatching pending file: path={}, expected={}/{}, actual={}/{}",
+            pending_path.display(),
+            envelope.world_id,
+            envelope.turn_id,
+            pending.world_id,
+            pending.turn_id
+        );
+    }
+    fs::remove_file(&pending_path)
+        .with_context(|| format!("failed to remove {}", pending_path.display()))?;
+    Ok(true)
+}
+
+fn recovery_action(turn_id: &str, action: &str, detail: String) -> TurnCommitJournalRecoveryAction {
+    TurnCommitJournalRecoveryAction {
+        schema_version: TURN_COMMIT_JOURNAL_RECOVERY_ACTION_SCHEMA_VERSION.to_owned(),
+        turn_id: turn_id.to_owned(),
+        action: action.to_owned(),
+        detail,
+    }
+}
+
+fn empty_materialization_repair_report(world_id: &str) -> TurnMaterializationRepairReport {
+    TurnMaterializationRepairReport {
+        schema_version: "singulari.turn_materialization_repair.v1".to_owned(),
+        world_id: world_id.to_owned(),
+        committed_envelopes: 0,
+        render_packets_repaired: 0,
+        commit_records_repaired: 0,
+        repaired_at: chrono::Utc::now().to_rfc3339(),
+    }
+}
+
 fn required_envelope_path(envelope: &TurnCommitEnvelope, field: &str) -> Result<PathBuf> {
     let value = match field {
         "response_path" => envelope.response_path.as_deref(),
@@ -334,7 +628,8 @@ mod tests {
     use super::*;
     use crate::agent_bridge::{
         AGENT_TURN_RESPONSE_SCHEMA_VERSION, AgentCommitTurnOptions, AgentSubmitTurnOptions,
-        AgentTurnResponse, PendingAgentTurn, commit_agent_turn, enqueue_agent_turn,
+        AgentTurnResponse, CommittedAgentTurn, PendingAgentTurn, commit_agent_turn,
+        enqueue_agent_turn,
     };
     use crate::models::{GUIDE_CHOICE_TAG, TurnChoice};
     use crate::prompt_context::{CompilePromptContextPacketOptions, compile_prompt_context_packet};
@@ -343,7 +638,7 @@ mod tests {
         PressureNoopReason, RESOLUTION_PROPOSAL_SCHEMA_VERSION, ResolutionOutcome,
         ResolutionOutcomeKind, ResolutionProposal,
     };
-    use crate::store::{InitWorldOptions, init_world};
+    use crate::store::{InitWorldOptions, init_world, write_json};
     use tempfile::tempdir;
 
     #[test]
@@ -423,6 +718,168 @@ premise:
         assert_eq!(report.commit_records_repaired, 1);
         assert!(Path::new(committed.commit_record_path.as_str()).is_file());
         Ok(())
+    }
+
+    #[test]
+    fn recover_turn_commit_journal_appends_missing_committed_envelope() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let (pending, committed) = commit_fixture_turn(store.as_path(), "stw_turn_recovery")?;
+        let pending_path = PathBuf::from(pending.pending_ref.as_str());
+        let world_dir = pending_path
+            .parent()
+            .context("pending path missing agent bridge dir")?
+            .parent()
+            .context("pending path missing world dir")?
+            .to_path_buf();
+        let ledger_path = world_dir.join(TURN_COMMITS_FILENAME);
+        let envelopes = read_turn_commit_envelopes(&ledger_path)?;
+        let prepared = envelopes
+            .iter()
+            .find(|envelope| envelope.status == TurnCommitStatus::Prepared)
+            .context("prepared envelope missing")?;
+        std::fs::write(
+            &ledger_path,
+            format!("{}\n", serde_json::to_string(prepared)?),
+        )?;
+        write_json(&pending_path, &pending)?;
+
+        let report = recover_turn_commit_journal(Some(store.as_path()), "stw_turn_recovery")?;
+
+        assert_eq!(report.committed_envelopes_appended, 1);
+        assert_eq!(report.stale_pending_files_removed, 1);
+        assert!(!pending_path.exists());
+        assert_eq!(report.materialization_repair.committed_envelopes, 1);
+        let recovered = read_turn_commit_envelopes(&ledger_path)?;
+        assert_eq!(recovered.len(), 2);
+        assert!(
+            recovered
+                .iter()
+                .any(|envelope| envelope.status == TurnCommitStatus::Committed
+                    && envelope.commit_record_path.as_deref()
+                        == Some(committed.commit_record_path.as_str()))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn recover_turn_commit_journal_reports_unrecoverable_prepared_turn() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(
+            &seed_path,
+            r#"
+schema_version: singulari.world_seed.v1
+world_id: stw_turn_recovery_blocked
+title: "turn recovery blocked"
+premise:
+  genre: "중세 판타지"
+  protagonist: "국경 순찰자"
+"#,
+        )?;
+        init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+        let pending = enqueue_agent_turn(&AgentSubmitTurnOptions {
+            store_root: Some(store.clone()),
+            world_id: "stw_turn_recovery_blocked".to_owned(),
+            input: "1".to_owned(),
+            narrative_level: None,
+        })?;
+        let world_dir = PathBuf::from(pending.pending_ref.as_str())
+            .parent()
+            .context("pending path missing agent bridge dir")?
+            .parent()
+            .context("pending path missing world dir")?
+            .to_path_buf();
+        append_turn_commit_envelope(
+            &world_dir,
+            &TurnCommitEnvelope::prepared(&pending, "turn_0000", "2026-04-30T00:00:00Z".to_owned()),
+        )?;
+
+        let report =
+            recover_turn_commit_journal(Some(store.as_path()), "stw_turn_recovery_blocked")?;
+
+        assert_eq!(report.committed_envelopes_appended, 0);
+        assert!(report.actions.iter().any(|action| {
+            action.action == "no_recovery_action"
+                && action.detail.contains("no durable commit record found")
+        }));
+        Ok(())
+    }
+
+    fn commit_fixture_turn(
+        store: &Path,
+        world_id: &str,
+    ) -> anyhow::Result<(PendingAgentTurn, CommittedAgentTurn)> {
+        let seed_path = store
+            .parent()
+            .context("store path missing parent")?
+            .join(format!("{world_id}.yaml"));
+        std::fs::write(
+            &seed_path,
+            format!(
+                r#"
+schema_version: singulari.world_seed.v1
+world_id: {world_id}
+title: "turn recovery"
+premise:
+  genre: "중세 판타지"
+  protagonist: "국경 순찰자"
+"#
+            ),
+        )?;
+        init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.to_path_buf()),
+            session_id: None,
+        })?;
+        let pending = enqueue_agent_turn(&AgentSubmitTurnOptions {
+            store_root: Some(store.to_path_buf()),
+            world_id: world_id.to_owned(),
+            input: "1".to_owned(),
+            narrative_level: None,
+        })?;
+        let committed = commit_agent_turn(&AgentCommitTurnOptions {
+            store_root: Some(store.to_path_buf()),
+            world_id: world_id.to_owned(),
+            response: AgentTurnResponse {
+                schema_version: AGENT_TURN_RESPONSE_SCHEMA_VERSION.to_owned(),
+                world_id: pending.world_id.clone(),
+                turn_id: pending.turn_id.clone(),
+                resolution_proposal: Some(valid_resolution_proposal_for_pending(store, &pending)?),
+                scene_director_proposal: None,
+                consequence_proposal: None,
+                social_exchange_proposal: None,
+                encounter_proposal: None,
+                visible_scene: NarrativeScene {
+                    schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
+                    speaker: None,
+                    text_blocks: vec!["복구 가능한 서사 장면".to_owned()],
+                    tone_notes: Vec::new(),
+                },
+                adjudication: None,
+                canon_event: None,
+                entity_updates: Vec::new(),
+                relationship_updates: Vec::new(),
+                plot_thread_events: Vec::new(),
+                scene_pressure_events: Vec::new(),
+                world_lore_updates: Vec::new(),
+                character_text_design_updates: Vec::new(),
+                body_resource_events: Vec::new(),
+                location_events: Vec::new(),
+                extra_contacts: Vec::new(),
+                hidden_state_delta: Vec::new(),
+                needs_context: Vec::new(),
+                next_choices: scene_specific_choices(),
+                actor_goal_events: Vec::new(),
+                actor_move_events: Vec::new(),
+            },
+        })?;
+        Ok((pending, committed))
     }
 
     fn scene_specific_choices() -> Vec<TurnChoice> {

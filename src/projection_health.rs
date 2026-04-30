@@ -1,3 +1,4 @@
+use crate::event_ledger::{WorldEventLedgerChainStatus, verify_world_event_ledger};
 use crate::extra_memory::{
     failed_projection_records_after_latest_repair, load_extra_memory_projection_records,
     load_remembered_extras,
@@ -85,6 +86,12 @@ pub fn build_projection_health_report(
             &files.entities,
             &files.canon_events,
         ],
+    ));
+    components.push(event_ledger_replay_health(
+        world_id,
+        &files.canon_events,
+        &canon_events,
+        snapshot.value.as_ref(),
     ));
     components.push(world_db_health(world_id, &world_dir, &canon_events));
     components.push(turn_commit_health(
@@ -210,6 +217,49 @@ fn world_db_health(
     }
 }
 
+fn event_ledger_replay_health(
+    world_id: &str,
+    canon_events_path: &Path,
+    canon_events: &ComponentRead<Vec<CanonEvent>>,
+    latest_snapshot: Option<&TurnSnapshot>,
+) -> ProjectionComponentHealth {
+    let report = match verify_world_event_ledger(canon_events_path, world_id) {
+        Ok(report) => report,
+        Err(error) => return failed_component("event_ledger_replay", format!("{error:#}")),
+    };
+    let mut warnings = Vec::new();
+    let mut errors = Vec::new();
+    match report.chain_status {
+        WorldEventLedgerChainStatus::FullyChained => {}
+        WorldEventLedgerChainStatus::LegacyUnchained => {
+            warnings.push("event ledger is legacy unchained; replay is accepted but tamper evidence is unavailable".to_owned());
+        }
+        WorldEventLedgerChainStatus::PartiallyChained => {
+            warnings.push("event ledger is partially chained; replay is accepted but older events lack tamper evidence".to_owned());
+        }
+    }
+    if let (Some(snapshot), Some(events)) = (latest_snapshot, canon_events.value.as_ref())
+        && snapshot.turn_id != "turn_0000"
+        && !events.iter().any(|event| event.turn_id == snapshot.turn_id)
+    {
+        errors.push(format!(
+            "event ledger cannot replay latest snapshot turn: latest_snapshot={}, canon_events missing matching turn_id",
+            snapshot.turn_id
+        ));
+    }
+    component_from_errors(
+        "event_ledger_replay",
+        format!(
+            "canon_events={}, chain_status={:?}, last_event_hash={}",
+            report.event_count,
+            report.chain_status,
+            report.last_event_hash.as_deref().unwrap_or("<none>")
+        ),
+        warnings,
+        errors,
+    )
+}
+
 fn turn_commit_health(
     world_id: &str,
     world_dir: &Path,
@@ -267,12 +317,16 @@ fn turn_commit_health(
             TurnCommitStatus::Committed => {
                 errors.extend(missing_committed_materialization_errors(envelope));
             }
-            TurnCommitStatus::Failed => errors.push(format!(
-                "failed turn commit recorded: turn={}, stage={}, error={}",
-                envelope.turn_id,
-                envelope.failed_stage.as_deref().unwrap_or("<unknown>"),
-                envelope.error.as_deref().unwrap_or("<missing>")
-            )),
+            TurnCommitStatus::Failed => {
+                if !turn_has_committed_envelope(&envelopes, envelope.turn_id.as_str()) {
+                    errors.push(format!(
+                        "failed turn commit recorded: turn={}, stage={}, error={}",
+                        envelope.turn_id,
+                        envelope.failed_stage.as_deref().unwrap_or("<unknown>"),
+                        envelope.error.as_deref().unwrap_or("<missing>")
+                    ));
+                }
+            }
             TurnCommitStatus::Prepared => {}
         }
     }
@@ -328,6 +382,12 @@ fn missing_committed_materialization_errors(envelope: &TurnCommitEnvelope) -> Ve
         ));
     }
     errors
+}
+
+fn turn_has_committed_envelope(envelopes: &[TurnCommitEnvelope], turn_id: &str) -> bool {
+    envelopes.iter().any(|envelope| {
+        envelope.turn_id == turn_id && envelope.status == TurnCommitStatus::Committed
+    })
 }
 
 fn extra_memory_health(world_id: &str, world_dir: &Path) -> ProjectionComponentHealth {
@@ -509,7 +569,7 @@ mod tests {
     use crate::projection_health::{
         ProjectionHealthStatus, build_projection_health_report, render_projection_health_report,
     };
-    use crate::store::{InitWorldOptions, append_jsonl, init_world};
+    use crate::store::{InitWorldOptions, append_jsonl, init_world, read_json, write_json};
     use crate::turn_commit::{
         TURN_COMMIT_ENVELOPE_SCHEMA_VERSION, TurnCommitEnvelope, TurnCommitStatus,
     };
@@ -542,6 +602,39 @@ premise:
 
         assert_eq!(report.status, ProjectionHealthStatus::Healthy);
         assert!(render_projection_health_report(&report).contains("world_db: healthy"));
+        assert!(render_projection_health_report(&report).contains("event_ledger_replay: healthy"));
+        Ok(())
+    }
+
+    #[test]
+    fn projection_health_fails_snapshot_without_replayable_event() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(&seed_path, seed_body())?;
+        let initialized = init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+        let mut snapshot: crate::models::TurnSnapshot = read_json(&initialized.snapshot_path)?;
+        snapshot.turn_id = "turn_9999".to_owned();
+        write_json(
+            &initialized.world_dir.join("latest_snapshot.json"),
+            &snapshot,
+        )?;
+
+        let report = build_projection_health_report(Some(&store), "stw_projection_health")?;
+
+        assert_eq!(report.status, ProjectionHealthStatus::Failed);
+        assert!(report.components.iter().any(|component| {
+            component.component == "event_ledger_replay"
+                && component.status == ProjectionHealthStatus::Failed
+                && component
+                    .errors
+                    .iter()
+                    .any(|error| error.contains("cannot replay latest snapshot turn"))
+        }));
         Ok(())
     }
 
@@ -662,6 +755,78 @@ premise:
                         && error.contains("agent_commit_after_prepare")
                 })
         }));
+        Ok(())
+    }
+
+    #[test]
+    fn projection_health_ignores_failed_commit_after_committed_recovery() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(&seed_path, seed_body())?;
+        let initialized = init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+        let response_path = initialized.world_dir.join("agent-response.json");
+        let render_packet_path = initialized.world_dir.join("render-packet.json");
+        let commit_record_path = initialized.world_dir.join("commit-record.json");
+        std::fs::write(&response_path, "{}\n")?;
+        std::fs::write(&render_packet_path, "{}\n")?;
+        std::fs::write(&commit_record_path, "{}\n")?;
+        append_jsonl(
+            &initialized.world_dir.join("turn_commits.jsonl"),
+            &TurnCommitEnvelope {
+                schema_version: TURN_COMMIT_ENVELOPE_SCHEMA_VERSION.to_owned(),
+                world_id: "stw_projection_health".to_owned(),
+                turn_id: "turn_0001".to_owned(),
+                parent_turn_id: "turn_0000".to_owned(),
+                player_input: "1".to_owned(),
+                status: TurnCommitStatus::Failed,
+                pending_ref: "agent_bridge/pending_turn.json".to_owned(),
+                response_path: None,
+                render_packet_path: None,
+                commit_record_path: None,
+                world_court_verdict_path: None,
+                failed_stage: Some("agent_commit_after_prepare".to_owned()),
+                error: Some("simulated materialization failure".to_owned()),
+                created_at: "2026-04-29T00:00:00Z".to_owned(),
+            },
+        )?;
+        append_jsonl(
+            &initialized.world_dir.join("turn_commits.jsonl"),
+            &TurnCommitEnvelope {
+                schema_version: TURN_COMMIT_ENVELOPE_SCHEMA_VERSION.to_owned(),
+                world_id: "stw_projection_health".to_owned(),
+                turn_id: "turn_0001".to_owned(),
+                parent_turn_id: "turn_0000".to_owned(),
+                player_input: "1".to_owned(),
+                status: TurnCommitStatus::Committed,
+                pending_ref: "agent_bridge/pending_turn.json".to_owned(),
+                response_path: Some(response_path.display().to_string()),
+                render_packet_path: Some(render_packet_path.display().to_string()),
+                commit_record_path: Some(commit_record_path.display().to_string()),
+                world_court_verdict_path: None,
+                failed_stage: None,
+                error: None,
+                created_at: "2026-04-29T00:00:01Z".to_owned(),
+            },
+        )?;
+
+        let report = build_projection_health_report(Some(&store), "stw_projection_health")?;
+
+        let Some(turn_commit) = report
+            .components
+            .iter()
+            .find(|component| component.component == "turn_commit")
+        else {
+            anyhow::bail!("turn_commit health component missing");
+        };
+        assert_eq!(turn_commit.status, ProjectionHealthStatus::Healthy);
+        assert!(turn_commit.detail.contains("committed=1"));
+        assert!(turn_commit.detail.contains("failed=1"));
+        assert!(turn_commit.errors.is_empty());
         Ok(())
     }
 }

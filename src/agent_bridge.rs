@@ -2311,6 +2311,7 @@ premise:
                 effect_kind: ProposedEffectKind::BodyResourceDelta,
                 target_ref: "resource:missing_map".to_owned(),
                 visibility: ResolutionVisibility::PlayerVisible,
+                knowledge_tier: None,
                 summary: "없는 지도를 사용한다.".to_owned(),
                 evidence_refs: vec!["current_turn".to_owned()],
             }],

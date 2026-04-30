@@ -178,7 +178,7 @@ pub(crate) fn init_world_from_seed(
     )?;
     write_json(&world_dir.join(ENTITIES_FILENAME), &entities)?;
     initialize_blueprint_projection_files(&world_dir, &world, &entities)?;
-    append_canon_event(&world_dir.join(CANON_EVENTS_FILENAME), &initial_event)?;
+    let initial_event = append_canon_event(&world_dir.join(CANON_EVENTS_FILENAME), &initial_event)?;
     fs::write(world_dir.join(ENTITY_UPDATES_FILENAME), "").with_context(|| {
         format!(
             "failed to write {}",
@@ -726,8 +726,12 @@ fn write_and_sync(file: &mut fs::File, body: &[u8]) -> std::io::Result<()> {
     file.sync_all()
 }
 
-pub(crate) fn append_canon_event(path: &Path, event: &CanonEvent) -> Result<()> {
-    crate::event_ledger::append_world_event(path, event).map(|_| ())
+pub(crate) fn append_canon_event(path: &Path, event: &CanonEvent) -> Result<CanonEvent> {
+    let report = crate::event_ledger::append_world_event(path, event)?;
+    let mut appended = event.clone();
+    appended.previous_event_hash = report.previous_event_hash;
+    appended.event_hash = Some(report.event_hash);
+    Ok(appended)
 }
 
 fn load_world_seed(path: &Path) -> Result<WorldSeed> {

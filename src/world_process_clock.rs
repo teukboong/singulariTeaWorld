@@ -3,8 +3,9 @@
 use crate::agent_bridge::AgentPrivateAdjudicationContext;
 use crate::consequence_spine::{
     ActiveConsequence, ConsequenceKind, ConsequenceSeverity, ConsequenceSpinePacket,
+    consequence_can_drive_world_process,
 };
-use crate::resolution::{ResolutionProposal, ResolutionVisibility};
+use crate::resolution::{ProcessTickCause, ResolutionProposal, ResolutionVisibility};
 use crate::scene_pressure::{
     ScenePressure, ScenePressureEventPlan, ScenePressureKind, ScenePressurePacket,
     ScenePressureUrgency,
@@ -58,6 +59,8 @@ pub struct WorldProcess {
     pub summary: String,
     pub next_tick_contract: String,
     #[serde(default)]
+    pub tick_policy: WorldProcessTickPolicy,
+    #[serde(default)]
     pub source_refs: Vec<String>,
 }
 
@@ -75,6 +78,37 @@ pub enum WorldProcessTempo {
     Soon,
     Immediate,
     Crisis,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorldProcessTickPolicy {
+    #[serde(default)]
+    pub ticks_when: Vec<WorldProcessTickTrigger>,
+    pub minimum_turn_gap: u32,
+    pub max_ticks_per_scene: u32,
+    pub consumes_world_time: bool,
+}
+
+impl Default for WorldProcessTickPolicy {
+    fn default() -> Self {
+        Self {
+            ticks_when: vec![WorldProcessTickTrigger::SceneTimePasses],
+            minimum_turn_gap: 1,
+            max_ticks_per_scene: 1,
+            consumes_world_time: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorldProcessTickTrigger {
+    PlayerWaits,
+    PlayerLeavesLocation,
+    PlayerActionTouchesProcess,
+    PlayerFailsSocialGate,
+    SceneTimePasses,
+    ExplicitResolutionEffect,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -103,6 +137,8 @@ pub struct WorldProcessEventRecord {
     pub tempo: WorldProcessTempo,
     pub summary: String,
     pub next_tick_contract: String,
+    #[serde(default)]
+    pub tick_policy: WorldProcessTickPolicy,
     #[serde(default)]
     pub source_refs: Vec<String>,
     pub recorded_at: String,
@@ -143,6 +179,7 @@ pub fn prepare_world_process_event_plan(
             summary: event.summary.clone(),
             next_tick_contract:
                 "Process should tick only when player action, time passage, or pressure evidence touches it.".to_owned(),
+            tick_policy: tick_policy_for_pressure_tempo(tempo_from_urgency(event.urgency_after)),
             source_refs: event.evidence_refs.clone(),
             recorded_at: recorded_at.clone(),
         })
@@ -165,6 +202,10 @@ pub fn prepare_world_process_event_plan(
                 summary: tick.summary.clone(),
                 next_tick_contract:
                     "Process tick was proposed by audited resolution and should continue only from new evidence.".to_owned(),
+                tick_policy: tick_policy_for_resolution_cause(
+                    tick.cause,
+                    process_tempo_for_ref(clock, tick.process_ref.as_str()),
+                ),
                 source_refs: tick.evidence_refs.clone(),
                 recorded_at: recorded_at.clone(),
             }
@@ -273,19 +314,20 @@ pub fn merge_consequence_world_processes(
 }
 
 fn consequence_should_drive_process(consequence: &ActiveConsequence) -> bool {
-    matches!(
-        consequence.kind,
-        ConsequenceKind::AlarmRaised
-            | ConsequenceKind::LocationAccessChanged
-            | ConsequenceKind::ProcessAccelerated
-            | ConsequenceKind::ProcessDelayed
-            | ConsequenceKind::OpportunityOpened
-            | ConsequenceKind::OpportunityLost
-            | ConsequenceKind::MoralDebt
-    ) || matches!(
-        consequence.severity,
-        ConsequenceSeverity::Major | ConsequenceSeverity::Critical
-    )
+    consequence_can_drive_world_process(consequence)
+        && (matches!(
+            consequence.kind,
+            ConsequenceKind::AlarmRaised
+                | ConsequenceKind::LocationAccessChanged
+                | ConsequenceKind::ProcessAccelerated
+                | ConsequenceKind::ProcessDelayed
+                | ConsequenceKind::OpportunityOpened
+                | ConsequenceKind::OpportunityLost
+                | ConsequenceKind::MoralDebt
+        ) || matches!(
+            consequence.severity,
+            ConsequenceSeverity::Major | ConsequenceSeverity::Critical
+        ))
 }
 
 fn process_from_consequence(consequence: &ActiveConsequence) -> WorldProcess {
@@ -298,6 +340,7 @@ fn process_from_consequence(consequence: &ActiveConsequence) -> WorldProcess {
         next_tick_contract:
             "Consequence process should tick only when new player action, time passage, or pressure evidence touches it."
                 .to_owned(),
+        tick_policy: tick_policy_for_consequence_severity(consequence.severity),
         source_refs: vec![consequence.consequence_id.clone()],
     }
 }
@@ -332,6 +375,7 @@ fn world_process_from_event(record: WorldProcessEventRecord) -> WorldProcess {
         tempo: record.tempo,
         summary: record.summary,
         next_tick_contract: record.next_tick_contract,
+        tick_policy: record.tick_policy,
         source_refs: record.source_refs,
     }
 }
@@ -367,6 +411,15 @@ pub fn compile_world_process_clock_packet(
                 next_tick_contract:
                     "남은 턴을 줄이고 reveal_conditions가 충족될 때만 visible 사실로 승격한다."
                         .to_owned(),
+                tick_policy: WorldProcessTickPolicy {
+                    ticks_when: vec![
+                        WorldProcessTickTrigger::PlayerWaits,
+                        WorldProcessTickTrigger::SceneTimePasses,
+                    ],
+                    minimum_turn_gap: 1,
+                    max_ticks_per_scene: 1,
+                    consumes_world_time: true,
+                },
                 source_refs: vec![timer.timer_id.clone()],
             })
             .collect(),
@@ -398,6 +451,7 @@ fn process_from_pressure(index: usize, pressure: &ScenePressure) -> WorldProcess
             "{} pressure must either intensify, soften, redirect, or resolve according to the next player action.",
             pressure.pressure_id
         ),
+        tick_policy: tick_policy_for_pressure_tempo(tempo_from_urgency(pressure.urgency)),
         source_refs: vec![pressure.pressure_id.clone()],
     }
 }
@@ -418,6 +472,71 @@ fn tempo_from_remaining_turns(remaining_turns: u32) -> WorldProcessTempo {
         3..=4 => WorldProcessTempo::Soon,
         _ => WorldProcessTempo::Ambient,
     }
+}
+
+fn tick_policy_for_pressure_tempo(tempo: WorldProcessTempo) -> WorldProcessTickPolicy {
+    let ticks_when = match tempo {
+        WorldProcessTempo::Ambient => vec![WorldProcessTickTrigger::SceneTimePasses],
+        WorldProcessTempo::Soon => vec![
+            WorldProcessTickTrigger::PlayerLeavesLocation,
+            WorldProcessTickTrigger::SceneTimePasses,
+        ],
+        WorldProcessTempo::Immediate => vec![
+            WorldProcessTickTrigger::PlayerActionTouchesProcess,
+            WorldProcessTickTrigger::SceneTimePasses,
+        ],
+        WorldProcessTempo::Crisis => vec![
+            WorldProcessTickTrigger::PlayerActionTouchesProcess,
+            WorldProcessTickTrigger::PlayerWaits,
+            WorldProcessTickTrigger::SceneTimePasses,
+        ],
+    };
+    WorldProcessTickPolicy {
+        ticks_when,
+        minimum_turn_gap: 1,
+        max_ticks_per_scene: match tempo {
+            WorldProcessTempo::Ambient | WorldProcessTempo::Soon => 1,
+            WorldProcessTempo::Immediate | WorldProcessTempo::Crisis => 2,
+        },
+        consumes_world_time: true,
+    }
+}
+
+fn tick_policy_for_resolution_cause(
+    cause: ProcessTickCause,
+    tempo: WorldProcessTempo,
+) -> WorldProcessTickPolicy {
+    let trigger = match cause {
+        ProcessTickCause::PlayerActionTouchedProcess => {
+            WorldProcessTickTrigger::PlayerActionTouchesProcess
+        }
+        ProcessTickCause::VisibleTimePassage | ProcessTickCause::NextTickConditionMet => {
+            WorldProcessTickTrigger::SceneTimePasses
+        }
+        ProcessTickCause::ScenePressureChanged => WorldProcessTickTrigger::ExplicitResolutionEffect,
+        ProcessTickCause::HiddenRevealConditionSatisfied => {
+            WorldProcessTickTrigger::ExplicitResolutionEffect
+        }
+    };
+    let mut policy = tick_policy_for_pressure_tempo(tempo);
+    if !policy.ticks_when.contains(&trigger) {
+        policy.ticks_when.push(trigger);
+    }
+    policy
+}
+
+fn tick_policy_for_consequence_severity(severity: ConsequenceSeverity) -> WorldProcessTickPolicy {
+    let tempo = tempo_from_consequence_severity(severity);
+    let mut policy = tick_policy_for_pressure_tempo(tempo);
+    if !policy
+        .ticks_when
+        .contains(&WorldProcessTickTrigger::ExplicitResolutionEffect)
+    {
+        policy
+            .ticks_when
+            .push(WorldProcessTickTrigger::ExplicitResolutionEffect);
+    }
+    policy
 }
 
 #[cfg(test)]
@@ -485,6 +604,18 @@ mod tests {
             packet.adjudication_only_processes[0].visibility,
             WorldProcessVisibility::AdjudicationOnly
         );
+        assert!(
+            packet.visible_processes[0]
+                .tick_policy
+                .ticks_when
+                .contains(&WorldProcessTickTrigger::PlayerActionTouchesProcess)
+        );
+        assert!(
+            packet.adjudication_only_processes[0]
+                .tick_policy
+                .ticks_when
+                .contains(&WorldProcessTickTrigger::PlayerWaits)
+        );
     }
 
     #[test]
@@ -500,6 +631,7 @@ mod tests {
                 tempo: WorldProcessTempo::Immediate,
                 summary: "문이 닫히고 있다.".to_owned(),
                 next_tick_contract: "시간이 지나면 닫힌다.".to_owned(),
+                tick_policy: WorldProcessTickPolicy::default(),
                 source_refs: vec!["pressure:time:door".to_owned()],
             }],
             adjudication_only_processes: Vec::new(),
@@ -552,6 +684,12 @@ mod tests {
         assert_eq!(plan.records.len(), 1);
         assert_eq!(plan.records[0].process_id, "process:visible_pressure:00");
         assert_eq!(plan.records[0].tempo, WorldProcessTempo::Immediate);
+        assert!(
+            plan.records[0]
+                .tick_policy
+                .ticks_when
+                .contains(&WorldProcessTickTrigger::PlayerActionTouchesProcess)
+        );
     }
 
     #[test]
@@ -580,6 +718,14 @@ mod tests {
                     linked_projection_refs: Vec::new(),
                     expected_return: crate::consequence_spine::ConsequenceReturnWindow::NextTurn,
                     decay: crate::consequence_spine::ConsequenceDecay::default(),
+                    return_rights: crate::consequence_spine::ConsequenceReturnRights {
+                        triggers: vec![
+                            crate::consequence_spine::ConsequenceReturnTrigger::ImmediateNextTurn,
+                            crate::consequence_spine::ConsequenceReturnTrigger::ProcessTicked,
+                        ],
+                        remaining_returns: 2,
+                        ..crate::consequence_spine::ConsequenceReturnRights::default()
+                    },
                 }],
                 ..ConsequenceSpinePacket::default()
             },
@@ -587,6 +733,12 @@ mod tests {
 
         assert_eq!(packet.visible_processes.len(), 1);
         assert_eq!(packet.visible_processes[0].tempo, WorldProcessTempo::Crisis);
+        assert!(
+            packet.visible_processes[0]
+                .tick_policy
+                .ticks_when
+                .contains(&WorldProcessTickTrigger::ExplicitResolutionEffect)
+        );
         assert!(
             packet.visible_processes[0]
                 .process_id

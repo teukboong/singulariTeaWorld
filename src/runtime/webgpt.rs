@@ -2939,28 +2939,18 @@ premise:
         display_allowed: bool,
         reference_allowed: bool,
     ) -> ImageGenerationJob {
-        ImageGenerationJob {
-            tool: "worldsim.image.generate".to_owned(),
-            image_generation_call: singulari_world::HostImageGenerationCall {
-                capability: "image_generation".to_owned(),
-                slot: slot.to_owned(),
-                prompt: "prompt".to_owned(),
-                destination_path: format!("assets/{slot}.png"),
-                reference_paths: Vec::new(),
-                overwrite: false,
-            },
-            slot: slot.to_owned(),
+        let mut job = singulari_world::visual_generation_job(
+            slot.to_owned(),
             artifact_kind,
-            canonical_use: artifact_kind.canonical_use().to_owned(),
-            display_allowed,
-            reference_allowed,
-            prompt: "prompt".to_owned(),
-            destination_path: format!("assets/{slot}.png"),
-            reference_asset_urls: Vec::new(),
-            reference_paths: Vec::new(),
-            overwrite: false,
-            register_policy: "test".to_owned(),
-        }
+            "prompt".to_owned(),
+            format!("assets/{slot}.png"),
+            Vec::new(),
+            Vec::new(),
+            "test",
+        );
+        job.display_allowed = display_allowed;
+        job.reference_allowed = reference_allowed;
+        job
     }
 
     #[test]
@@ -3032,28 +3022,16 @@ premise:
 
     #[test]
     fn webgpt_turn_cg_prompt_reuses_turn_cg_session_url() {
-        let job = ImageGenerationJob {
-            tool: singulari_world::IMAGE_GENERATION_TOOL.to_owned(),
-            image_generation_call: singulari_world::HostImageGenerationCall {
-                capability: "image_generation".to_owned(),
-                slot: "turn_cg:turn_0002".to_owned(),
-                prompt: "draw the scene".to_owned(),
-                destination_path: "/tmp/turn_0002.png".to_owned(),
-                reference_paths: vec!["/tmp/char.png".to_owned()],
-                overwrite: false,
-            },
-            slot: "turn_cg:turn_0002".to_owned(),
-            artifact_kind: VisualArtifactKind::SceneCg,
-            canonical_use: "display_scene".to_owned(),
-            display_allowed: true,
-            reference_allowed: false,
-            prompt: "draw the scene".to_owned(),
-            destination_path: "/tmp/turn_0002.png".to_owned(),
-            reference_asset_urls: Vec::new(),
-            reference_paths: vec!["/tmp/char.png".to_owned()],
-            overwrite: false,
-            register_policy: "test".to_owned(),
-        };
+        let mut job = singulari_world::visual_generation_job(
+            "turn_cg:turn_0002".to_owned(),
+            VisualArtifactKind::SceneCg,
+            "draw the scene".to_owned(),
+            "/tmp/turn_0002.png".to_owned(),
+            Vec::new(),
+            vec!["/tmp/char.png".to_owned()],
+            "test",
+        );
+        job.image_generation_call.reference_paths = job.reference_paths.clone();
         let prompt = build_webgpt_image_generation_prompt(
             "stw_visual",
             &job,
@@ -3067,32 +3045,21 @@ premise:
         assert!(prompt.contains("never render a character design sheet"));
         assert!(prompt.contains("Image job slot: turn_cg:turn_0002"));
         assert!(prompt.contains("Reference continuity notes: /tmp/char.png"));
+        assert!(prompt.contains("Visual canon policy JSON:"));
+        assert!(prompt.contains("Generated pixels are not world truth"));
     }
 
     #[test]
     fn webgpt_reference_asset_prompt_is_not_a_scene_cg_prompt() {
-        let job = ImageGenerationJob {
-            tool: singulari_world::IMAGE_GENERATION_TOOL.to_owned(),
-            image_generation_call: singulari_world::HostImageGenerationCall {
-                capability: "image_generation".to_owned(),
-                slot: "character_sheet:char:protagonist".to_owned(),
-                prompt: "draw the character sheet".to_owned(),
-                destination_path: "/tmp/char_protagonist.png".to_owned(),
-                reference_paths: Vec::new(),
-                overwrite: false,
-            },
-            slot: "character_sheet:char:protagonist".to_owned(),
-            artifact_kind: VisualArtifactKind::CharacterDesignSheet,
-            canonical_use: "reference_generation".to_owned(),
-            display_allowed: false,
-            reference_allowed: true,
-            prompt: "draw the character sheet".to_owned(),
-            destination_path: "/tmp/char_protagonist.png".to_owned(),
-            reference_asset_urls: Vec::new(),
-            reference_paths: Vec::new(),
-            overwrite: false,
-            register_policy: "test".to_owned(),
-        };
+        let job = singulari_world::visual_generation_job(
+            "character_sheet:char:protagonist".to_owned(),
+            VisualArtifactKind::CharacterDesignSheet,
+            "draw the character sheet".to_owned(),
+            "/tmp/char_protagonist.png".to_owned(),
+            Vec::new(),
+            Vec::new(),
+            "test",
+        );
         let prompt = build_webgpt_image_generation_prompt(
             "stw_visual",
             &job,
@@ -3113,28 +3080,16 @@ premise:
         let temp = tempfile::tempdir()?;
         let reference = temp.path().join("char.png");
         std::fs::write(&reference, b"png fixture")?;
-        let job = ImageGenerationJob {
-            tool: singulari_world::IMAGE_GENERATION_TOOL.to_owned(),
-            image_generation_call: singulari_world::HostImageGenerationCall {
-                capability: "image_generation".to_owned(),
-                slot: "turn_cg:turn_0002".to_owned(),
-                prompt: "draw the scene".to_owned(),
-                destination_path: "/tmp/turn_0002.png".to_owned(),
-                reference_paths: vec![reference.display().to_string()],
-                overwrite: false,
-            },
-            slot: "turn_cg:turn_0002".to_owned(),
-            artifact_kind: VisualArtifactKind::SceneCg,
-            canonical_use: "display_scene".to_owned(),
-            display_allowed: true,
-            reference_allowed: false,
-            prompt: "draw the scene".to_owned(),
-            destination_path: "/tmp/turn_0002.png".to_owned(),
-            reference_asset_urls: Vec::new(),
-            reference_paths: vec![reference.display().to_string()],
-            overwrite: false,
-            register_policy: "test".to_owned(),
-        };
+        let mut job = singulari_world::visual_generation_job(
+            "turn_cg:turn_0002".to_owned(),
+            VisualArtifactKind::SceneCg,
+            "draw the scene".to_owned(),
+            "/tmp/turn_0002.png".to_owned(),
+            Vec::new(),
+            vec![reference.display().to_string()],
+            "test",
+        );
+        job.image_generation_call.reference_paths = job.reference_paths.clone();
 
         assert_eq!(
             webgpt_image_reference_paths(&job)?,
@@ -3145,28 +3100,16 @@ premise:
 
     #[test]
     fn webgpt_image_reference_paths_fail_loud_when_asset_is_missing() -> anyhow::Result<()> {
-        let job = ImageGenerationJob {
-            tool: singulari_world::IMAGE_GENERATION_TOOL.to_owned(),
-            image_generation_call: singulari_world::HostImageGenerationCall {
-                capability: "image_generation".to_owned(),
-                slot: "turn_cg:turn_0002".to_owned(),
-                prompt: "draw the scene".to_owned(),
-                destination_path: "/tmp/turn_0002.png".to_owned(),
-                reference_paths: vec!["/tmp/singulari-missing-reference.png".to_owned()],
-                overwrite: false,
-            },
-            slot: "turn_cg:turn_0002".to_owned(),
-            artifact_kind: VisualArtifactKind::SceneCg,
-            canonical_use: "display_scene".to_owned(),
-            display_allowed: true,
-            reference_allowed: false,
-            prompt: "draw the scene".to_owned(),
-            destination_path: "/tmp/turn_0002.png".to_owned(),
-            reference_asset_urls: Vec::new(),
-            reference_paths: vec!["/tmp/singulari-missing-reference.png".to_owned()],
-            overwrite: false,
-            register_policy: "test".to_owned(),
-        };
+        let mut job = singulari_world::visual_generation_job(
+            "turn_cg:turn_0002".to_owned(),
+            VisualArtifactKind::SceneCg,
+            "draw the scene".to_owned(),
+            "/tmp/turn_0002.png".to_owned(),
+            Vec::new(),
+            vec!["/tmp/singulari-missing-reference.png".to_owned()],
+            "test",
+        );
+        job.image_generation_call.reference_paths = job.reference_paths.clone();
 
         let Err(error) = webgpt_image_reference_paths(&job) else {
             anyhow::bail!("missing reference asset reached image dispatch");

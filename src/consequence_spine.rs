@@ -19,6 +19,7 @@ pub const CONSEQUENCE_SPINE_PACKET_SCHEMA_VERSION: &str = "singulari.consequence
 pub const CONSEQUENCE_SCHEMA_VERSION: &str = "singulari.consequence.v1";
 pub const CONSEQUENCE_EVENT_SCHEMA_VERSION: &str = "singulari.consequence_event.v1";
 pub const CONSEQUENCE_PROPOSAL_SCHEMA_VERSION: &str = "singulari.consequence_proposal.v1";
+pub const CONSEQUENCE_RETURN_RIGHTS_SCHEMA_VERSION: &str = "singulari.consequence_return_rights.v1";
 pub const CONSEQUENCE_EVENTS_FILENAME: &str = "consequence_events.jsonl";
 pub const ACTIVE_CONSEQUENCES_FILENAME: &str = "active_consequences.json";
 
@@ -75,6 +76,8 @@ pub struct ActiveConsequence {
     pub linked_projection_refs: Vec<String>,
     pub expected_return: ConsequenceReturnWindow,
     pub decay: ConsequenceDecay,
+    #[serde(default)]
+    pub return_rights: ConsequenceReturnRights,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -184,6 +187,48 @@ pub enum ConsequenceReturnWindow {
     Soon,
     NextTurn,
     CurrentScene,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConsequenceReturnRights {
+    pub schema_version: String,
+    #[serde(default)]
+    pub triggers: Vec<ConsequenceReturnTrigger>,
+    pub minimum_turn_gap: u8,
+    pub max_returns_per_scene: u8,
+    pub remaining_returns: u8,
+    pub repeats_without_new_evidence: bool,
+    pub render_policy: String,
+}
+
+impl Default for ConsequenceReturnRights {
+    fn default() -> Self {
+        Self {
+            schema_version: CONSEQUENCE_RETURN_RIGHTS_SCHEMA_VERSION.to_owned(),
+            triggers: vec![ConsequenceReturnTrigger::SameSurfaceTouched],
+            minimum_turn_gap: 1,
+            max_returns_per_scene: 1,
+            remaining_returns: 1,
+            repeats_without_new_evidence: false,
+            render_policy:
+                "Return only when the player touches the same surface, actor, cost, or evidence."
+                    .to_owned(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsequenceReturnTrigger {
+    ImmediateNextTurn,
+    CurrentScenePressure,
+    SameActorTouched,
+    SameLocationTouched,
+    SameSurfaceTouched,
+    SameResourceTouched,
+    ProcessTicked,
+    NewEvidenceTouched,
+    SearchOnly,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -447,6 +492,29 @@ pub fn audit_consequence_contract(
         audit_significant_resolution_has_consequence_path(proposal, resolution)?;
     }
     Ok(())
+}
+
+#[must_use]
+pub fn consequence_can_return_as_scene_pressure(consequence: &ActiveConsequence) -> bool {
+    consequence.status != ConsequenceStatus::Decayed
+        && consequence.status != ConsequenceStatus::PaidOff
+        && consequence.return_rights.remaining_returns > 0
+        && consequence.return_rights.triggers.iter().any(|trigger| {
+            matches!(
+                trigger,
+                ConsequenceReturnTrigger::ImmediateNextTurn
+                    | ConsequenceReturnTrigger::CurrentScenePressure
+            )
+        })
+}
+
+#[must_use]
+pub fn consequence_can_drive_world_process(consequence: &ActiveConsequence) -> bool {
+    consequence.return_rights.remaining_returns > 0
+        && consequence
+            .return_rights
+            .triggers
+            .contains(&ConsequenceReturnTrigger::ProcessTicked)
 }
 
 fn audit_significant_resolution_has_consequence_path(
@@ -1087,7 +1155,8 @@ fn active_from_record(record: ConsequenceEventRecord) -> ActiveConsequence {
         linked_entity_refs: record.linked_entity_refs,
         linked_projection_refs: record.linked_projection_refs,
         expected_return: return_window_for_severity(record.severity),
-        decay: ConsequenceDecay::default(),
+        decay: decay_for_severity(record.severity),
+        return_rights: return_rights_for(record.kind, record.scope, record.severity),
     }
 }
 
@@ -1110,6 +1179,134 @@ const fn return_window_for_severity(severity: ConsequenceSeverity) -> Consequenc
         ConsequenceSeverity::Moderate => ConsequenceReturnWindow::Soon,
         ConsequenceSeverity::Major => ConsequenceReturnWindow::CurrentScene,
         ConsequenceSeverity::Critical => ConsequenceReturnWindow::NextTurn,
+    }
+}
+
+fn decay_for_severity(severity: ConsequenceSeverity) -> ConsequenceDecay {
+    ConsequenceDecay {
+        mode: match severity {
+            ConsequenceSeverity::Trace => "archive_only",
+            ConsequenceSeverity::Minor => "softens_unless_reinforced",
+            ConsequenceSeverity::Moderate => "turns",
+            ConsequenceSeverity::Major | ConsequenceSeverity::Critical => "resolved_by_evidence",
+        }
+        .to_owned(),
+        remaining_turns: match severity {
+            ConsequenceSeverity::Trace => 0,
+            ConsequenceSeverity::Minor => 1,
+            ConsequenceSeverity::Moderate => 2,
+            ConsequenceSeverity::Major => 3,
+            ConsequenceSeverity::Critical => 4,
+        },
+        payoff_hint: match severity {
+            ConsequenceSeverity::Trace => "Archive only; do not resurface without new evidence.",
+            ConsequenceSeverity::Minor => "Return only when the same target is touched again.",
+            ConsequenceSeverity::Moderate => "Return soon, then soften unless reinforced.",
+            ConsequenceSeverity::Major => "Return within the current scene until resolved.",
+            ConsequenceSeverity::Critical => "Return immediately and may drive process ticks.",
+        }
+        .to_owned(),
+    }
+}
+
+fn return_rights_for(
+    kind: ConsequenceKind,
+    scope: ConsequenceScope,
+    severity: ConsequenceSeverity,
+) -> ConsequenceReturnRights {
+    let expected_return = return_window_for_severity(severity);
+    let mut triggers = match expected_return {
+        ConsequenceReturnWindow::SearchOnly => vec![ConsequenceReturnTrigger::SearchOnly],
+        ConsequenceReturnWindow::WhenRelevant => relevant_touch_triggers(scope),
+        ConsequenceReturnWindow::Soon => vec![
+            ConsequenceReturnTrigger::CurrentScenePressure,
+            ConsequenceReturnTrigger::NewEvidenceTouched,
+        ],
+        ConsequenceReturnWindow::NextTurn => vec![
+            ConsequenceReturnTrigger::ImmediateNextTurn,
+            ConsequenceReturnTrigger::CurrentScenePressure,
+            ConsequenceReturnTrigger::ProcessTicked,
+        ],
+        ConsequenceReturnWindow::CurrentScene => vec![
+            ConsequenceReturnTrigger::CurrentScenePressure,
+            ConsequenceReturnTrigger::SameSurfaceTouched,
+            ConsequenceReturnTrigger::NewEvidenceTouched,
+        ],
+    };
+    if process_driving_consequence(kind)
+        && !triggers.contains(&ConsequenceReturnTrigger::ProcessTicked)
+    {
+        triggers.push(ConsequenceReturnTrigger::ProcessTicked);
+    }
+    triggers.sort();
+    triggers.dedup();
+    ConsequenceReturnRights {
+        schema_version: CONSEQUENCE_RETURN_RIGHTS_SCHEMA_VERSION.to_owned(),
+        triggers,
+        minimum_turn_gap: u8::from(severity <= ConsequenceSeverity::Moderate),
+        max_returns_per_scene: match severity {
+            ConsequenceSeverity::Trace => 0,
+            ConsequenceSeverity::Minor | ConsequenceSeverity::Moderate => 1,
+            ConsequenceSeverity::Major | ConsequenceSeverity::Critical => 2,
+        },
+        remaining_returns: match severity {
+            ConsequenceSeverity::Trace => 0,
+            ConsequenceSeverity::Minor | ConsequenceSeverity::Moderate => 1,
+            ConsequenceSeverity::Major | ConsequenceSeverity::Critical => 2,
+        },
+        repeats_without_new_evidence: matches!(
+            severity,
+            ConsequenceSeverity::Major | ConsequenceSeverity::Critical
+        ),
+        render_policy: render_policy_for_return_window(expected_return).to_owned(),
+    }
+}
+
+fn relevant_touch_triggers(scope: ConsequenceScope) -> Vec<ConsequenceReturnTrigger> {
+    match scope {
+        ConsequenceScope::Body => vec![ConsequenceReturnTrigger::SameSurfaceTouched],
+        ConsequenceScope::Inventory => vec![ConsequenceReturnTrigger::SameResourceTouched],
+        ConsequenceScope::Relationship | ConsequenceScope::Faction => {
+            vec![ConsequenceReturnTrigger::SameActorTouched]
+        }
+        ConsequenceScope::Location => vec![ConsequenceReturnTrigger::SameLocationTouched],
+        ConsequenceScope::Knowledge | ConsequenceScope::Scene => {
+            vec![ConsequenceReturnTrigger::NewEvidenceTouched]
+        }
+        ConsequenceScope::WorldProcess => vec![ConsequenceReturnTrigger::ProcessTicked],
+    }
+}
+
+const fn process_driving_consequence(kind: ConsequenceKind) -> bool {
+    matches!(
+        kind,
+        ConsequenceKind::AlarmRaised
+            | ConsequenceKind::LocationAccessChanged
+            | ConsequenceKind::ProcessAccelerated
+            | ConsequenceKind::ProcessDelayed
+            | ConsequenceKind::OpportunityOpened
+            | ConsequenceKind::OpportunityLost
+            | ConsequenceKind::MoralDebt
+    )
+}
+
+const fn render_policy_for_return_window(window: ConsequenceReturnWindow) -> &'static str {
+    match window {
+        ConsequenceReturnWindow::SearchOnly => {
+            "Archive only; do not surface as active pressure without new evidence."
+        }
+        ConsequenceReturnWindow::WhenRelevant => {
+            "Return only when the same actor, place, resource, surface, or evidence is touched."
+        }
+        ConsequenceReturnWindow::Soon => {
+            "May return once as near-term pressure, then soften unless reinforced."
+        }
+        ConsequenceReturnWindow::NextTurn => {
+            "Must return on the next turn and may drive process ticks."
+        }
+        ConsequenceReturnWindow::CurrentScene => {
+            "May return during the current scene; avoid repeating without new evidence."
+        }
     }
 }
 
@@ -1181,8 +1378,76 @@ mod tests {
 
         assert!(!rebuilt.active.is_empty());
         assert!(!rebuilt.pressure_links.is_empty());
+        assert!(
+            rebuilt
+                .active
+                .iter()
+                .any(consequence_can_return_as_scene_pressure)
+        );
         assert!(temp.path().join(ACTIVE_CONSEQUENCES_FILENAME).is_file());
         Ok(())
+    }
+
+    #[test]
+    fn return_rights_keep_trace_consequences_archive_only() {
+        let active = active_from_record(ConsequenceEventRecord {
+            schema_version: CONSEQUENCE_EVENT_SCHEMA_VERSION.to_owned(),
+            world_id: "world".to_owned(),
+            turn_id: "turn_0003".to_owned(),
+            event_id: "consequence_event:turn_0003:00".to_owned(),
+            consequence_id: "consequence:trace".to_owned(),
+            event_kind: ConsequenceEventKind::Introduced,
+            kind: ConsequenceKind::KnowledgeOpened,
+            scope: ConsequenceScope::Knowledge,
+            severity: ConsequenceSeverity::Trace,
+            summary: "희미한 단서".to_owned(),
+            player_visible_signal: "희미한 단서".to_owned(),
+            source_refs: vec!["choice:2".to_owned()],
+            linked_entity_refs: Vec::new(),
+            linked_projection_refs: Vec::new(),
+            recorded_at: "now".to_owned(),
+        });
+
+        assert_eq!(active.expected_return, ConsequenceReturnWindow::SearchOnly);
+        assert_eq!(active.decay.remaining_turns, 0);
+        assert!(
+            active
+                .return_rights
+                .triggers
+                .contains(&ConsequenceReturnTrigger::SearchOnly)
+        );
+        assert!(!consequence_can_return_as_scene_pressure(&active));
+    }
+
+    #[test]
+    fn critical_process_consequence_gets_return_and_tick_rights() {
+        let active = active_from_record(ConsequenceEventRecord {
+            schema_version: CONSEQUENCE_EVENT_SCHEMA_VERSION.to_owned(),
+            world_id: "world".to_owned(),
+            turn_id: "turn_0003".to_owned(),
+            event_id: "consequence_event:turn_0003:00".to_owned(),
+            consequence_id: "consequence:alarm".to_owned(),
+            event_kind: ConsequenceEventKind::Introduced,
+            kind: ConsequenceKind::AlarmRaised,
+            scope: ConsequenceScope::WorldProcess,
+            severity: ConsequenceSeverity::Critical,
+            summary: "경보가 올라갔다".to_owned(),
+            player_visible_signal: "수색이 바로 따라붙는다".to_owned(),
+            source_refs: vec!["choice:1".to_owned()],
+            linked_entity_refs: Vec::new(),
+            linked_projection_refs: vec!["process:alarm".to_owned()],
+            recorded_at: "now".to_owned(),
+        });
+
+        assert_eq!(active.expected_return, ConsequenceReturnWindow::NextTurn);
+        assert!(consequence_can_return_as_scene_pressure(&active));
+        assert!(consequence_can_drive_world_process(&active));
+        assert!(
+            active
+                .return_rights
+                .triggers
+                .contains(&ConsequenceReturnTrigger::ProcessTicked)
+        );
     }
 
     #[test]
@@ -1278,6 +1543,7 @@ mod tests {
                 effect_kind: ProposedEffectKind::RelationshipDelta,
                 target_ref: "rel:guard".to_owned(),
                 visibility: ResolutionVisibility::PlayerVisible,
+                knowledge_tier: None,
                 summary: "문지기는 주인공을 절차를 무시한 사람으로 기억한다.".to_owned(),
                 evidence_refs: vec!["choice:1".to_owned()],
             }],

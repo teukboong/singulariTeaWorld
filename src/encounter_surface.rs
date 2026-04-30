@@ -20,6 +20,7 @@ pub const ENCOUNTER_AFFORDANCE_SCHEMA_VERSION: &str = "singulari.encounter_affor
 pub const ENCOUNTER_CONSTRAINT_SCHEMA_VERSION: &str = "singulari.encounter_constraint.v1";
 pub const ENCOUNTER_CHANGE_POTENTIAL_SCHEMA_VERSION: &str =
     "singulari.encounter_change_potential.v1";
+pub const CHOICE_CONTRACT_SCHEMA_VERSION: &str = "singulari.choice_contract.v1";
 pub const ENCOUNTER_SURFACE_EVENT_SCHEMA_VERSION: &str = "singulari.encounter_surface_event.v1";
 pub const ENCOUNTER_PROPOSAL_SCHEMA_VERSION: &str = "singulari.encounter_proposal.v1";
 pub const ENCOUNTER_SURFACE_EVENTS_FILENAME: &str = "encounter_events.jsonl";
@@ -44,6 +45,8 @@ pub struct EncounterSurfacePacket {
     pub blocked_interactions: Vec<BlockedInteraction>,
     #[serde(default)]
     pub required_followups: Vec<String>,
+    #[serde(default)]
+    pub choice_contracts: Vec<ChoiceContract>,
     pub compiler_policy: EncounterSurfacePolicy,
 }
 
@@ -58,6 +61,7 @@ impl Default for EncounterSurfacePacket {
             recent_surface_changes: Vec::new(),
             blocked_interactions: Vec::new(),
             required_followups: Vec::new(),
+            choice_contracts: Vec::new(),
             compiler_policy: EncounterSurfacePolicy::default(),
         }
     }
@@ -248,6 +252,37 @@ pub struct EncounterChangePotential {
     pub evidence_refs: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChoiceContract {
+    pub schema_version: String,
+    pub choice_id: String,
+    pub target_ref: String,
+    pub verb: EncounterActionKind,
+    pub visible_label: String,
+    #[serde(default)]
+    pub preconditions: Vec<String>,
+    pub expected_cost: ChoiceTimeCost,
+    #[serde(default)]
+    pub risk_tags: Vec<String>,
+    #[serde(default)]
+    pub possible_event_kinds: Vec<String>,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+    #[serde(default)]
+    pub forbidden_outcomes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChoiceTimeCost {
+    None,
+    Moment,
+    Exchange,
+    SceneBeat,
+    TravelStep,
+    LongWait,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EncounterChangeKind {
@@ -410,6 +445,7 @@ pub fn compile_encounter_surface_packet(
             .then(left.surface_id.cmp(&right.surface_id))
     });
     surfaces.truncate(ACTIVE_SURFACE_BUDGET);
+    let choice_contracts = compile_choice_contracts(&surfaces);
     EncounterSurfacePacket {
         schema_version: ENCOUNTER_SURFACE_PACKET_SCHEMA_VERSION.to_owned(),
         world_id: world_id.to_owned(),
@@ -419,6 +455,7 @@ pub fn compile_encounter_surface_packet(
         recent_surface_changes: Vec::new(),
         blocked_interactions: Vec::new(),
         required_followups: Vec::new(),
+        choice_contracts,
         compiler_policy: EncounterSurfacePolicy::default(),
     }
 }
@@ -643,6 +680,7 @@ pub fn rebuild_encounter_surface(
     required_followups.sort();
     required_followups.dedup();
     required_followups.truncate(REQUIRED_FOLLOWUP_BUDGET);
+    let choice_contracts = compile_choice_contracts(&active_surfaces);
     let packet = EncounterSurfacePacket {
         schema_version: ENCOUNTER_SURFACE_PACKET_SCHEMA_VERSION.to_owned(),
         world_id: base_packet.world_id.clone(),
@@ -652,6 +690,7 @@ pub fn rebuild_encounter_surface(
         recent_surface_changes: changes,
         blocked_interactions: blocked,
         required_followups,
+        choice_contracts,
         compiler_policy: EncounterSurfacePolicy::default(),
     };
     write_json(&world_dir.join(ENCOUNTER_SURFACE_FILENAME), &packet)?;
@@ -862,6 +901,126 @@ fn mutation_from_choice(
         change_potential: vec![change_from_action(&surface_id, action_kind)],
         persistence: EncounterPersistence::CurrentScene,
     }
+}
+
+fn compile_choice_contracts(surfaces: &[EncounterSurface]) -> Vec<ChoiceContract> {
+    surfaces
+        .iter()
+        .flat_map(|surface| {
+            surface
+                .affordances
+                .iter()
+                .map(|affordance| choice_contract_from_affordance(surface, affordance))
+        })
+        .collect()
+}
+
+fn choice_contract_from_affordance(
+    surface: &EncounterSurface,
+    affordance: &EncounterAffordance,
+) -> ChoiceContract {
+    ChoiceContract {
+        schema_version: CHOICE_CONTRACT_SCHEMA_VERSION.to_owned(),
+        choice_id: affordance.affordance_id.clone(),
+        target_ref: surface.surface_id.clone(),
+        verb: affordance.action_kind,
+        visible_label: affordance.label_seed.clone(),
+        preconditions: affordance.required_refs.clone(),
+        expected_cost: expected_cost_for_action(affordance.action_kind),
+        risk_tags: affordance.risk_tags.clone(),
+        possible_event_kinds: possible_event_kinds_for_action(affordance.action_kind),
+        evidence_refs: affordance.evidence_refs.clone(),
+        forbidden_outcomes: forbidden_outcomes_for_action(affordance.action_kind),
+    }
+}
+
+const fn expected_cost_for_action(action: EncounterActionKind) -> ChoiceTimeCost {
+    match action {
+        EncounterActionKind::Wait => ChoiceTimeCost::LongWait,
+        EncounterActionKind::Move | EncounterActionKind::Follow | EncounterActionKind::Bypass => {
+            ChoiceTimeCost::TravelStep
+        }
+        EncounterActionKind::TalkAbout
+        | EncounterActionKind::TradeOver
+        | EncounterActionKind::ThreatenWith => ChoiceTimeCost::Exchange,
+        EncounterActionKind::Open
+        | EncounterActionKind::Force
+        | EncounterActionKind::Repair
+        | EncounterActionKind::Break
+        | EncounterActionKind::Take
+        | EncounterActionKind::Use
+        | EncounterActionKind::HideBehind => ChoiceTimeCost::SceneBeat,
+        EncounterActionKind::Inspect
+        | EncounterActionKind::Touch
+        | EncounterActionKind::Close
+        | EncounterActionKind::Listen
+        | EncounterActionKind::Smell
+        | EncounterActionKind::Compare
+        | EncounterActionKind::Mark => ChoiceTimeCost::Moment,
+    }
+}
+
+fn possible_event_kinds_for_action(action: EncounterActionKind) -> Vec<String> {
+    match action {
+        EncounterActionKind::Inspect
+        | EncounterActionKind::Listen
+        | EncounterActionKind::Smell
+        | EncounterActionKind::Compare => {
+            vec![
+                "knowledge_observed".to_owned(),
+                "surface_state_revealed".to_owned(),
+            ]
+        }
+        EncounterActionKind::TalkAbout
+        | EncounterActionKind::TradeOver
+        | EncounterActionKind::ThreatenWith => {
+            vec![
+                "dialogue_exchange".to_owned(),
+                "relationship_changed".to_owned(),
+            ]
+        }
+        EncounterActionKind::Move | EncounterActionKind::Follow | EncounterActionKind::Bypass => {
+            vec![
+                "entity_moved".to_owned(),
+                "location_access_changed".to_owned(),
+            ]
+        }
+        EncounterActionKind::Wait => {
+            vec!["process_ticked".to_owned()]
+        }
+        EncounterActionKind::Open
+        | EncounterActionKind::Close
+        | EncounterActionKind::Force
+        | EncounterActionKind::Repair
+        | EncounterActionKind::Break
+        | EncounterActionKind::Touch
+        | EncounterActionKind::Take
+        | EncounterActionKind::Use
+        | EncounterActionKind::HideBehind
+        | EncounterActionKind::Mark => {
+            vec!["surface_state_changed".to_owned()]
+        }
+    }
+}
+
+fn forbidden_outcomes_for_action(action: EncounterActionKind) -> Vec<String> {
+    let mut outcomes = vec!["invent_hidden_truth_without_evidence".to_owned()];
+    if matches!(
+        action,
+        EncounterActionKind::Inspect
+            | EncounterActionKind::Listen
+            | EncounterActionKind::Smell
+            | EncounterActionKind::Compare
+    ) {
+        outcomes.push("reveal_hidden_truth_directly".to_owned());
+    }
+    if matches!(
+        action,
+        EncounterActionKind::Open | EncounterActionKind::Force
+    ) {
+        outcomes.push("unlock_without_tool_or_permission".to_owned());
+    }
+    outcomes
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1572,6 +1731,27 @@ mod tests {
                 .active_surfaces
                 .iter()
                 .any(|surface| surface.kind == EncounterSurfaceKind::EvidenceTrace)
+        );
+        assert_eq!(packet.choice_contracts.len(), 2);
+        let Some(inspect_contract) = packet
+            .choice_contracts
+            .iter()
+            .find(|contract| contract.verb == EncounterActionKind::Inspect)
+        else {
+            panic!("inspect choice contract should exist");
+        };
+        assert_eq!(inspect_contract.expected_cost, ChoiceTimeCost::Moment);
+        assert!(
+            inspect_contract
+                .possible_event_kinds
+                .iter()
+                .any(|kind| kind == "knowledge_observed")
+        );
+        assert!(
+            inspect_contract
+                .forbidden_outcomes
+                .iter()
+                .any(|outcome| outcome == "reveal_hidden_truth_directly")
         );
     }
 

@@ -3,7 +3,7 @@ use chrono::Utc;
 use serde::Serialize;
 use singulari_world::{
     CompleteVisualJobOptions, ImageGenerationJob, VisualArtifactKind, complete_visual_job,
-    resolve_store_paths,
+    resolve_store_paths, validate_visual_canon_policy_for_job, visual_canon_policy_prompt,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -314,6 +314,7 @@ pub(super) fn ensure_image_job_matches_session_kind(
     job: &ImageGenerationJob,
     image_session_kind: WebGptImageSessionKind,
 ) -> Result<()> {
+    validate_visual_canon_policy_for_job(job)?;
     let valid = match image_session_kind {
         WebGptImageSessionKind::TurnCg => {
             job.artifact_kind == VisualArtifactKind::SceneCg
@@ -495,6 +496,8 @@ pub(super) fn build_webgpt_image_generation_prompt(
     prompt.push('\n');
     prompt.push_str("Use the image prompt below as the sole visual brief.\n\n");
     prompt.push_str(job.prompt.as_str());
+    prompt.push_str("\n\n");
+    prompt.push_str(visual_canon_policy_prompt(&job.visual_canon_policy).as_str());
     if !job.reference_paths.is_empty() {
         prompt.push_str("\n\nReference continuity notes: ");
         prompt.push_str(job.reference_paths.join(", ").as_str());

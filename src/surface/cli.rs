@@ -20,7 +20,8 @@ use singulari_world::{
     CompleteVisualJobOptions, ExportWorldOptions, ImportWorldOptions, ReleaseVisualJobClaimOptions,
     StartWorldOptions, VnServeOptions, build_host_supervisor_plan, build_projection_health_report,
     build_vn_packet, build_world_visual_assets, claim_visual_job, clear_world_commit_lock,
-    complete_visual_job, export_world, import_world, release_visual_job_claim, serve_vn,
+    complete_visual_job, export_world, import_world, recover_turn_commit_journal,
+    release_visual_job_claim, serve_vn,
 };
 use std::path::{Path, PathBuf};
 
@@ -219,6 +220,15 @@ enum Commands {
 
     /// Rebuild missing files referenced by committed turn envelopes.
     RepairTurnMaterializations {
+        #[arg(long)]
+        world_id: Option<String>,
+
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Recover idempotent turn-commit journal state after a crash.
+    RecoverTurnCommitJournal {
         #[arg(long)]
         world_id: Option<String>,
 
@@ -699,6 +709,9 @@ fn dispatch(cli: Cli) -> Result<()> {
         }
         Commands::RepairTurnMaterializations { world_id, json } => {
             handle_repair_turn_materializations(store_root.as_deref(), world_id.as_deref(), json)?;
+        }
+        Commands::RecoverTurnCommitJournal { world_id, json } => {
+            handle_recover_turn_commit_journal(store_root.as_deref(), world_id.as_deref(), json)?;
         }
         Commands::WorldLockStatus { world_id, json } => {
             handle_world_lock_status(store_root.as_deref(), world_id.as_deref(), json)?;
@@ -1252,6 +1265,44 @@ fn handle_repair_turn_materializations(
             "commit_records_repaired: {}",
             report.commit_records_repaired
         );
+    }
+    Ok(())
+}
+
+fn handle_recover_turn_commit_journal(
+    store_root: Option<&Path>,
+    world_id: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    let world_id = resolve_world_id(store_root, world_id)?;
+    let report = recover_turn_commit_journal(store_root, world_id.as_str())?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("world: {}", report.world_id);
+        println!("inspected_envelopes: {}", report.inspected_envelopes);
+        println!(
+            "committed_envelopes_appended: {}",
+            report.committed_envelopes_appended
+        );
+        println!(
+            "stale_pending_files_removed: {}",
+            report.stale_pending_files_removed
+        );
+        println!(
+            "render_packets_repaired: {}",
+            report.materialization_repair.render_packets_repaired
+        );
+        println!(
+            "commit_records_repaired: {}",
+            report.materialization_repair.commit_records_repaired
+        );
+        for action in &report.actions {
+            println!(
+                "action: turn={}, kind={}, detail={}",
+                action.turn_id, action.action, action.detail
+            );
+        }
     }
     Ok(())
 }

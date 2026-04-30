@@ -463,6 +463,7 @@ mod tests {
                 tempo: WorldProcessTempo::Soon,
                 summary: "The gate will close soon.".to_owned(),
                 next_tick_contract: "Gate access narrows unless a token is secured.".to_owned(),
+                tick_policy: crate::world_process_clock::WorldProcessTickPolicy::default(),
                 source_refs: vec!["scene_pressure:gate_time".to_owned()],
             }],
             adjudication_only_processes: Vec::new(),
