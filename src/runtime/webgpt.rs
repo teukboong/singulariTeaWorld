@@ -2144,7 +2144,7 @@ premise:
             "출력 서사는 한국어 VN prose다. 대화, 제스처, 말버릇을 살리고",
             "이 계약은 seedless style contract다.",
             "문체/작법 규칙은 소재, 사건, 인물, 장소, 장르 장치, 과거사, 상징을 새로 만들 권한이 없다.",
-            "scene_fact_boundaries: 오직 prompt context packet의 player-visible facts",
+            "scene_fact_boundaries: 오직 narrative turn packet의 player-visible facts",
             "speech는 화법, endings는 어미/말끝, tone은 어투/거리감/어휘",
             "문체와 서사 작법은 캐릭터에 귀속하지 말고 visible_scene의 전역 서사에만 적용한다.",
             "paragraph_grammar: 각 문단은 감각 변화, 몸의 반응, 외부 압력, 해석을 유보한 단서, 다음 행동을 압박하는 변화 중 최소 둘을 포함한다.",
@@ -2162,50 +2162,29 @@ premise:
             "추상 감정 설명보다 몸, 시선, 호흡, 손, 거리, 소리, 냄새, 온도 같은 관찰 가능한 흔적으로 보여준다.",
             "선택지 의도나 내부 판정을 본문에서 해설하지 않는다.",
             "레벨 1은 표준 VN 밀도, 레벨 2는 장면 확장 밀도, 레벨 3은 장편 연재 밀도다.",
-            "prompt_context.opening_randomizer가 있으면 사용자의 시드에 덧붙은 player-visible 개막 seed로 취급한다.",
+            "narrative_turn_packet.opening_randomizer가 있으면 사용자의 시드에 덧붙은 player-visible 개막 seed로 취급한다.",
             "opening_randomizer가 없으면 사용자 시드와 visible facts만으로 시작한다.",
             "opening_randomizer는 반복 수렴을 피하기 위한 시작 조건이지, 시드에 없는 장르 장치·숨은 과거사·고정 인물 설정을 만드는 권한이 아니다.",
             "시드나 visible facts에 명시되지 않은 장르 장치, 과거사, 외부 세계 대비, 게임 인터페이스식 능력 구조를 추론해서 주입하지 마라.",
             "protagonist가 현재 정보를 모른다는 사실만으로 장면 밖 배경, 과거사, 시대 대비 독백, 정체성 상실 클리셰를 만들지 마라.",
             "이 WebGPT conversation의 이전 turn들은 말맛, 직전 감정선, 장면 리듬을 잇는 working context다.",
-            "conversation/project context가 compact 되었거나 prompt context packet과 충돌하면 prompt context packet을 우선한다.",
-            "prompt_context.visible_context.selected_memory_items는 이번 턴에 물리적으로 선택된 장기기억이다.",
-            "prompt_context.visible_context.affordance_graph는 slot 1..5의 행동 허가표다.",
-            "prompt_context.visible_context.belief_graph는 주인공과 player-visible narrator가 확정적으로 아는 것의 경계다.",
-            "prompt_context.visible_context.world_process_clock는 보이는 세계 진행 압력이다.",
-            "prompt_context.visible_context.narrative_style_state는 서사 문체와 문단 박자 계약이다.",
-            "prompt_context.visible_context.active_change_ledger는 플레이어 행동으로 변한 세계/관계/압력의 요약 장부다.",
-            "prompt_context.visible_context.active_pattern_debt는 반복 방지 압력이다.",
-            "prompt_context.visible_context.active_belief_graph는 장기 누적된 믿음/오해/추론 경계다.",
-            "prompt_context.visible_context.active_world_process_clock는 장기 진행 압력이다.",
-            "prompt_context.visible_context.active_player_intent_trace는 최근 플레이어 행동 모양이다.",
-            "prompt_context.adjudication_context는 판정 전용이다.",
-            "prompt_context.prompt_policy.omitted_debug_sections",
-            "prompt_context.budget_report",
+            "conversation/project context가 compact 되었거나 narrative turn packet과 충돌하면 narrative turn packet을 우선한다.",
+            "narrative_turn_packet.visible_context.active_character_text_design과 selected_memory_items는 말맛과 가까운 연속성에만 쓴다.",
+            "narrative_turn_packet.visible_context.affordance_graph와 pre_turn_simulation.available_affordances는 slot 1..5의 행동 허가표다.",
+            "narrative_turn_packet.adjudication_boundary는 판정 전용이다.",
             "웹 검색, 외부 사이트 탐색, repo 탐색, 소스 파일 읽기를 하지 마라.",
-            "\"schema_version\":\"singulari.prompt_context_packet.v1\"",
-            "\"schema_version\":\"singulari.prompt_context_budget_report.v1\"",
+            "\"schema_version\":\"singulari.narrative_turn_packet.v1\"",
+            "\"pre_turn_simulation\"",
+            "\"available_affordances\"",
+            "\"pressure_obligations\"",
+            "\"hidden_visibility_boundary\"",
             "\"visible_context\"",
-            "\"adjudication_context\"",
+            "\"adjudication_boundary\"",
             "\"selected_memory_items\"",
-            "\"active_change_ledger\"",
-            "\"active_pattern_debt\"",
-            "\"active_belief_graph\"",
-            "\"active_world_process_clock\"",
-            "\"active_player_intent_trace\"",
-            "\"active_turn_retrieval_controller\"",
-            "\"selected_context_capsules\"",
             "\"affordance_graph\"",
-            "\"ordinary_choice_slots\"",
-            "\"forbidden_shortcuts\"",
-            "\"belief_graph\"",
-            "\"world_process_clock\"",
-            "\"hidden_world_process_clock\"",
             "\"narrative_style_state\"",
             "\"anti_translation_rules\"",
             "\"prohibited_seed_leakage\"",
-            "\"prompt_policy\"",
-            "\"omitted_debug_sections\"",
             "\"active_scene_pressure\"",
             "\"active_plot_threads\"",
             "\"plot_thread_events\"",
@@ -2232,9 +2211,24 @@ premise:
             );
         }
 
-        let prompt_context = serde_json::to_value(
-            singulari_world::extract_prompt_context_from_prompt(&prompt)?,
-        )?;
+        let marker = "narrative turn packet JSON:";
+        let marker_index = prompt
+            .find(marker)
+            .context("narrative turn packet marker missing")?;
+        let after_marker = &prompt[marker_index + marker.len()..];
+        let fence_start = after_marker
+            .find("```json")
+            .context("narrative turn packet JSON fence start missing")?;
+        let after_fence = &after_marker[fence_start + "```json".len()..];
+        let fence_end = after_fence
+            .find("```")
+            .context("narrative turn packet JSON fence end missing")?;
+        let narrative_packet: serde_json::Value =
+            serde_json::from_str(after_fence[..fence_end].trim())?;
+        assert_eq!(
+            narrative_packet["schema_version"],
+            serde_json::json!("singulari.narrative_turn_packet.v1")
+        );
         for omitted_path in [
             "/source_revival",
             "/retrieval_profile",
@@ -2249,10 +2243,18 @@ premise:
             "/visible_context/active_relationship_graph",
             "/visible_context/active_world_lore",
             "/visible_context/agent_context_projection",
+            "/visible_context/active_change_ledger",
+            "/visible_context/active_pattern_debt",
+            "/visible_context/active_belief_graph",
+            "/visible_context/active_world_process_clock",
+            "/visible_context/active_player_intent_trace",
+            "/visible_context/active_turn_retrieval_controller",
+            "/visible_context/selected_context_capsules",
+            "/visible_context/active_autobiographical_index",
         ] {
             assert!(
-                prompt_context.pointer(omitted_path).is_none(),
-                "webgpt prompt context leaked debug/source path: {omitted_path}"
+                narrative_packet.pointer(omitted_path).is_none(),
+                "narrative turn packet leaked debug/source path: {omitted_path}"
             );
         }
         Ok(())
