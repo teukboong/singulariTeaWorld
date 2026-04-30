@@ -258,13 +258,13 @@ pub use models::{
     CodexView, CodexVoiceAnchorEntry, CurrentEvent, DEFAULT_CHOICE_COUNT, DashboardSummary,
     ENTITY_UPDATE_SCHEMA_VERSION, EntityName, EntityRecords, EntityUpdateRecord, EventAuthority,
     FREEFORM_CHOICE_SLOT, FREEFORM_CHOICE_TAG, GUIDE_CHOICE_REDACTED_INTENT, GUIDE_CHOICE_SLOT,
-    HiddenState, HiddenStateSecret, HiddenStateTimer, NARRATIVE_SCENE_SCHEMA_VERSION,
-    NarrativeScene, PlayerKnowledge, ProtagonistState, RENDER_PACKET_SCHEMA_VERSION,
-    RelationshipUpdateRecord, RenderPacket, SINGULARI_WORLD_SCHEMA_VERSION, ScanTarget,
-    StructuredEntityUpdates, TURN_LOG_ENTRY_SCHEMA_VERSION, TURN_SNAPSHOT_SCHEMA_VERSION,
-    TurnChoice, TurnInputKind, TurnLogEntry, TurnSnapshot, VisibleState, WorldEventKind,
-    WorldPremise, WorldRecord, WorldSeed, default_freeform_choice, default_turn_choices,
-    normalize_turn_choices,
+    GUIDE_CHOICE_TAG, HiddenState, HiddenStateSecret, HiddenStateTimer,
+    NARRATIVE_SCENE_SCHEMA_VERSION, NarrativeScene, PlayerKnowledge, ProtagonistState,
+    RENDER_PACKET_SCHEMA_VERSION, RelationshipUpdateRecord, RenderPacket,
+    SINGULARI_WORLD_SCHEMA_VERSION, ScanTarget, StructuredEntityUpdates,
+    TURN_LOG_ENTRY_SCHEMA_VERSION, TURN_SNAPSHOT_SCHEMA_VERSION, TurnChoice, TurnInputKind,
+    TurnLogEntry, TurnSnapshot, VisibleState, WorldEventKind, WorldPremise, WorldRecord, WorldSeed,
+    default_freeform_choice, default_turn_choices, normalize_turn_choices,
 };
 pub use narrative_style_state::{
     NARRATIVE_STYLE_EVENT_SCHEMA_VERSION, NARRATIVE_STYLE_EVENTS_FILENAME,
@@ -334,10 +334,11 @@ pub use render::{RenderPacketLoadOptions, load_render_packet, render_packet_mark
 pub use resolution::{
     ActionAmbiguity, ActionInputKind, ActionIntent, ChoicePlan, ChoicePlanKind,
     FREEFORM_GATE_TRACE_SCHEMA_VERSION, FreeformGateTrace, GateKind, GateResult, GateStatus,
-    NarrativeBrief, ProcessTickCause, ProcessTickProposal, ProposedEffect, ProposedEffectKind,
-    RESOLUTION_PROPOSAL_SCHEMA_VERSION, ResolutionCritique, ResolutionFailureKind,
-    ResolutionOutcome, ResolutionOutcomeKind, ResolutionProposal, ResolutionVisibility,
-    audit_resolution_choices, audit_resolution_proposal, freeform_gate_trace_from_proposal,
+    NarrativeBrief, PressureNoopReason, ProcessTickCause, ProcessTickProposal, ProposedEffect,
+    ProposedEffectKind, RESOLUTION_PROPOSAL_SCHEMA_VERSION, ResolutionCritique,
+    ResolutionFailureKind, ResolutionOutcome, ResolutionOutcomeKind, ResolutionProposal,
+    ResolutionVisibility, audit_resolution_choices, audit_resolution_proposal,
+    freeform_gate_trace_from_proposal,
 };
 pub use response_context::{
     AGENT_CONTEXT_EVENT_SCHEMA_VERSION, AGENT_CONTEXT_EVENTS_FILENAME,

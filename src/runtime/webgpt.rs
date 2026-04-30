@@ -19,6 +19,7 @@ use std::time::Duration as StdDuration;
 
 use super::host_worker::HostWorkerOptions;
 
+mod draft;
 mod image;
 mod json_extract;
 mod prompt;
@@ -28,7 +29,7 @@ pub(super) use image::{
     visual_dispatch_dir_for_world,
 };
 use json_extract::extract_json_object_text;
-use prompt::build_webgpt_turn_prompt;
+use prompt::{build_webgpt_turn_draft_prompt, build_webgpt_turn_prompt};
 
 #[cfg(test)]
 use image::{
@@ -184,6 +185,21 @@ pub(super) enum WebGptDispatchOutcome {
     AlreadyDispatched(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum WebGptTextOutputMode {
+    AgentResponse,
+    Draft,
+}
+
+impl WebGptTextOutputMode {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::AgentResponse => "agent_response",
+            Self::Draft => "draft",
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub(super) struct WebGptLanePrewarmRecord {
     lane: &'static str,
@@ -209,6 +225,7 @@ pub(super) struct WebGptDispatchRecord {
     pub(super) raw_conversation_id: Option<String>,
     pub(super) current_model: Option<String>,
     pub(super) current_reasoning_level: Option<String>,
+    pub(super) output_mode: &'static str,
     pub(super) pid: u32,
     pub(super) record_path: String,
     pub(super) prompt_path: String,
@@ -268,6 +285,7 @@ pub(super) fn dispatch_pending_agent_turn_via_webgpt(
     let repair_stderr_path =
         dispatch_dir.join(format!("{}-webgpt-repair-1-stderr.log", pending.turn_id));
     let dispatcher = resolve_webgpt_dispatcher(store_root, pending, options)?;
+    let output_mode = options.webgpt_output_mode;
     let paths = WebGptTurnPaths {
         world_id: pending.world_id.as_str(),
         turn_id: pending.turn_id.as_str(),
@@ -280,7 +298,7 @@ pub(super) fn dispatch_pending_agent_turn_via_webgpt(
     };
 
     if record_path.exists() {
-        if let Some(record) = try_commit_existing_webgpt_response(ExistingWebGptResponseInput {
+        if let Some(record) = try_commit_existing_webgpt_response(&ExistingWebGptResponseInput {
             store_root,
             pending,
             dispatcher: &dispatcher,
@@ -291,6 +309,7 @@ pub(super) fn dispatch_pending_agent_turn_via_webgpt(
             repair_result_path: repair_result_path.as_path(),
             repair_stdout_path: repair_stdout_path.as_path(),
             repair_stderr_path: repair_stderr_path.as_path(),
+            output_mode,
         })? {
             return Ok(WebGptDispatchOutcome::Started(Box::new(record)));
         }
@@ -301,8 +320,13 @@ pub(super) fn dispatch_pending_agent_turn_via_webgpt(
         }
     }
 
-    let prompt_artifacts =
-        write_webgpt_prompt_artifacts(store_root, pending, &prompt_context_path, &prompt_path)?;
+    let prompt_artifacts = write_webgpt_prompt_artifacts(
+        store_root,
+        pending,
+        &prompt_context_path,
+        &prompt_path,
+        output_mode,
+    )?;
     let dispatched_at = Utc::now();
     let claim = webgpt_dispatch_claim(
         pending,
@@ -311,6 +335,7 @@ pub(super) fn dispatch_pending_agent_turn_via_webgpt(
         dispatched_at,
         prompt_artifacts.prompt_bytes,
         prompt_artifacts.prompt_context_bytes,
+        output_mode,
     );
     if !write_dispatch_claim(record_path.as_path(), &claim)? {
         return Ok(WebGptDispatchOutcome::AlreadyDispatched(
@@ -326,7 +351,7 @@ pub(super) fn dispatch_pending_agent_turn_via_webgpt(
         None,
     )?;
 
-    let dispatch_result = dispatcher.run(paths)?;
+    let dispatch_result = dispatcher.run(paths, output_mode)?;
     let mcp_completed_at = Utc::now();
     if let Some(raw_conversation_id) = dispatch_result.raw_conversation_id.as_deref() {
         save_webgpt_conversation_binding(
@@ -342,6 +367,7 @@ pub(super) fn dispatch_pending_agent_turn_via_webgpt(
         pending,
         response_path.as_path(),
         &dispatch_result,
+        output_mode,
     );
     let mut repair_prompt_for_operator = None;
     if let Some(error) = commit_result.error.as_deref()
@@ -354,6 +380,7 @@ pub(super) fn dispatch_pending_agent_turn_via_webgpt(
             response_path.as_path(),
             error,
             repair_prompt_path.as_path(),
+            output_mode,
         )?;
         repair_prompt_for_operator = Some(repair_prompt_path.display().to_string());
     }
@@ -376,6 +403,7 @@ pub(super) fn dispatch_pending_agent_turn_via_webgpt(
             prompt_bytes: prompt_artifacts.prompt_bytes,
             prompt_context_bytes: prompt_artifacts.prompt_context_bytes,
         },
+        output_mode,
     );
     fs::write(&record_path, serde_json::to_vec_pretty(&record)?)
         .with_context(|| format!("failed to update {}", record_path.display()))?;
@@ -402,10 +430,11 @@ struct ExistingWebGptResponseInput<'a> {
     repair_result_path: &'a Path,
     repair_stdout_path: &'a Path,
     repair_stderr_path: &'a Path,
+    output_mode: WebGptTextOutputMode,
 }
 
 fn try_commit_existing_webgpt_response(
-    input: ExistingWebGptResponseInput<'_>,
+    input: &ExistingWebGptResponseInput<'_>,
 ) -> Result<Option<WebGptDispatchRecord>> {
     let Some(existing) = read_json_value_if_present(input.record_path)? else {
         return Ok(None);
@@ -427,6 +456,7 @@ fn try_commit_existing_webgpt_response(
         input.pending,
         paths.response_path,
         &dispatch_result,
+        input.output_mode,
     );
     let dispatched_at = existing_record_time(&existing, "dispatched_at").unwrap_or_else(Utc::now);
     let mcp_completed_at =
@@ -453,6 +483,7 @@ fn try_commit_existing_webgpt_response(
             prompt_bytes,
             prompt_context_bytes,
         },
+        input.output_mode,
     );
     fs::write(input.record_path, serde_json::to_vec_pretty(&record)?)
         .with_context(|| format!("failed to update {}", input.record_path.display()))?;
@@ -467,9 +498,9 @@ fn try_commit_existing_webgpt_response(
     Ok(Some(record))
 }
 
-fn select_existing_webgpt_response_paths(
-    input: ExistingWebGptResponseInput<'_>,
-) -> Option<(WebGptTurnPaths<'_>, WebGptRepairRecord)> {
+fn select_existing_webgpt_response_paths<'a>(
+    input: &'a ExistingWebGptResponseInput<'a>,
+) -> Option<(WebGptTurnPaths<'a>, WebGptRepairRecord)> {
     if input.repair_response_path.is_file() {
         return Some((
             WebGptTurnPaths {
@@ -549,6 +580,7 @@ fn write_webgpt_prompt_artifacts(
     pending: &singulari_world::PendingAgentTurn,
     prompt_context_path: &Path,
     prompt_path: &Path,
+    output_mode: WebGptTextOutputMode,
 ) -> Result<WebGptPromptArtifacts> {
     let prompt_context = compile_prompt_context_packet(&CompilePromptContextPacketOptions {
         store_root,
@@ -559,7 +591,10 @@ fn write_webgpt_prompt_artifacts(
     let prompt_context_bytes = prompt_context_raw.len() as u64;
     fs::write(prompt_context_path, prompt_context_raw)
         .with_context(|| format!("failed to write {}", prompt_context_path.display()))?;
-    let prompt = build_webgpt_turn_prompt(&prompt_context)?;
+    let prompt = match output_mode {
+        WebGptTextOutputMode::AgentResponse => build_webgpt_turn_prompt(&prompt_context)?,
+        WebGptTextOutputMode::Draft => build_webgpt_turn_draft_prompt(&prompt_context)?,
+    };
     let prompt_bytes = prompt.len() as u64;
     fs::write(prompt_path, prompt.as_bytes())
         .with_context(|| format!("failed to write {}", prompt_path.display()))?;
@@ -575,17 +610,26 @@ fn write_webgpt_repair_prompt(
     rejected_response_path: &Path,
     commit_error: &str,
     repair_prompt_path: &Path,
+    output_mode: WebGptTextOutputMode,
 ) -> Result<()> {
     let original_prompt = fs::read_to_string(original_prompt_path)
         .with_context(|| format!("failed to read {}", original_prompt_path.display()))?;
     let rejected_response = fs::read_to_string(rejected_response_path)
         .with_context(|| format!("failed to read {}", rejected_response_path.display()))?;
+    let rejected_label = match output_mode {
+        WebGptTextOutputMode::AgentResponse => "Rejected AgentTurnResponse",
+        WebGptTextOutputMode::Draft => "Rejected WebgptTurnDraft",
+    };
+    let output_contract = match output_mode {
+        WebGptTextOutputMode::AgentResponse => "AgentTurnResponse",
+        WebGptTextOutputMode::Draft => "WebgptTurnDraft",
+    };
     let repair_prompt = format!(
         r"{original_prompt}
 
 ## Structured Repair Request
 
-The previous AgentTurnResponse was rejected before world mutation.
+The previous {output_contract} was rejected before world mutation.
 
 Commit/audit error:
 
@@ -593,7 +637,7 @@ Commit/audit error:
 {commit_error}
 ```
 
-Rejected AgentTurnResponse:
+{rejected_label}:
 
 ```json
 {rejected_response}
@@ -601,7 +645,7 @@ Rejected AgentTurnResponse:
 
 Repair scope:
 
-- Return one complete `AgentTurnResponse` JSON object only.
+- Return one complete `{output_contract}` JSON object only.
 - Keep the same `schema_version`, `world_id`, and `turn_id`.
 - Do not ask for more context unless the original prompt context truly cannot
   support a safe turn.
@@ -677,6 +721,7 @@ fn webgpt_dispatch_record(
     commit_result: WebGptCommitResult,
     repair: WebGptRepairRecord,
     timing: WebGptDispatchTiming,
+    output_mode: WebGptTextOutputMode,
 ) -> WebGptDispatchRecord {
     let completed_at = Utc::now();
     WebGptDispatchRecord {
@@ -693,6 +738,7 @@ fn webgpt_dispatch_record(
         raw_conversation_id: dispatch_result.raw_conversation_id,
         current_model: dispatch_result.current_model,
         current_reasoning_level: dispatch_result.current_reasoning_level,
+        output_mode: output_mode.as_str(),
         pid: dispatch_result.pid,
         record_path: record_path.display().to_string(),
         prompt_path: paths.prompt_path.display().to_string(),
@@ -772,6 +818,7 @@ fn webgpt_dispatch_claim(
     dispatched_at: DateTime<Utc>,
     prompt_bytes: u64,
     prompt_context_bytes: u64,
+    output_mode: WebGptTextOutputMode,
 ) -> serde_json::Value {
     serde_json::json!({
         "schema_version": "singulari.webgpt_dispatch_record.v1",
@@ -784,6 +831,7 @@ fn webgpt_dispatch_claim(
         "mcp_cdp_port": dispatcher.mcp_cdp_port(),
         "mcp_cdp_url": dispatcher.mcp_cdp_url(),
         "conversation_id": dispatcher.conversation_id(),
+        "output_mode": output_mode.as_str(),
         "timeout_secs": dispatcher.timeout_secs(),
         "prompt_path": paths.prompt_path.display().to_string(),
         "prompt_context_path": paths.prompt_context_path.display().to_string(),
@@ -808,24 +856,22 @@ fn commit_webgpt_dispatch_if_success(
     pending: &singulari_world::PendingAgentTurn,
     response_path: &Path,
     dispatch_result: &WebGptDispatchResult,
+    output_mode: WebGptTextOutputMode,
 ) -> WebGptCommitResult {
     if !dispatch_result.success {
-        let status = if dispatch_result
-            .error
-            .as_deref()
-            .is_some_and(is_webgpt_timeout_signal)
-        {
-            "waiting_browser"
-        } else {
-            "failed"
+        let error = dispatch_result.error.clone();
+        let status = match error.as_deref() {
+            Some(error) if is_webgpt_timeout_signal(error) => "waiting_browser",
+            Some(error) if is_webgpt_malformed_output_signal(error) => "commit_failed",
+            _ => "failed",
         };
         return WebGptCommitResult {
             status: status.to_owned(),
             committed: None,
-            error: None,
+            error,
         };
     }
-    match commit_webgpt_agent_response(store_root, pending, response_path) {
+    match commit_webgpt_agent_response(store_root, pending, response_path, output_mode) {
         Ok(committed) => WebGptCommitResult {
             status: "completed".to_owned(),
             committed: Some(committed),
@@ -1333,9 +1379,15 @@ impl WebGptDispatcher {
         }
     }
 
-    fn run(&self, paths: WebGptTurnPaths<'_>) -> Result<WebGptDispatchResult> {
+    fn run(
+        &self,
+        paths: WebGptTurnPaths<'_>,
+        output_mode: WebGptTextOutputMode,
+    ) -> Result<WebGptDispatchResult> {
         match self {
-            Self::ExternalCommand { command } => run_external_webgpt_turn_command(command, paths),
+            Self::ExternalCommand { command } => {
+                run_external_webgpt_turn_command(command, paths, output_mode)
+            }
             Self::McpResearch {
                 wrapper,
                 runtime,
@@ -1351,6 +1403,7 @@ impl WebGptDispatcher {
                 *timeout_secs,
                 runtime,
                 paths,
+                output_mode,
             ),
         }
     }
@@ -1383,6 +1436,7 @@ fn resolve_webgpt_dispatcher(
 fn run_external_webgpt_turn_command(
     command: &Path,
     paths: WebGptTurnPaths<'_>,
+    output_mode: WebGptTextOutputMode,
 ) -> Result<WebGptDispatchResult> {
     let child = Command::new(command)
         .arg("--prompt-path")
@@ -1400,6 +1454,7 @@ fn run_external_webgpt_turn_command(
             paths.prompt_context_path,
         )
         .env("SINGULARI_WORLD_RESPONSE_PATH", paths.response_path)
+        .env("SINGULARI_WORLD_WEBGPT_OUTPUT_MODE", output_mode.as_str())
         .env("SINGULARI_WORLD_WORLD_ID", paths.world_id)
         .env("SINGULARI_WORLD_TURN_ID", paths.turn_id)
         .stdout(Stdio::piped())
@@ -1435,6 +1490,14 @@ fn run_external_webgpt_turn_command(
     })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "WebGPT MCP call keeps transport, model routing, timeout, runtime, paths, and output contract explicit"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "The dispatch bridge writes all artifacts and normalizes one transport result in one auditable boundary"
+)]
 fn run_webgpt_mcp_research_turn(
     wrapper: &Path,
     conversation_id: Option<&str>,
@@ -1443,6 +1506,7 @@ fn run_webgpt_mcp_research_turn(
     timeout_secs: u64,
     runtime: &WebGptLaneRuntime,
     paths: WebGptTurnPaths<'_>,
+    output_mode: WebGptTextOutputMode,
 ) -> Result<WebGptDispatchResult> {
     let prompt = fs::read_to_string(paths.prompt_path)
         .with_context(|| format!("failed to read {}", paths.prompt_path.display()))?;
@@ -1498,26 +1562,57 @@ fn run_webgpt_mcp_research_turn(
         .get("answer_markdown")
         .and_then(serde_json::Value::as_str)
         .context("webgpt_research result missing answer_markdown")?;
-    let agent_response_json = extract_json_object_text(answer_markdown)
-        .context("webgpt answer did not contain an AgentTurnResponse JSON object")?;
+    let raw_conversation_id = result
+        .get("raw_conversation_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let current_model = result
+        .get("current_model")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let current_reasoning_level = result
+        .get("current_reasoning_level")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let extracted_output = match output_mode {
+        WebGptTextOutputMode::AgentResponse => extract_json_object_text(answer_markdown),
+        WebGptTextOutputMode::Draft => draft::parse_webgpt_turn_draft(answer_markdown)
+            .ok()
+            .and_then(|draft| serde_json::to_string(&draft).ok()),
+    };
+    let Some(agent_response_json) = extracted_output else {
+        let error = match output_mode {
+            WebGptTextOutputMode::AgentResponse => {
+                "webgpt answer did not contain one complete AgentTurnResponse JSON object"
+            }
+            WebGptTextOutputMode::Draft => {
+                "webgpt answer did not contain one complete WebgptTurnDraft JSON object"
+            }
+        }
+        .to_owned();
+        fs::write(paths.response_path, b"")
+            .with_context(|| format!("failed to write {}", paths.response_path.display()))?;
+        fs::write(paths.stderr_path, format!("{error}\n").as_bytes())
+            .with_context(|| format!("failed to write {}", paths.stderr_path.display()))?;
+        return Ok(WebGptDispatchResult {
+            success: false,
+            pid: server_pid,
+            exit_code: None,
+            raw_conversation_id,
+            current_model,
+            current_reasoning_level,
+            error: Some(error),
+        });
+    };
     fs::write(paths.response_path, agent_response_json.as_bytes())
         .with_context(|| format!("failed to write {}", paths.response_path.display()))?;
     Ok(WebGptDispatchResult {
         success: true,
         pid: server_pid,
         exit_code: None,
-        raw_conversation_id: result
-            .get("raw_conversation_id")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned),
-        current_model: result
-            .get("current_model")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned),
-        current_reasoning_level: result
-            .get("current_reasoning_level")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned),
+        raw_conversation_id,
+        current_model,
+        current_reasoning_level,
         error: None,
     })
 }
@@ -1845,10 +1940,18 @@ fn commit_webgpt_agent_response(
     store_root: Option<&Path>,
     pending: &singulari_world::PendingAgentTurn,
     response_path: &Path,
+    output_mode: WebGptTextOutputMode,
 ) -> Result<singulari_world::CommittedAgentTurn> {
     let raw_body = fs::read_to_string(response_path)
         .with_context(|| format!("failed to read {}", response_path.display()))?;
-    let response = parse_webgpt_agent_turn_response(store_root, pending, &raw_body, response_path)?;
+    let response = match output_mode {
+        WebGptTextOutputMode::AgentResponse => {
+            parse_webgpt_agent_turn_response(store_root, pending, &raw_body, response_path)?
+        }
+        WebGptTextOutputMode::Draft => {
+            parse_webgpt_turn_draft_response(store_root, pending, &raw_body, response_path)?
+        }
+    };
     commit_agent_turn(&AgentCommitTurnOptions {
         store_root: store_root.map(Path::to_path_buf),
         world_id: pending.world_id.clone(),
@@ -1864,29 +1967,52 @@ fn parse_webgpt_agent_turn_response(
 ) -> Result<AgentTurnResponse> {
     let mut value = serde_json::from_str::<Value>(raw_body)
         .with_context(|| format!("failed to parse {}", response_path.display()))?;
-    let reference_aliases = webgpt_reference_aliases(store_root, pending);
-    normalize_webgpt_agent_turn_response(&mut value, &reference_aliases);
+    let normalization = webgpt_response_normalization(store_root, pending);
+    normalize_webgpt_agent_turn_response(&mut value, &normalization);
     serde_json::from_value::<AgentTurnResponse>(value)
         .with_context(|| format!("failed to parse {}", response_path.display()))
 }
 
-fn webgpt_reference_aliases(
+fn parse_webgpt_turn_draft_response(
     store_root: Option<&Path>,
     pending: &singulari_world::PendingAgentTurn,
-) -> HashMap<String, String> {
+    raw_body: &str,
+    response_path: &Path,
+) -> Result<AgentTurnResponse> {
+    let draft = draft::parse_webgpt_turn_draft(raw_body)
+        .with_context(|| format!("failed to parse {}", response_path.display()))?;
+    let prompt_context = compile_prompt_context_packet(&CompilePromptContextPacketOptions {
+        store_root,
+        pending,
+        engine_session_kind: "webgpt_project_session",
+    })?;
+    draft::assemble_agent_turn_response(pending, &prompt_context, &draft)
+        .with_context(|| format!("failed to assemble {}", response_path.display()))
+}
+
+#[derive(Debug, Default)]
+struct WebgptResponseNormalization {
+    reference_aliases: HashMap<String, String>,
+    pressure_obligation_ids: HashSet<String>,
+}
+
+fn webgpt_response_normalization(
+    store_root: Option<&Path>,
+    pending: &singulari_world::PendingAgentTurn,
+) -> WebgptResponseNormalization {
     let Ok(prompt_context) = compile_prompt_context_packet(&CompilePromptContextPacketOptions {
         store_root,
         pending,
         engine_session_kind: "webgpt_project_session",
     }) else {
-        return HashMap::new();
+        return WebgptResponseNormalization::default();
     };
-    prompt_context
+    let mut aliases = prompt_context
         .pre_turn_simulation
         .available_affordances
-        .into_iter()
+        .iter()
         .flat_map(|affordance| {
-            let canonical = affordance.affordance_id;
+            let canonical = affordance.affordance_id.clone();
             let aliases = [
                 canonical.replace(":___:", "::"),
                 canonical.replace(":__:", "::"),
@@ -1897,14 +2023,81 @@ fn webgpt_reference_aliases(
                 .map(|alias| (alias, canonical.clone()))
                 .collect::<Vec<_>>()
         })
-        .collect()
+        .collect::<HashMap<_, _>>();
+    if let Ok(prompt_context_value) = serde_json::to_value(&prompt_context) {
+        collect_entity_reference_aliases(&prompt_context_value, &mut aliases);
+    }
+    let pressure_obligation_ids = prompt_context
+        .pre_turn_simulation
+        .pressure_obligations
+        .iter()
+        .map(|obligation| obligation.pressure_id.clone())
+        .collect();
+    WebgptResponseNormalization {
+        reference_aliases: aliases,
+        pressure_obligation_ids,
+    }
+}
+
+fn collect_entity_reference_aliases(value: &Value, aliases: &mut HashMap<String, String>) {
+    match value {
+        Value::String(text) => {
+            if let Some(alias) = entity_reference_alias(text) {
+                insert_unique_reference_alias(aliases, alias, text.clone());
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_entity_reference_aliases(item, aliases);
+            }
+        }
+        Value::Object(map) => {
+            for child in map.values() {
+                collect_entity_reference_aliases(child, aliases);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
+fn entity_reference_alias(canonical: &str) -> Option<String> {
+    for prefix in [
+        "entities.characters:",
+        "entities.places:",
+        "entities.items:",
+        "entities.objects:",
+    ] {
+        let Some(alias) = canonical.strip_prefix(prefix) else {
+            continue;
+        };
+        if alias.contains(':') {
+            return Some(alias.to_owned());
+        }
+    }
+    None
+}
+
+fn insert_unique_reference_alias(
+    aliases: &mut HashMap<String, String>,
+    alias: String,
+    canonical: String,
+) {
+    match aliases.get(&alias) {
+        Some(existing) if existing != &canonical => {
+            aliases.remove(&alias);
+        }
+        Some(_) => {}
+        None => {
+            aliases.insert(alias, canonical);
+        }
+    }
 }
 
 fn normalize_webgpt_agent_turn_response(
     value: &mut Value,
-    reference_aliases: &HashMap<String, String>,
+    normalization: &WebgptResponseNormalization,
 ) {
-    normalize_reference_values(value, reference_aliases);
+    normalize_reference_values(value, &normalization.reference_aliases);
     let choice_seeds = collect_webgpt_choice_seeds(value);
     let Some(response) = value.as_object_mut() else {
         return;
@@ -1933,6 +2126,7 @@ fn normalize_webgpt_agent_turn_response(
     normalize_gate_results(resolution);
     normalize_proposed_effects(resolution);
     normalize_process_ticks(resolution);
+    normalize_missing_pressure_obligations(resolution, &normalization.pressure_obligation_ids);
     normalize_choice_plan(resolution, &choice_seeds);
 }
 
@@ -2014,6 +2208,7 @@ fn normalize_gate_results(resolution: &mut serde_json::Map<String, Value>) {
             gate.insert("gate_kind".to_owned(), Value::String(inferred.to_owned()));
         }
         normalize_string_enum_field(gate, "gate_kind", normalize_gate_kind);
+        normalize_gate_ref_domain(gate);
         ensure_visibility_field(gate, "visibility", "player_visible");
         if !gate.contains_key("status") {
             let status = if gate.get("passed").and_then(Value::as_bool) == Some(false) {
@@ -2053,8 +2248,137 @@ fn normalize_proposed_effects(resolution: &mut serde_json::Map<String, Value>) {
             effect.insert("effect_kind".to_owned(), Value::String(inferred.to_owned()));
         }
         normalize_string_enum_field(effect, "effect_kind", normalize_effect_kind);
+        normalize_effect_ref_domain(effect);
         ensure_visibility_field(effect, "visibility", "player_visible");
     }
+}
+
+fn normalize_gate_ref_domain(gate: &mut serde_json::Map<String, Value>) {
+    let Some(gate_ref) = gate.get("gate_ref").and_then(Value::as_str) else {
+        return;
+    };
+    let Some((gate_kind, gate_ref)) = canonical_gate_domain_for_ref(gate_ref) else {
+        return;
+    };
+    gate.insert("gate_kind".to_owned(), Value::String(gate_kind.to_owned()));
+    gate.insert("gate_ref".to_owned(), Value::String(gate_ref));
+}
+
+fn canonical_gate_domain_for_ref(gate_ref: &str) -> Option<(&'static str, String)> {
+    if matches!(gate_ref, "player_input" | "current_turn") {
+        return Some(("knowledge", "current_turn".to_owned()));
+    }
+    if gate_ref.starts_with("pressure:social:") {
+        return Some(("social_permission", gate_ref.to_owned()));
+    }
+    if gate_ref.starts_with("pressure:time:") || gate_ref.starts_with("process:") {
+        return Some(("time_pressure", gate_ref.to_owned()));
+    }
+    if gate_ref.starts_with("pressure:") || gate_ref.starts_with("encounter:") {
+        return Some(("knowledge", "current_turn".to_owned()));
+    }
+    if gate_ref.starts_with("place:") || gate_ref.starts_with("location:") {
+        return Some(("location", gate_ref.to_owned()));
+    }
+    if gate_ref.starts_with("body:") {
+        return Some(("body", gate_ref.to_owned()));
+    }
+    if gate_ref.starts_with("resource:") || gate_ref.starts_with("inventory:") {
+        return Some(("resource", gate_ref.to_owned()));
+    }
+    if gate_ref.starts_with("rel:")
+        || gate_ref.starts_with("relationship:")
+        || gate_ref.starts_with("stance:")
+        || gate_ref.starts_with("social:")
+    {
+        return Some(("social_permission", gate_ref.to_owned()));
+    }
+    if gate_ref.starts_with("belief:")
+        || gate_ref.starts_with("knowledge:")
+        || gate_ref.starts_with("visible_scene:")
+    {
+        return Some(("knowledge", gate_ref.to_owned()));
+    }
+    if gate_ref.starts_with("law:") || gate_ref.starts_with("world_law:") {
+        return Some(("world_law", gate_ref.to_owned()));
+    }
+    gate_ref
+        .starts_with("affordance:")
+        .then(|| ("affordance", gate_ref.to_owned()))
+}
+
+fn normalize_effect_ref_domain(effect: &mut serde_json::Map<String, Value>) {
+    let Some(target_ref) = effect.get("target_ref").and_then(Value::as_str) else {
+        return;
+    };
+    if target_ref == "player_input" || target_ref == "current_turn" {
+        if let Some(pressure_ref) = first_ref_with_prefix(effect, "evidence_refs", "pressure:") {
+            effect.insert("target_ref".to_owned(), Value::String(pressure_ref));
+            effect.insert(
+                "effect_kind".to_owned(),
+                Value::String("scene_pressure_delta".to_owned()),
+            );
+        } else {
+            effect.insert(
+                "target_ref".to_owned(),
+                Value::String("current_turn".to_owned()),
+            );
+            effect.insert(
+                "effect_kind".to_owned(),
+                Value::String("player_intent_trace".to_owned()),
+            );
+        }
+        return;
+    }
+    let Some(effect_kind) = canonical_effect_kind_for_ref(target_ref) else {
+        return;
+    };
+    effect.insert(
+        "effect_kind".to_owned(),
+        Value::String(effect_kind.to_owned()),
+    );
+}
+
+fn canonical_effect_kind_for_ref(target_ref: &str) -> Option<&'static str> {
+    if target_ref.starts_with("pressure:") {
+        Some("scene_pressure_delta")
+    } else if target_ref.starts_with("body:")
+        || target_ref.starts_with("resource:")
+        || target_ref.starts_with("inventory:")
+    {
+        Some("body_resource_delta")
+    } else if target_ref.starts_with("place:") || target_ref.starts_with("location:") {
+        Some("location_delta")
+    } else if target_ref.starts_with("rel:")
+        || target_ref.starts_with("relationship:")
+        || target_ref.starts_with("stance:")
+        || target_ref.starts_with("social:")
+    {
+        Some("relationship_delta")
+    } else if target_ref.starts_with("belief:") || target_ref.starts_with("knowledge:") {
+        Some("belief_delta")
+    } else if target_ref.starts_with("lore:") || target_ref.starts_with("world_fact:") {
+        Some("world_lore_delta")
+    } else if target_ref.starts_with("pattern_debt:") {
+        Some("pattern_debt")
+    } else if target_ref.starts_with("intent:") || target_ref.starts_with("player_intent:") {
+        Some("player_intent_trace")
+    } else {
+        None
+    }
+}
+
+fn first_ref_with_prefix(
+    map: &serde_json::Map<String, Value>,
+    key: &str,
+    prefix: &str,
+) -> Option<String> {
+    map.get(key)
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(Value::as_str)
+        .find(|item| item.starts_with(prefix))
+        .map(ToOwned::to_owned)
 }
 
 fn normalize_process_ticks(resolution: &mut serde_json::Map<String, Value>) {
@@ -2076,6 +2400,70 @@ fn normalize_process_ticks(resolution: &mut serde_json::Map<String, Value>) {
         }
         normalize_string_enum_field(tick, "cause", normalize_process_tick_cause);
         ensure_visibility_field(tick, "visibility", "player_visible");
+    }
+}
+
+fn normalize_missing_pressure_obligations(
+    resolution: &mut serde_json::Map<String, Value>,
+    pressure_obligation_ids: &HashSet<String>,
+) {
+    for pressure_ref in pressure_obligation_ids {
+        if !resolution_mentions_pressure_ref(resolution, pressure_ref)
+            || resolution_moves_pressure_ref(resolution, pressure_ref)
+        {
+            continue;
+        }
+        let noop_reason = serde_json::json!({
+            "pressure_ref": pressure_ref,
+            "reason": "이번 턴은 압력을 직접 해소하지 않고 다음 행동 압력으로 유지한다.",
+            "evidence_refs": ["player_input", pressure_ref]
+        });
+        resolution
+            .entry("pressure_noop_reasons".to_owned())
+            .or_insert_with(|| Value::Array(Vec::new()));
+        if let Some(noop_reasons) = resolution
+            .get_mut("pressure_noop_reasons")
+            .and_then(Value::as_array_mut)
+        {
+            noop_reasons.push(noop_reason);
+        }
+    }
+}
+
+fn resolution_mentions_pressure_ref(
+    resolution: &serde_json::Map<String, Value>,
+    pressure_ref: &str,
+) -> bool {
+    resolution
+        .get("interpreted_intent")
+        .and_then(Value::as_object)
+        .and_then(|intent| intent.get("pressure_refs"))
+        .and_then(Value::as_array)
+        .is_some_and(|refs| refs.iter().any(|item| item.as_str() == Some(pressure_ref)))
+}
+
+fn resolution_moves_pressure_ref(
+    resolution: &serde_json::Map<String, Value>,
+    pressure_ref: &str,
+) -> bool {
+    [
+        "gate_results",
+        "proposed_effects",
+        "process_ticks",
+        "pressure_noop_reasons",
+    ]
+    .into_iter()
+    .filter_map(|key| resolution.get(key).and_then(Value::as_array))
+    .flatten()
+    .any(|entry| value_mentions_ref(entry, pressure_ref))
+}
+
+fn value_mentions_ref(value: &Value, item_ref: &str) -> bool {
+    match value {
+        Value::String(text) => text == item_ref,
+        Value::Array(items) => items.iter().any(|item| value_mentions_ref(item, item_ref)),
+        Value::Object(map) => map.values().any(|item| value_mentions_ref(item, item_ref)),
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
     }
 }
 
@@ -2479,6 +2867,12 @@ pub(super) fn is_webgpt_timeout_signal(error: &str) -> bool {
         || normalized.contains("deadline exceeded")
 }
 
+fn is_webgpt_malformed_output_signal(error: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
+    normalized.contains("did not contain one complete agentturnresponse")
+        || normalized.contains("did not contain one complete webgptturndraft")
+}
+
 fn dispatch_record_is_stale(value: &serde_json::Value) -> Result<bool> {
     let Some(dispatched_at) = value
         .get("dispatched_at")
@@ -2582,6 +2976,27 @@ mod tests {
         assert!(!write_dispatch_claim(&path, &claim)?);
         let value: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
         assert_eq!(value["status"], serde_json::json!("failed"));
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_contract_failure_records_are_not_reprompted() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("turn_0003-webgpt.json");
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema_version": "singulari.webgpt_dispatch_record.v1",
+                "status": "commit_failed",
+                "turn_id": "turn_0003",
+                "error": "webgpt answer did not contain one complete WebgptTurnDraft JSON object",
+            }))?,
+        )?;
+
+        assert!(is_webgpt_malformed_output_signal(
+            "webgpt answer did not contain one complete WebgptTurnDraft JSON object"
+        ));
+        assert!(!existing_dispatch_is_retryable(&path)?);
         Ok(())
     }
 
@@ -2777,7 +3192,7 @@ premise:
         let raw = r#"좋아.
 
 ```json
-{"schema_version":"singulari.agent_turn_response.v1","world_id":"stw","turn_id":"turn_0001"}
+{"schema_version":"singulari.agent_turn_response.v1","world_id":"stw","turn_id":"turn_0001","visible_scene":{"schema_version":"singulari.narrative_scene.v1","text_blocks":["문장"],"tone_notes":[]},"next_choices":[]}
 ```
 "#;
         let Some(extracted) = extract_json_object_text(raw) else {
@@ -3019,6 +3434,7 @@ premise:
             webgpt_mcp_wrapper: None,
             webgpt_model: None,
             webgpt_reasoning_level: None,
+            webgpt_output_mode: WebGptTextOutputMode::AgentResponse,
             webgpt_text_profile_dir: Some("/tmp/singulari-webgpt-text".into()),
             webgpt_image_profile_dir: Some("/tmp/singulari-webgpt-image".into()),
             webgpt_reference_image_profile_dir: Some(
@@ -3057,6 +3473,7 @@ premise:
             webgpt_mcp_wrapper: None,
             webgpt_model: None,
             webgpt_reasoning_level: None,
+            webgpt_output_mode: WebGptTextOutputMode::AgentResponse,
             webgpt_text_profile_dir: Some("/tmp/singulari-webgpt-text".into()),
             webgpt_image_profile_dir: Some("/tmp/singulari-webgpt-image".into()),
             webgpt_reference_image_profile_dir: Some(
@@ -3238,7 +3655,7 @@ premise:
             "next_choices": []
         });
 
-        normalize_webgpt_agent_turn_response(&mut value, &HashMap::new());
+        normalize_webgpt_agent_turn_response(&mut value, &WebgptResponseNormalization::default());
 
         assert_eq!(
             value["resolution_proposal"]["gate_results"][0]["visibility"],
@@ -3298,7 +3715,7 @@ premise:
             }]
         });
 
-        normalize_webgpt_agent_turn_response(&mut value, &HashMap::new());
+        normalize_webgpt_agent_turn_response(&mut value, &WebgptResponseNormalization::default());
 
         assert_eq!(
             value["location_events"][0]["location_id"],
@@ -3346,6 +3763,201 @@ premise:
             serde_json::json!("advanced")
         );
         Ok(())
+    }
+
+    #[test]
+    fn normalizes_generic_refs_out_of_world_change_targets() {
+        let mut value = serde_json::json!({
+            "schema_version": "singulari.agent_turn_response.v1",
+            "world_id": "stw_alias",
+            "turn_id": "turn_0001",
+            "resolution_proposal": {
+                "schema_version": "singulari.resolution_proposal.v1",
+                "world_id": "stw_alias",
+                "turn_id": "turn_0001",
+                "interpreted_intent": {
+                    "input_kind": "freeform",
+                    "summary": "test",
+                    "target_refs": ["player_input"],
+                    "pressure_refs": ["pressure:open_questions"],
+                    "evidence_refs": ["player_input"],
+                    "ambiguity": "clear"
+                },
+                "outcome": {
+                    "kind": "success",
+                    "summary": "test",
+                    "evidence_refs": ["player_input"]
+                },
+                "gate_results": [{
+                    "gate_kind": "affordance",
+                    "gate_ref": "player_input",
+                    "visibility": "player_visible",
+                    "status": "passed",
+                    "reason": "generic player input should not be a gate target",
+                    "evidence_refs": ["player_input"]
+                }, {
+                    "gate_kind": "knowledge",
+                    "gate_ref": "pressure:open_questions",
+                    "visibility": "player_visible",
+                    "status": "softened",
+                    "reason": "scene pressure may be evidence, not a knowledge gate target",
+                    "evidence_refs": ["pressure:open_questions"]
+                }],
+                "proposed_effects": [{
+                    "effect_kind": "player_intent_trace",
+                    "target_ref": "player_input",
+                    "visibility": "player_visible",
+                    "summary": "generic player input should not be an effect target",
+                    "evidence_refs": ["player_input"]
+                }, {
+                    "effect_kind": "player_intent_trace",
+                    "target_ref": "current_turn",
+                    "visibility": "player_visible",
+                    "summary": "pressure evidence should retarget scene pressure effects",
+                    "evidence_refs": ["pressure:open_questions"]
+                }],
+                "process_ticks": [],
+                "pressure_noop_reasons": [],
+                "narrative_brief": {
+                    "visible_summary": "test",
+                    "required_beats": [],
+                    "forbidden_visible_details": []
+                },
+                "next_choice_plan": []
+            },
+            "visible_scene": {
+                "schema_version": "singulari.narrative_scene.v1",
+                "text_blocks": ["test"],
+                "tone_notes": []
+            },
+            "next_choices": []
+        });
+
+        normalize_webgpt_agent_turn_response(&mut value, &WebgptResponseNormalization::default());
+
+        assert_eq!(
+            value["resolution_proposal"]["gate_results"][0]["gate_kind"],
+            serde_json::json!("knowledge")
+        );
+        assert_eq!(
+            value["resolution_proposal"]["gate_results"][0]["gate_ref"],
+            serde_json::json!("current_turn")
+        );
+        assert_eq!(
+            value["resolution_proposal"]["gate_results"][1]["gate_ref"],
+            serde_json::json!("current_turn")
+        );
+        assert_eq!(
+            value["resolution_proposal"]["proposed_effects"][0]["effect_kind"],
+            serde_json::json!("player_intent_trace")
+        );
+        assert_eq!(
+            value["resolution_proposal"]["proposed_effects"][0]["target_ref"],
+            serde_json::json!("current_turn")
+        );
+        assert_eq!(
+            value["resolution_proposal"]["proposed_effects"][1]["effect_kind"],
+            serde_json::json!("scene_pressure_delta")
+        );
+        assert_eq!(
+            value["resolution_proposal"]["proposed_effects"][1]["target_ref"],
+            serde_json::json!("pressure:open_questions")
+        );
+    }
+
+    #[test]
+    fn builds_short_entity_reference_aliases_for_webgpt_abbreviations() {
+        let mut aliases = HashMap::new();
+        collect_entity_reference_aliases(
+            &serde_json::json!({
+                "character": "entities.characters:char:anchor",
+                "place": "entities.places:place:opening_location",
+                "unrelated": "pressure:open_questions"
+            }),
+            &mut aliases,
+        );
+
+        assert_eq!(
+            aliases.get("char:anchor"),
+            Some(&"entities.characters:char:anchor".to_owned())
+        );
+        assert_eq!(
+            aliases.get("place:opening_location"),
+            Some(&"entities.places:place:opening_location".to_owned())
+        );
+        assert!(!aliases.contains_key("pressure:open_questions"));
+    }
+
+    #[test]
+    fn normalizes_missing_player_free_input_pressure_movement() {
+        let mut value = serde_json::json!({
+            "schema_version": "singulari.agent_turn_response.v1",
+            "world_id": "stw_alias",
+            "turn_id": "turn_0001",
+            "resolution_proposal": {
+                "schema_version": "singulari.resolution_proposal.v1",
+                "world_id": "stw_alias",
+                "turn_id": "turn_0001",
+                "interpreted_intent": {
+                    "input_kind": "freeform",
+                    "summary": "test",
+                    "target_refs": ["current_turn"],
+                    "pressure_refs": ["pressure:player_free_input", "pressure:open_questions"],
+                    "evidence_refs": ["player_input"],
+                    "ambiguity": "clear"
+                },
+                "outcome": {
+                    "kind": "success",
+                    "summary": "test",
+                    "evidence_refs": ["player_input"]
+                },
+                "gate_results": [{
+                    "gate_kind": "knowledge",
+                    "gate_ref": "current_turn",
+                    "visibility": "player_visible",
+                    "status": "passed",
+                    "reason": "test",
+                    "evidence_refs": ["player_input"]
+                }],
+                "proposed_effects": [{
+                    "effect_kind": "scene_pressure_delta",
+                    "target_ref": "pressure:open_questions",
+                    "visibility": "player_visible",
+                    "summary": "test",
+                    "evidence_refs": ["pressure:open_questions"]
+                }],
+                "process_ticks": [],
+                "pressure_noop_reasons": [],
+                "narrative_brief": {
+                    "visible_summary": "test",
+                    "required_beats": [],
+                    "forbidden_visible_details": []
+                },
+                "next_choice_plan": []
+            },
+            "visible_scene": {
+                "schema_version": "singulari.narrative_scene.v1",
+                "text_blocks": ["test"],
+                "tone_notes": []
+            },
+            "next_choices": []
+        });
+
+        normalize_webgpt_agent_turn_response(
+            &mut value,
+            &WebgptResponseNormalization {
+                pressure_obligation_ids: HashSet::from(["pressure:player_free_input".to_owned()]),
+                ..WebgptResponseNormalization::default()
+            },
+        );
+
+        let Some(noop_reasons) = value["resolution_proposal"]["pressure_noop_reasons"].as_array()
+        else {
+            panic!("pressure_noop_reasons should stay an array");
+        };
+        assert!(noop_reasons.iter().any(|reason| {
+            reason["pressure_ref"] == serde_json::json!("pressure:player_free_input")
+        }));
     }
 
     #[test]
@@ -3423,7 +4035,9 @@ premise:
             "웹 검색, 외부 사이트 탐색, repo 탐색, 소스 파일 읽기를 하지 마라.",
             "allowed_reference_atoms JSON:",
             "`target_refs`, `pressure_refs`, `evidence_refs`, `gate_ref`",
-            "정확한 ref가 없으면 `current_turn`, `player_input`, 선택된",
+            "`player_input`은 evidence_refs 또는 interpreted_intent 설명용으로만 쓴다.",
+            "gate_ref, effect.target_ref, process_ref, grounding_ref에는 절대 쓰지 않는다.",
+            "정확한 도메인 ref가 없으면 gate_ref/effect.target_ref는 `current_turn`에",
             "\"schema_version\":\"singulari.narrative_turn_packet.v1\"",
             "\"pre_turn_simulation\"",
             "\"available_affordances\"",

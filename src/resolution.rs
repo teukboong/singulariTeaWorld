@@ -478,9 +478,12 @@ impl ResolutionAuditor {
             return Ok(());
         }
         if visibility == ResolutionVisibility::PlayerVisible
-            && shorthand_affordance_ref_slot(item_ref, &self.turn_id)
-                .and_then(|slot| self.affordances_by_slot.get(&slot))
-                .is_some()
+            && known_encounter_affordance_ref_slot(
+                item_ref,
+                &self.turn_id,
+                &self.affordances_by_slot,
+            )
+            .is_some()
         {
             return Ok(());
         }
@@ -640,23 +643,36 @@ fn affordance_slot_for_grounding_ref(
             return Some(*slot);
         }
     }
-    let slot = shorthand_affordance_ref_slot(grounding_ref, "")?;
-    affordances
-        .get(&slot)
-        .is_some_and(|affordance| affordance.affordance_id.starts_with("encounter:"))
-        .then_some(slot)
+    known_encounter_affordance_ref_slot(grounding_ref, "", affordances)
 }
 
-fn shorthand_affordance_ref_slot(item_ref: &str, turn_id: &str) -> Option<u8> {
+fn known_encounter_affordance_ref_slot(
+    item_ref: &str,
+    turn_id: &str,
+    affordances: &BTreeMap<u8, crate::affordance_graph::AffordanceNode>,
+) -> Option<u8> {
+    let item_key = encounter_affordance_ref_key(item_ref, turn_id)?;
+    for (slot, affordance) in affordances {
+        if encounter_affordance_ref_key(&affordance.affordance_id, turn_id)
+            .is_some_and(|affordance_key| affordance_key == item_key)
+        {
+            return Some(*slot);
+        }
+    }
+    None
+}
+
+fn encounter_affordance_ref_key(item_ref: &str, turn_id: &str) -> Option<(String, u8)> {
     if !item_ref.starts_with("encounter:") || !item_ref.ends_with(":affordance") {
         return None;
     }
-    if !turn_id.is_empty() && !item_ref.starts_with(format!("encounter:{turn_id}:slot:").as_str()) {
+    let without_prefix = item_ref.strip_prefix("encounter:")?;
+    let (ref_turn_id, slot_tail) = without_prefix.split_once(":slot:")?;
+    if !turn_id.is_empty() && ref_turn_id != turn_id {
         return None;
     }
-    let (_, slot_tail) = item_ref.split_once(":slot:")?;
     let slot = slot_tail.split(':').next()?;
-    slot.parse().ok()
+    Some((ref_turn_id.to_owned(), slot.parse().ok()?))
 }
 
 fn require_choice_plan_kind(
@@ -1214,6 +1230,48 @@ mod tests {
 
         if let Err(critique) = audit_resolution_proposal(&context, &proposal) {
             panic!("current-turn shorthand encounter affordance refs should pass: {critique:?}");
+        }
+    }
+
+    #[test]
+    fn maps_shorthand_encounter_affordance_refs_by_source_slot_not_display_slot() {
+        let mut context = sample_context();
+        context.visible_context.affordance_graph = to_json_value(AffordanceGraphPacket {
+            schema_version: AFFORDANCE_GRAPH_PACKET_SCHEMA_VERSION.to_owned(),
+            world_id: "stw_resolution".to_owned(),
+            turn_id: "turn_0004".to_owned(),
+            ordinary_choice_slots: vec![
+                (1, 5, "__", AffordanceKind::PressureResponse),
+                (2, 1, "___", AffordanceKind::Move),
+                (3, 2, "__", AffordanceKind::Observe),
+                (4, 3, "__", AffordanceKind::Contact),
+                (5, 4, "__", AffordanceKind::ResourceOrBody),
+            ]
+            .into_iter()
+            .map(|(display_slot, source_slot, suffix, kind)| {
+                let mut affordance = sample_affordance_node(display_slot, suffix, kind);
+                affordance.affordance_id =
+                    format!("encounter:turn_0004:slot:{source_slot}:{suffix}:affordance");
+                affordance
+            })
+            .collect(),
+            compiler_policy: AffordanceGraphPolicy::default(),
+        });
+        let mut proposal = sample_proposal();
+        proposal.gate_results[0].gate_ref = "encounter:turn_0004:slot:5::affordance".to_owned();
+        proposal.next_choice_plan[0].grounding_ref =
+            "encounter:turn_0004:slot:5::affordance".to_owned();
+        proposal.next_choice_plan[1].grounding_ref =
+            "encounter:turn_0004:slot:1:_:affordance".to_owned();
+        proposal.next_choice_plan[2].grounding_ref =
+            "encounter:turn_0004:slot:2::affordance".to_owned();
+        proposal.next_choice_plan[3].grounding_ref =
+            "encounter:turn_0004:slot:3::affordance".to_owned();
+        proposal.next_choice_plan[4].grounding_ref =
+            "encounter:turn_0004:slot:4:__:affordance".to_owned();
+
+        if let Err(critique) = audit_resolution_proposal(&context, &proposal) {
+            panic!("source-slot shorthand refs should map to compiled display slots: {critique:?}");
         }
     }
 

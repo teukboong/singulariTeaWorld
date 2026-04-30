@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use super::webgpt::{
     WebGptDispatchOutcome, WebGptDispatchRecord, WebGptImageDispatchRecord, WebGptImageSessionKind,
-    dispatch_pending_agent_turn_via_webgpt, dispatch_visual_job_via_webgpt,
+    WebGptTextOutputMode, dispatch_pending_agent_turn_via_webgpt, dispatch_visual_job_via_webgpt,
     ensure_webgpt_lane_runtime_isolated, existing_dispatch_is_retryable, is_webgpt_timeout_signal,
     prewarm_webgpt_lane_sessions, safe_file_component, visual_dispatch_dir_for_world,
 };
@@ -95,6 +95,7 @@ pub(crate) struct HostWorkerOptions {
     pub(crate) webgpt_mcp_wrapper: Option<PathBuf>,
     pub(crate) webgpt_model: Option<String>,
     pub(crate) webgpt_reasoning_level: Option<String>,
+    pub(crate) webgpt_output_mode: WebGptTextOutputMode,
     pub(crate) webgpt_text_profile_dir: Option<PathBuf>,
     pub(crate) webgpt_image_profile_dir: Option<PathBuf>,
     pub(crate) webgpt_reference_image_profile_dir: Option<PathBuf>,
@@ -1325,6 +1326,7 @@ mod tests {
             webgpt_mcp_wrapper: Some("/definitely/missing/webgpt-mcp.sh".into()),
             webgpt_model: None,
             webgpt_reasoning_level: None,
+            webgpt_output_mode: WebGptTextOutputMode::AgentResponse,
             webgpt_text_profile_dir: Some("/tmp/singulari-webgpt-test-text".into()),
             webgpt_image_profile_dir: Some("/tmp/singulari-webgpt-test-image".into()),
             webgpt_reference_image_profile_dir: Some(

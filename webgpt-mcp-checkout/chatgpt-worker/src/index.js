@@ -1756,6 +1756,7 @@ class ChatGptWorker {
         let lastAssistantText = ''
         let lastChangedAt = 0
         let doneSentFor = ''
+        let baselineMessageId = ''
         let timer = null
 
         const currentConversationId = () => {
@@ -1836,6 +1837,7 @@ class ChatGptWorker {
         const maybeEmitDone = () => {
           const { text, messageId } = readAssistantText()
           if (!text || stopVisible()) return
+          if (messageId && baselineMessageId && messageId === baselineMessageId) return
           if (Date.now() - lastChangedAt < idleMs) return
           if (doneSentFor === text) return
           doneSentFor = text
@@ -1870,21 +1872,28 @@ class ChatGptWorker {
         }
 
         const observer = new MutationObserver(onMutation)
-        const baseline = readAssistantText()
-        if (baseline.text) {
+        const resetBaseline = () => {
+          const baseline = readAssistantText()
           lastAssistantText = baseline.text
           doneSentFor = baseline.text
+          baselineMessageId = baseline.messageId || ''
           lastChangedAt = Date.now()
+          chunkSeq = 0
         }
+        resetBaseline()
         observer.observe(document.body, {
           subtree: true,
           childList: true,
           characterData: true,
         })
+        window.__webgptMcpBeginTurn = resetBaseline
 
         window.__webgptMcpObserverCleanup = () => {
           observer.disconnect()
           if (timer) clearTimeout(timer)
+          if (window.__webgptMcpBeginTurn === resetBaseline) {
+            delete window.__webgptMcpBeginTurn
+          }
         }
       },
       {
@@ -1896,6 +1905,15 @@ class ChatGptWorker {
     )
 
     this.observerInstalledFor = url
+  }
+
+  async markAnswerBaseline() {
+    await this.installObserver()
+    await this.page.evaluate(() => {
+      if (typeof window.__webgptMcpBeginTurn === 'function') {
+        window.__webgptMcpBeginTurn()
+      }
+    })
   }
 
   async fillComposer(text) {
@@ -2052,6 +2070,7 @@ class ChatGptWorker {
     this.forceHeaded = true
     await this.ensurePageReady()
     this.recentNetworkEntries = []
+    await this.markAnswerBaseline()
     emitEvent({ event: 'status', msg: 'working', conversation_id: nowConversationId(this.page.url()) })
     await this.fillComposer(text)
     await this.clickSend()
@@ -2061,6 +2080,7 @@ class ChatGptWorker {
     this.forceHeaded = true
     await this.ensurePageReady()
     this.recentNetworkEntries = []
+    await this.markAnswerBaseline()
     const attachButton = await this.findFirst(this.selectorList('attach_button'), { timeout: 1000 })
     if (attachButton) {
       await attachButton.click()

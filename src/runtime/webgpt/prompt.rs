@@ -44,6 +44,53 @@ next_choices:
 - hidden/adjudication-only 내용은 visible_scene, next_choices, canon_event, player-visible summary에 쓰지 않는다.
 - needs_context는 기본 []다. 쓰면 host가 커밋하지 않는다."#;
 
+const COMPACT_WEBGPT_TURN_DRAFT_SCHEMA_GUIDE: &str = r#"WebgptTurnDraft JSON만 반환한다.
+필수 top-level:
+- schema_version="singulari.webgpt_turn_draft.v1", world_id, turn_id
+- interpreted_intent, outcome, visible_scene, choices
+
+중요 경계:
+- AgentTurnResponse, ResolutionProposal, NarrativeScene schema wrapper를 쓰지 않는다.
+- slot 6 자유서술과 slot 7 판단 위임은 쓰지 않는다. host가 고정 생성한다.
+- grounding_ref, gate_ref, effect.target_ref, process_ref를 쓰지 않는다. host가 조립한다.
+- 새 ref를 만들지 않는다. 필요하면 allowed_reference_atoms에 있는 문자열을 hint로만 복사한다.
+
+interpreted_intent:
+- summary: 플레이어 입력/선택을 한국어 한 문장으로 해석한다.
+- target_hints: 대상 후보 ref/hint 배열. 모르면 [].
+- pressure_hints: 관련 pressure 후보 배열. 모르면 [].
+- evidence_hints: 근거 후보 배열. player_input은 evidence hint로만 허용된다.
+- ambiguity: clear/minor/high 중 하나.
+
+outcome:
+- kind: success/partial_success/blocked/costly_success/delayed/escalated 중 하나.
+- summary: player-visible 결과 요약. 숨은 사실을 밝히지 않는다.
+- evidence_hints: 근거 후보 배열.
+
+visible_scene:
+- text_blocks: 한국어 VN prose 문단 배열. 내용을 쓰는 곳은 여기다.
+- tone_notes: 이번 턴에서 실제 반영한 문체/화법/장면 압력 노트 배열.
+- JSON 문자열 내부에는 ASCII 큰따옴표 문자 `"`를 직접 넣지 않는다.
+  대사가 필요하면 `「멈춰.」`처럼 JSON escape가 필요 없는 한국어/전각
+  따옴표를 쓰거나, 반드시 `\"`로 escape한다.
+
+choices:
+- slot 1..5만 쓴다.
+- label: UI tag/짧은 선택지 문구.
+- intent: 선택하면 무엇을 하려는지 player-visible 문장.
+- tag_hint: 있으면 짧은 태그. 없으면 생략.
+
+pressure_movements:
+- pressure_id: allowed_reference_atoms에 있는 pressure id만 쓴다.
+- change: surfaced/increased/softened/redirected/resolved/preserved 중 하나.
+- summary: player-visible 변화 요약.
+- evidence_hints: 근거 후보 배열.
+
+엄격 규칙:
+- hidden/adjudication-only 내용은 visible_scene, choices, outcome.summary에 쓰지 않는다.
+- Rust host가 refs, slots, schema envelope, pressure no-op, WorldCourt commit을 조립한다.
+- 너는 내용과 의미 초안만 작성한다."#;
+
 const SEEDLESS_PROSE_CONTRACT: &str = r"- 이 계약은 seedless style contract다. 여기 있는 문체/작법 규칙은 소재, 사건, 인물, 장소, 장르 장치, 과거사, 상징을 새로 만들 권한이 없다.
 - scene_fact_boundaries: 오직 narrative turn packet의 player-visible facts, current player_input, visible canon, selected memory items에서 허용된 사실만 쓴다. style contract, schema examples, previous WebGPT phrasing, UI labels는 장면 사실이 아니다.
 - 캐릭터 voice_anchors는 캐릭터 텍스트 디자인이다. speech는 화법, endings는 어미/말끝, tone은 어투/거리감/어휘, gestures는 반복 제스처, habits는 행동 습관, drift는 변화 방향으로 적용한다.
@@ -117,9 +164,15 @@ pub(super) fn build_webgpt_turn_prompt(prompt_context: &PromptContextPacket) -> 
 - `target_refs`, `pressure_refs`, `evidence_refs`, `gate_ref`,
   `grounding_ref`, `process_ref`, `effect.target_ref`는 아래
   `allowed_reference_atoms`에 있는 문자열만 정확히 복사한다.
+- `player_input`은 evidence_refs 또는 interpreted_intent 설명용으로만 쓴다.
+  gate_ref, effect.target_ref, process_ref, grounding_ref에는 절대 쓰지 않는다.
+- gate_ref와 effect.target_ref는 kind와 같은 도메인의 ref만 쓴다.
+  knowledge/current-turn 판정이면 `current_turn`, 장면 압력 변화면 `pressure:*`,
+  위치 변화면 `place:*` 또는 `location:*`, 몸/자원 변화면 `body:*`,
+  `resource:*`, `inventory:*`만 쓴다.
 - 몸/자원/위치/지식 상태를 설명하고 싶어도 새 ref를 만들지 않는다.
-  정확한 ref가 없으면 `current_turn`, `player_input`, 선택된
-  affordance_id, pressure_id, process_id 중 하나를 쓴다.
+  정확한 도메인 ref가 없으면 gate_ref/effect.target_ref는 `current_turn`에
+  knowledge/player_intent_trace로 묶고, 실제 근거는 evidence_refs에 둔다.
 - 사람이 읽는 설명 문구, 상태 요약, JSON pointer, 새 `mind:*`,
   `body:*`, `rel:*` 같은 임의 ref는 금지한다.
 
@@ -148,6 +201,76 @@ narrative turn packet JSON:
         text_design_directive = SEEDLESS_PROSE_CONTRACT,
         allowed_reference_atoms = allowed_reference_atoms,
         agent_schema = COMPACT_AGENT_TURN_RESPONSE_SCHEMA_GUIDE,
+        narrative_turn_packet = narrative_turn_packet,
+        world_id = prompt_context.world_id,
+        turn_id = prompt_context.turn_id,
+    ))
+}
+
+pub(super) fn build_webgpt_turn_draft_prompt(
+    prompt_context: &PromptContextPacket,
+) -> Result<String> {
+    let output_contract =
+        serde_json::from_value::<AgentOutputContract>(prompt_context.output_contract.clone())
+            .context("webgpt prompt context output_contract was not an AgentOutputContract")?;
+    let narrative_turn_packet_value = build_narrative_turn_packet(prompt_context)?;
+    let allowed_reference_atoms =
+        serde_json::to_string_pretty(&build_allowed_reference_atoms(&narrative_turn_packet_value))
+            .context("failed to serialize webgpt allowed reference atoms")?;
+    let narrative_turn_packet = serde_json::to_string(&narrative_turn_packet_value)
+        .context("failed to serialize webgpt narrative turn packet")?;
+    let narrative_budget = &output_contract.narrative_budget;
+    Ok(format!(
+        r#"Singulari World web frontend에서 pending turn 하나가 들어왔어. 너는 WebGPT narrative draft writer다.
+
+서사 출력 지시:
+- 이번 턴 서사 목표: {level_label}. 기본 선택 턴이면 {standard_blocks}문단 / 약 {target_chars}자까지 충분히 써라. 큰 사건이면 {major_blocks}문단 / 약 {major_target_chars}자까지 확장해라.
+- visible_scene.text_blocks는 짧은 로그나 요약이 아니라 한국어 VN prose다.
+- Rust host가 내부 commit envelope를 조립하므로, 너는 player-visible 내용과 의미 초안에 집중한다.
+
+역할:
+- 플레이어에게 다시 묻지 말고, 아래 narrative turn packet만 보고 바로 서사 턴 초안을 작성한다.
+- hidden/private context는 판정에만 쓰고, visible_scene/outcome/choices에는 절대 누출하지 않는다.
+{text_design_directive}
+- player_input이 "세계 개막"이면 그것은 선택지가 아니라 시드에서 첫 서사를 여는 bootstrap turn이다.
+- narrative_turn_packet.visible_context.affordance_graph와 pre_turn_simulation.available_affordances는 slot 1..5의 행동 허가표다.
+- slot 6과 slot 7은 쓰지 마라. host가 고정 생성한다.
+- 세계의 사실/상태/source of truth는 아래 narrative turn packet과 world store다.
+- 웹 검색, 외부 사이트 탐색, repo 탐색, 소스 파일 읽기를 하지 마라.
+
+참조 hint 계약:
+- hint 배열에는 allowed_reference_atoms에 있는 문자열만 복사한다.
+- player_input은 evidence_hints에만 쓴다.
+- 정확한 ref가 없으면 빈 배열을 둔다. 새 ref나 JSON pointer를 만들지 않는다.
+
+allowed_reference_atoms JSON:
+```json
+{allowed_reference_atoms}
+```
+
+{draft_schema}
+
+narrative turn packet JSON:
+```json
+{narrative_turn_packet}
+```
+
+출력:
+- WebgptTurnDraft JSON 하나만 반환한다.
+- Markdown fence, 설명문, 도입문 없이 JSON 본문만 반환한다.
+- 반환값은 `JSON.parse`가 바로 성공해야 한다. text_blocks, tone_notes,
+  choices.intent, outcome.summary 안의 대사/인용부호 때문에 JSON이 깨지면
+  그 턴은 커밋되지 않는다.
+- world_id는 "{world_id}", turn_id는 "{turn_id}"와 정확히 같아야 한다.
+"#,
+        level_label = narrative_budget.level_label,
+        standard_blocks = narrative_budget.standard_choice_turn_blocks,
+        target_chars = narrative_budget.target_chars,
+        major_blocks = narrative_budget.major_turn_blocks,
+        major_target_chars = narrative_budget.major_target_chars,
+        text_design_directive = SEEDLESS_PROSE_CONTRACT,
+        allowed_reference_atoms = allowed_reference_atoms,
+        draft_schema = COMPACT_WEBGPT_TURN_DRAFT_SCHEMA_GUIDE,
         narrative_turn_packet = narrative_turn_packet,
         world_id = prompt_context.world_id,
         turn_id = prompt_context.turn_id,

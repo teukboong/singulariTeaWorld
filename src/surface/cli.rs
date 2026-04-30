@@ -28,7 +28,8 @@ use std::path::{Path, PathBuf};
 use crate::runtime::{
     DEFAULT_WEBGPT_IMAGE_CDP_PORT, DEFAULT_WEBGPT_REFERENCE_IMAGE_CDP_PORT,
     DEFAULT_WEBGPT_TEXT_CDP_PORT, DEFAULT_WEBGPT_TIMEOUT_SECS, HostWorkerOptions,
-    HostWorkerTextBackend, HostWorkerVisualBackend, current_turn_visual_jobs, handle_host_worker,
+    HostWorkerTextBackend, HostWorkerVisualBackend, WebGptTextOutputMode, current_turn_visual_jobs,
+    handle_host_worker,
 };
 
 #[derive(Parser)]
@@ -520,6 +521,15 @@ enum Commands {
         #[arg(long, env = "SINGULARI_WORLD_WEBGPT_REASONING_LEVEL")]
         webgpt_reasoning_level: Option<String>,
 
+        /// Output contract requested from the built-in `WebGPT` text backend.
+        #[arg(
+            long,
+            env = "SINGULARI_WORLD_WEBGPT_OUTPUT_MODE",
+            value_enum,
+            default_value_t = WebGptTextOutputMode::AgentResponse
+        )]
+        webgpt_output_mode: WebGptTextOutputMode,
+
         /// Dedicated `WebGPT` text-lane browser profile.
         #[arg(long, env = "SINGULARI_WORLD_WEBGPT_TEXT_PROFILE_DIR")]
         webgpt_text_profile_dir: Option<PathBuf>,
@@ -867,6 +877,7 @@ fn dispatch(cli: Cli) -> Result<()> {
             webgpt_mcp_wrapper,
             webgpt_model,
             webgpt_reasoning_level,
+            webgpt_output_mode,
             webgpt_text_profile_dir,
             webgpt_image_profile_dir,
             webgpt_reference_image_profile_dir,
@@ -886,6 +897,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                 webgpt_mcp_wrapper,
                 webgpt_model,
                 webgpt_reasoning_level,
+                webgpt_output_mode,
                 webgpt_text_profile_dir,
                 webgpt_image_profile_dir,
                 webgpt_reference_image_profile_dir,

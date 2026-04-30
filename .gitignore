@@ -9,6 +9,7 @@ Thumbs.db
 
 # Local runtime state and generated assets.
 .world-store/
+.world-store-*/
 .singulari-world/
 vn-web/current-vn.json
 *.db

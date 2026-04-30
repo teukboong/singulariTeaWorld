@@ -64,6 +64,12 @@ narratively intelligent outcomes, and draft Korean VN prose. Rust should audit
 that proposal against hard laws, evidence refs, visibility, gates, causality,
 and rebuildable event projections before committing it as world truth.
 
+For the WebGPT text lane, the concrete migration target is
+[WebGPT Turn Draft Assembly](webgpt-turn-draft-assembly-blueprint.md). WebGPT
+should author a smaller player-visible draft, while Rust assembles the
+commit-ready `AgentTurnResponse` envelope, refs, slots, and deterministic
+defaults.
+
 ## Scene Direction
 
 After resolution authority, the next quality layer should be
