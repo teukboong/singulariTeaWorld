@@ -156,6 +156,9 @@ pub fn compile_prompt_context_packet(
 ///
 /// Returns an error if any required source-revival section is missing from the
 /// already assembled turn context packet.
+// Prompt assembly keeps the source reads beside the output packet so context
+// provenance stays auditable at the single dispatch boundary.
+#[allow(clippy::too_many_lines)]
 pub fn assemble_prompt_context_packet(
     turn_context: &TurnContextPacket,
 ) -> Result<PromptContextPacket> {
@@ -215,6 +218,12 @@ pub fn assemble_prompt_context_packet(
         &private_context,
     );
     let prompt_policy = PromptContextPolicy::default();
+    let runtime_budget_values = compile_prompt_runtime_budget_values(
+        memory,
+        &scene_pressure,
+        &prompt_memory,
+        &pre_turn_simulation,
+    )?;
     let budget_report = compile_prompt_budget_report(CompilePromptBudgetSource {
         turn_context,
         selected_memory_items: &prompt_memory.selected_memory_items,
@@ -224,6 +233,11 @@ pub fn assemble_prompt_context_packet(
         active_change_ledger: &prompt_memory.active_change_ledger,
         active_pattern_debt: &prompt_memory.active_pattern_debt,
         selected_context_capsules: &prompt_memory.selected_context_capsules,
+        active_scene_pressure: &runtime_budget_values.active_scene_pressure,
+        active_plot_threads: &runtime_budget_values.active_plot_threads,
+        narrative_style_state: &prompt_memory.active_narrative_style_state,
+        active_character_text_design: &runtime_budget_values.active_character_text_design,
+        pressure_obligations: &runtime_budget_values.pressure_obligations,
         prompt_policy: &prompt_policy,
     })?;
 
@@ -449,7 +463,39 @@ struct CompilePromptBudgetSource<'a> {
     active_change_ledger: &'a Value,
     active_pattern_debt: &'a Value,
     selected_context_capsules: &'a Value,
+    active_scene_pressure: &'a Value,
+    active_plot_threads: &'a Value,
+    narrative_style_state: &'a Value,
+    active_character_text_design: &'a Value,
+    pressure_obligations: &'a Value,
     prompt_policy: &'a PromptContextPolicy,
+}
+
+struct PromptRuntimeBudgetValues {
+    active_scene_pressure: Value,
+    active_plot_threads: Value,
+    active_character_text_design: Value,
+    pressure_obligations: Value,
+}
+
+fn compile_prompt_runtime_budget_values(
+    memory: &Value,
+    scene_pressure: &ScenePressurePacket,
+    prompt_memory: &PromptMemoryValues,
+    pre_turn_simulation: &PreTurnSimulationPass,
+) -> Result<PromptRuntimeBudgetValues> {
+    Ok(PromptRuntimeBudgetValues {
+        active_scene_pressure: serde_json::to_value(&scene_pressure.visible_active)?,
+        active_plot_threads: required_path(&prompt_memory.active_plot_threads, "/active_visible")?
+            .clone(),
+        active_character_text_design: capsule_covered_prompt_projection(
+            "active_character_text_design",
+            "character_text_design",
+            required_path(memory, "/active_character_text_design")?,
+            &prompt_memory.selected_context_capsules,
+        ),
+        pressure_obligations: serde_json::to_value(&pre_turn_simulation.pressure_obligations)?,
+    })
 }
 
 fn compile_prompt_budget_report(
@@ -465,6 +511,11 @@ fn compile_prompt_budget_report(
         active_change_ledger: source.active_change_ledger,
         active_pattern_debt: source.active_pattern_debt,
         selected_context_capsules: source.selected_context_capsules,
+        active_scene_pressure: source.active_scene_pressure,
+        active_plot_threads: source.active_plot_threads,
+        narrative_style_state: source.narrative_style_state,
+        active_character_text_design: source.active_character_text_design,
+        pressure_obligations: source.pressure_obligations,
         omitted_debug_sections: &source.prompt_policy.omitted_debug_sections,
     })
 }

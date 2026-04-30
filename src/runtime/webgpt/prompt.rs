@@ -4,394 +4,7 @@ use singulari_world::{AgentOutputContract, PromptContextPacket};
 use std::collections::BTreeSet;
 
 const NARRATIVE_TURN_PACKET_SCHEMA_VERSION: &str = "singulari.narrative_turn_packet.v1";
-
-#[allow(dead_code)]
-const AGENT_TURN_RESPONSE_SCHEMA_GUIDE: &str = r#"AgentTurnResponse 스키마:
-```json
-{
-  "schema_version": "singulari.agent_turn_response.v1",
-  "world_id": "<world_id>",
-  "turn_id": "<turn_id>",
-  "resolution_proposal": {
-    "schema_version": "singulari.resolution_proposal.v1",
-    "world_id": "<world_id>",
-    "turn_id": "<turn_id>",
-    "interpreted_intent": {
-      "input_kind": "presented_choice|freeform|delegated_judgment|codex_query",
-      "summary": "플레이어 입력을 장면 상태 안에서 어떻게 해석했는지",
-      "target_refs": ["narrative_turn_packet 안의 장소/압력/믿음/자원/affordance/process ref"],
-      "pressure_refs": ["narrative_turn_packet.visible_context.active_scene_pressure의 pressure_id"],
-      "evidence_refs": ["current_turn 또는 narrative_turn_packet 안의 visible ref"],
-      "ambiguity": "clear|minor|high"
-    },
-    "outcome": {
-      "kind": "success|partial_success|blocked|costly_success|delayed|escalated",
-      "summary": "플레이어-visible 결과 요약",
-      "evidence_refs": ["visible ref"]
-    },
-    "gate_results": [
-      {
-        "gate_kind": "body|resource|location|social_permission|knowledge|time_pressure|hidden_constraint|world_law|affordance",
-        "gate_ref": "narrative_turn_packet 안의 ref",
-        "visibility": "player_visible|adjudication_only",
-        "status": "passed|softened|blocked|cost_imposed|unknown_needs_probe",
-        "reason": "visible이면 플레이어-visible 이유, hidden이면 본문 복사 금지",
-        "evidence_refs": ["visible ref 또는 adjudication ref"]
-      }
-    ],
-    "proposed_effects": [],
-    "process_ticks": [],
-    "pressure_noop_reasons": [
-      {
-        "pressure_ref": "pressure id from narrative_turn_packet.pre_turn_simulation.pressure_obligations",
-        "reason": "이 턴에서 압력이 직접 이동하지 않았다면 visible한 이유",
-        "evidence_refs": ["same pressure id"]
-      }
-    ],
-    "narrative_brief": {
-      "visible_summary": "visible_scene을 쓰기 전 결과/박자 요약",
-      "required_beats": ["visible prose에 반드시 반영할 박자"],
-      "forbidden_visible_details": ["visible text에 쓰면 안 되는 hidden/detail"]
-    },
-    "next_choice_plan": [
-      {
-        "slot": 1,
-        "plan_kind": "ordinary_affordance",
-        "grounding_ref": "affordance:slot:1:move",
-        "label_seed": "선택지 tag seed",
-        "intent_seed": "선택지 intent seed",
-        "evidence_refs": ["affordance:slot:1:move"]
-      },
-      {
-        "slot": 2,
-        "plan_kind": "ordinary_affordance",
-        "grounding_ref": "affordance:slot:2:observe",
-        "label_seed": "선택지 tag seed",
-        "intent_seed": "선택지 intent seed",
-        "evidence_refs": ["affordance:slot:2:observe"]
-      },
-      {
-        "slot": 3,
-        "plan_kind": "ordinary_affordance",
-        "grounding_ref": "affordance:slot:3:contact",
-        "label_seed": "선택지 tag seed",
-        "intent_seed": "선택지 intent seed",
-        "evidence_refs": ["affordance:slot:3:contact"]
-      },
-      {
-        "slot": 4,
-        "plan_kind": "ordinary_affordance",
-        "grounding_ref": "affordance:slot:4:body_resource",
-        "label_seed": "선택지 tag seed",
-        "intent_seed": "선택지 intent seed",
-        "evidence_refs": ["affordance:slot:4:body_resource"]
-      },
-      {
-        "slot": 5,
-        "plan_kind": "ordinary_affordance",
-        "grounding_ref": "affordance:slot:5:pressure_response",
-        "label_seed": "선택지 tag seed",
-        "intent_seed": "선택지 intent seed",
-        "evidence_refs": ["affordance:slot:5:pressure_response"]
-      },
-      {
-        "slot": 6,
-        "plan_kind": "freeform",
-        "grounding_ref": "current_turn",
-        "label_seed": "자유서술",
-        "intent_seed": "직접 행동을 입력한다",
-        "evidence_refs": ["current_turn"]
-      },
-      {
-        "slot": 7,
-        "plan_kind": "delegated_judgment",
-        "grounding_ref": "current_turn",
-        "label_seed": "판단 위임",
-        "intent_seed": "맡긴다. 세부 내용은 선택 후 드러난다.",
-        "evidence_refs": ["current_turn"]
-      }
-    ]
-  },
-  "scene_director_proposal": {
-    "schema_version": "singulari.scene_director_proposal.v1",
-    "world_id": "<world_id>",
-    "turn_id": "<turn_id>",
-    "scene_id": "narrative_turn_packet.visible_context.active_scene_director.current_scene.scene_id",
-    "beat_kind": "establish|probe|escalate|complicate|reveal|cost|choice_pressure|decompress|transition|cliffhanger",
-    "turn_function": "이번 턴이 장면 안에서 수행한 구조적 역할",
-    "tension_before": "low|medium|high",
-    "tension_after": "low|medium|high",
-    "scene_effect": "established|scene_question_narrowed|pressure_increased|pressure_softened|cost_imposed|visible_fact_revealed|choice_surface_changed|scene_question_transformed|necessary_stall",
-    "paragraph_strategy": {
-      "opening_shape": "observable_detail|action_consequence|dialogue_pressure|new_visible_change",
-      "middle_shape": "blocked_relation|material_constraint|signal_interpretation|cost_tradeoff",
-      "closure_shape": "forced_next_decision|concrete_unresolved_pressure|transition_handoff"
-    },
-    "choice_strategy": {
-      "must_change_choice_shape": true,
-      "avoid_recent_choice_tags": ["최근 반복된 선택지 태그"]
-    },
-    "transition": null,
-    "evidence_refs": ["narrative_turn_packet 안의 visible ref"]
-  },
-  "consequence_proposal": {
-    "schema_version": "singulari.consequence_proposal.v1",
-    "world_id": "<world_id>",
-    "turn_id": "<turn_id>",
-    "introduced": [],
-    "updated": [],
-    "paid_off": [],
-    "ephemeral_effects": [
-      {
-        "effect_ref": "visible_scene.text_blocks[0]",
-        "reason": "장기 consequence로 남기지 않을 감각/분위기 효과만 여기에 적는다.",
-        "evidence_refs": ["visible_scene.text_blocks[0]"]
-      }
-    ]
-  },
-  "social_exchange_proposal": {
-    "schema_version": "singulari.social_exchange_proposal.v1",
-    "world_id": "<world_id>",
-    "turn_id": "<turn_id>",
-    "exchanges": [
-      {
-        "actor_ref": "player|char:id|rel:id|scene:social_outcome",
-        "target_ref": "player|char:id|rel:id",
-        "act_kind": "ask|answer|evade|refuse|offer|accept|counter_offer|threaten|apologize|insult|promise|demand|reveal_conditionally|withhold|test|grant_permission|revoke_permission",
-        "stance_after": "neutral_procedure|wary_testing|cooperative|guarded_helpful|offended|evasive|threatening|bargaining|indebted|pressuring|appeasing|withholding",
-        "intensity_after": "trace|low|medium|high|crisis",
-        "summary": "이번 대화에서 바뀐 사회적 계약",
-        "player_visible_signal": "플레이어가 알 수 있는 대화 상태 신호",
-        "source_refs": ["narrative_turn_packet 안의 player-visible ref"],
-        "relationship_refs": [],
-        "consequence_refs": [],
-        "commitment_refs": [],
-        "unresolved_ask_refs": []
-      }
-    ],
-    "commitments": [],
-    "unresolved_asks": [],
-    "leverage_updates": [],
-    "paid_off_or_closed": [],
-    "ephemeral_social_notes": []
-  },
-  "encounter_proposal": {
-    "schema_version": "singulari.encounter_proposal.v1",
-    "world_id": "<world_id>",
-    "turn_id": "<turn_id>",
-    "mutations": [
-      {
-        "surface_id": "encounter:<turn_id>:scene-specific-id",
-        "label": "플레이어가 알아볼 짧은 표면명",
-        "kind": "barrier|access_controller|evidence_trace|movable_object|usable_tool|container|hazard|exit|hiding_place|social_handle|environmental_feature|time_sensitive_cue",
-        "status": "available|blocked|locked|hidden_but_signaled|degraded|claimed_by_actor|moving|exhausted|resolved|gone",
-        "salience": "background|useful|important|critical",
-        "summary": "이번 장면에서 이 표면이 무엇인지",
-        "player_visible_signal": "플레이어가 이미 볼 수 있는 신호",
-        "location_ref": "현재 장소/ref",
-        "holder_ref": null,
-        "source_refs": ["visible_scene.text_blocks[0] 또는 next_choices[slot=2]"],
-        "linked_entity_refs": [],
-        "linked_pressure_refs": [],
-        "linked_social_refs": [],
-        "affordances": [
-          {
-            "schema_version": "singulari.encounter_affordance.v1",
-            "affordance_id": "encounter:<turn_id>:scene-specific-id:inspect",
-            "action_kind": "inspect|touch|move|open|close|force|repair|break|take|use|talk_about|trade_over|threaten_with|hide_behind|follow|wait|listen|smell|compare|mark|bypass",
-            "label_seed": "선택지 씨앗",
-            "intent_seed": "행동 의도 씨앗",
-            "availability": "available|requires_condition|risky|blocked|unknown_needs_probe",
-            "required_refs": [],
-            "risk_tags": [],
-            "evidence_refs": ["visible_scene.text_blocks[0]"]
-          }
-        ],
-        "constraints": [],
-        "change_potential": [],
-        "persistence": "current_beat|current_scene|until_changed|search_only"
-      }
-    ],
-    "closures": []
-  },
-  "visible_scene": {
-    "schema_version": "singulari.narrative_scene.v1",
-    "text_blocks": ["위 서사 출력 지시와 pending.output_contract.narrative_budget에 맞춘 한국어 VN 본문"],
-    "tone_notes": ["짧은 톤 메모"]
-  },
-  "adjudication": {
-    "outcome": "accepted",
-    "summary": "플레이어-visible 한 줄 요약",
-    "gates": [
-      {"gate":"body","status":"pass","reason":"..."},
-      {"gate":"resource","status":"pass","reason":"..."},
-      {"gate":"time","status":"pass","reason":"..."},
-      {"gate":"social_permission","status":"pass","reason":"..."},
-      {"gate":"knowledge","status":"pass","reason":"..."}
-    ],
-    "visible_constraints": ["아직 확인되지 않은 플레이어-visible 제약"],
-    "consequences": ["이번 턴의 플레이어-visible 결과"]
-  },
-  "canon_event": {
-    "visibility": "player_visible",
-    "kind": "guided_choice",
-    "summary": "플레이어-visible 사건 요약"
-  },
-  "entity_updates": [
-    {
-      "entity_id": "char_or_place_or_item_id",
-      "update_kind": "seen_action",
-      "visibility": "player_visible",
-      "summary": "이번 턴에서 player-visible entity state가 어떻게 변했는지",
-      "evidence_refs": ["visible_scene.text_blocks[0]"]
-    }
-  ],
-  "relationship_updates": [
-    {
-      "source_entity_id": "char:a",
-      "target_entity_id": "char:b",
-      "relation_kind": "suspicion|trust|debt|fear|distance",
-      "visibility": "player_visible",
-      "summary": "이번 턴에서 대사 거리감/협조/의심에 영향을 주는 관계 변화",
-      "evidence_refs": ["visible_scene.text_blocks[0]"]
-    }
-  ],
-  "plot_thread_events": [
-    {
-      "thread_id": "narrative_turn_packet.visible_context.active_plot_threads 중 이번 턴에서 실제로 변한 thread_id",
-      "change": "advanced",
-      "status_after": "active",
-      "urgency_after": "soon",
-      "summary": "이번 visible_scene에서 이 thread가 어떻게 변했는지 한 문장",
-      "evidence_refs": ["visible_scene.text_blocks[0]"]
-    }
-  ],
-  "scene_pressure_events": [
-    {
-      "pressure_id": "narrative_turn_packet.visible_context.active_scene_pressure 중 이번 턴에서 실제로 변한 pressure_id",
-      "change": "increased",
-      "intensity_after": 3,
-      "urgency_after": "soon",
-      "summary": "이번 visible_scene에서 압력이 어떻게 변했는지",
-      "evidence_refs": ["visible_scene.text_blocks[0]"]
-    }
-  ],
-  "world_lore_updates": [
-    {
-      "subject": "player-visible subject",
-      "predicate": "is|has|requires|forbids",
-      "object": "이번 턴에서 확정된 세계 규칙/관습/장소 사실",
-      "category": "customs|geography|social_order|danger_model|language_register",
-      "visibility": "player_visible",
-      "summary": "세계관에 남길 player-visible 사실",
-      "evidence_refs": ["visible_scene.text_blocks[0]"]
-    }
-  ],
-  "character_text_design_updates": [
-    {
-      "character_id": "char:id",
-      "speech_pattern": "화법/어미/말버릇",
-      "gesture_pattern": "습관적 제스처",
-      "drift_note": "이번 턴 이후 조정할 말맛",
-      "visibility": "player_visible",
-      "evidence_refs": ["visible_scene.text_blocks[0]"]
-    }
-  ],
-  "body_resource_events": [
-    {
-      "event_kind": "resource_gained",
-      "target_id": "resource:scene:item",
-      "visibility": "player_visible",
-      "summary": "이번 턴에서 얻거나 잃은 visible body/resource 변화",
-      "evidence_refs": ["visible_scene.text_blocks[0]"]
-    }
-  ],
-  "location_events": [
-    {
-      "event_kind": "discovered",
-      "location_id": "place:id",
-      "name": "플레이어-visible 장소 이름",
-      "knowledge_state": "known",
-      "summary": "이번 턴에서 열린 장소/동선 변화",
-      "evidence_refs": ["visible_scene.text_blocks[0]"]
-    }
-  ],
-  "extra_contacts": [],
-  "hidden_state_delta": [
-    {
-      "delta_kind": "secret_status",
-      "target_id": "secret_or_timer_id",
-      "summary": "판정 전용 hidden delta. visible text에 복사 금지",
-      "evidence_refs": ["private_adjudication_context"]
-    }
-  ],
-  "needs_context": [],
-  "actor_goal_events": [
-    {
-      "actor_ref": "char:id",
-      "goal_id": "goal:char:id:local_goal",
-      "visibility": "player_visible|hidden_adjudication_only",
-      "desire": "이 인물이 현재 장면에서 밀고 있는 국소 목표",
-      "fear_or_constraint": "목표를 제한하는 visible 또는 hidden 제약",
-      "current_leverage": ["관찰 가능한 수단/우위"],
-      "pressure_refs": ["pressure:id"],
-      "evidence_refs": ["visible_scene.text_blocks[0]"],
-      "retired": false
-    }
-  ],
-  "actor_move_events": [
-    {
-      "actor_ref": "char:id",
-      "move_id": "move:char:id:observable_move",
-      "visibility": "player_visible|hidden_adjudication_only",
-      "action_summary": "이번 턴에 관찰된 인물 행동",
-      "produced_pressure_refs": ["pressure:id"],
-      "relationship_refs": ["rel:char:id->player:stance"],
-      "evidence_refs": ["visible_scene.text_blocks[0]"]
-    }
-  ],
-  "next_choices": [
-    {"slot":1,"tag":"현재 장면에 맞춘 짧은 선택명","intent":"현재 장면 단서와 player_input에서 이어지는 구체 행동"},
-    {"slot":2,"tag":"현재 장면에 맞춘 짧은 선택명","intent":"몸, 장소, 물건, 흔적 중 이번 장면에 실제로 나온 단서를 살핀다"},
-    {"slot":3,"tag":"현재 장면에 맞춘 짧은 선택명","intent":"이번 장면에 실제로 있는 인물, 기척, 관계 신호에 반응한다"},
-    {"slot":4,"tag":"현재 장면에 맞춘 기록 선택명","intent":"이번 장면에서 드러난 기록/단서/세계 지식을 확인한다"},
-    {"slot":5,"tag":"현재 장면에 맞춘 흐름 선택명","intent":"이번 사건의 변화 압력이 다음 행동에 어떤 영향을 주는지 본다"},
-    {"slot":6,"tag":"자유서술","intent":"플레이어가 원하는 행동과 말, 내면 독백을 직접 서술한다"},
-    {"slot":7,"tag":"판단 위임","intent":"맡긴다. 세부 내용은 선택 후 드러난다."}
-  ]
-}
-```
-- next_choices는 서사 생성과 같은 응답에서 반드시 함께 작성한다. 별도 선택지 재생성 턴을 만들지 않는다.
-- resolution_proposal은 LLM 지능이 해석한 판정 제안이고, Rust가 commit 전에 audit한다. narrative_turn_packet.pre_turn_simulation.required_resolution_fields.resolution_proposal_required가 true인 normal turn에서는 반드시 작성한다. narrative_turn_packet에 없는 ref나 evidence_refs 없는 durable effect를 넣지 않는다.
-- scene_director_proposal은 선택(optional)이다. 작성할 경우 narrative_turn_packet.visible_context.active_scene_director의 current_scene/recommended_next_beats/paragraph_budget_hint에 맞춰 이번 턴의 구조적 역할을 요약한다.
-- scene_director_proposal은 resolution_proposal을 대체하지 않는다. 장면 박자와 선택지 모양만 설명하며, 새 canon 사실이나 hidden motive를 만들 권한이 없다.
-- scene_director_proposal.evidence_refs는 narrative_turn_packet JSON 안의 player-visible 문자열 ref만 쓴다. hidden/adjudication-only ref는 금지한다.
-- consequence_proposal은 선택(optional)이다. 작성할 경우 비용, 의심, 관계 변화, 지식 변화, 기회 상실처럼 다음 턴에도 돌아와야 하는 여파만 기록한다.
-- consequence_proposal은 typed projection을 대체하지 않는다. body/resource/relationship/process/lore 변화는 기존 effect/event와 evidence로 연결하고, 사소한 색채 효과는 ephemeral_effects 객체(`effect_ref`, `reason`, `evidence_refs`)로 설명한다. 문자열 배열은 금지한다.
-- social_exchange_proposal은 선택(optional)이다. 작성할 경우 이번 대화에서 교환/회피/거절/약속/조건/빚/미해결 질문으로 남은 것만 기록한다.
-- social_exchange_proposal은 대화 트리나 호감도 미터가 아니다. active_social_exchange를 보고 다음 대화의 현재 태도, unresolved_asks 반복 방지, 조건부 약속만 compact하게 갱신한다.
-- social_exchange_proposal의 source_refs/evidence_refs는 narrative_turn_packet JSON 안의 player-visible 문자열 ref만 쓴다. hidden motive, adjudication-only truth, 미래 route hint는 summary/signal/condition/ask에 쓰지 않는다.
-- encounter_proposal은 선택(optional)이다. 작성할 경우 이번 턴 visible_scene/next_choices에서 실제로 조작 가능해진 표면만 기록한다.
-- encounter_proposal은 퍼즐 정답이나 물리 엔진이 아니다. active_encounter_surface를 보고 조사/이동/도구/사회적 접근/위험 우회가 다음 턴 선택지에서 무엇을 건드리는지만 compact하게 갱신한다.
-- encounter_proposal의 source_refs/evidence_refs는 narrative_turn_packet JSON 안의 player-visible 문자열 ref 또는 이번 응답의 visible_scene.text_blocks/next_choices ref만 쓴다. HiddenButSignaled 표면은 보이는 신호만 적고 숨은 내용은 쓰지 않는다.
-- resolution_proposal의 모든 `target_refs`, `pressure_refs`, `gate_ref`, `grounding_ref`, `process_ref`, `effect.target_ref`는 narrative_turn_packet JSON 안에 실제 문자열로 존재하는 ref만 쓴다. 설명용 JSON pointer(`visible_context...`)나 새로 만든 관계/장소/인물 ref는 쓰지 않는다.
-- selected_memory_items 안의 `source_id`, `edge_id`, `entity_id`, `location_id`, `pressure_id`, `affordance_id`처럼 실제 문자열로 들어 있는 ref는 evidence로 쓸 수 있다.
-- narrative_turn_packet.pre_turn_simulation.pressure_obligations의 각 pressure_id는 resolution_proposal에서 실제 gate/effect/process tick으로 움직이거나, `pressure_noop_reasons`에 같은 pressure_ref와 evidence_refs를 넣어 왜 직접 이동하지 않았는지 visible reason을 적어야 한다. 단순히 pressure_refs나 outcome.evidence_refs에 언급만 하는 것은 부족하다.
-- resolution_proposal의 visible field에는 hidden/adjudication-only 세부 내용을 절대 쓰지 않는다.
-- resolution_proposal.next_choice_plan은 slot 1..7을 모두 포함한다. ordinary_affordance slot 1..5는 narrative_turn_packet.visible_context.affordance_graph의 같은 slot affordance_id를 grounding_ref/evidence_refs에 넣는다. slot 6은 freeform, slot 7은 delegated_judgment다.
-- actor_goal_events/actor_move_events는 중요한 NPC가 실제 장면에서 보인 목표와 움직임만 기록한다. actor_ref는 기존 relationship/entity ref 또는 이번 응답의 entity_updates로 생성한 char:id여야 한다. hidden 목표는 visible_scene/next_choices에 동기로 해설하지 말고 관찰 가능한 행동으로만 암시한다.
-- slot 1,2,3,4,5의 tag/intent는 템플릿 문구가 아니라 이번 visible_scene에서 바로 이어지는 구체 선택지여야 한다.
-- next_choices 안에는 label/preview/choices 필드를 쓰지 않는다. 오직 slot/tag/intent만 쓴다.
-- plot_thread_events는 이번 턴에서 실제로 진행/복잡화/차단/해결/실패/퇴장한 active_visible thread만 적는다. 변화가 없으면 빈 배열이다.
-- plot_thread_events.thread_id는 narrative_turn_packet.visible_context.active_plot_threads에 있는 thread_id만 쓴다. 새 thread를 임의로 만들거나 hidden/dormant 상태로 바꾸지 않는다.
-- scene_pressure_events는 이번 턴에서 실제로 강해지거나 약해진 visible_active pressure만 적는다. hidden_adjudication_only pressure_id는 절대 쓰지 않는다.
-- entity_updates/relationship_updates/world_lore_updates/character_text_design_updates는 전부 typed schema다. 변화가 없으면 빈 배열이며, 임의 key/value JSON을 넣지 않는다.
-- body_resource_events/location_events도 typed schema다. 장면에 실제 증거가 없으면 빈 배열로 둔다.
-- needs_context는 기본적으로 빈 배열이다. narrative_turn_packet에 없는 맥락 없이는 응답을 닫을 수 없을 때만 request_id/capsule_kinds/query/reason/evidence_refs를 넣는다. needs_context가 비어 있지 않으면 host는 그 응답을 커밋하지 않는다.
-- slot 번호가 기능 계약이다. tag는 UI 문구이므로 장면에 맞게 짧게 바꿔도 된다. 단 slot 7 tag는 "판단 위임"으로 유지한다.
-- extra_contacts는 주변 인물이 플레이어와 직접 상호작용했거나, 의미 있는 목격/거래/도움/위협/감정 흔적을 남겼을 때만 쓴다.
-- extra_contacts 항목을 쓸 때는 surface_label, contact_summary를 반드시 실제 장면 내용으로 채운다. 스키마 설명 문구나 예시 문구를 값으로 복사하지 않는다.
-- 단순 배경 군중은 extra_contacts에 넣지 않는다. 한 번 스쳐간 인물은 memory_action "trace", 다시 떠올릴 이유가 분명하면 "remember"를 쓴다."#;
+const PROMPT_REFERENCE_ARRAY_CAP: usize = 6;
 
 const COMPACT_AGENT_TURN_RESPONSE_SCHEMA_GUIDE: &str = r#"AgentTurnResponse JSON만 반환한다.
 필수 top-level:
@@ -595,13 +208,17 @@ fn is_ref_atom(value: &str) -> bool {
 fn build_narrative_turn_packet(prompt_context: &PromptContextPacket) -> Result<Value> {
     let full = serde_json::to_value(prompt_context)
         .context("failed to serialize prompt context for narrative turn packet")?;
-    let pre_turn = full
-        .get("pre_turn_simulation")
-        .context("prompt context missing pre_turn_simulation")?;
-    let visible = full
-        .get("visible_context")
-        .context("prompt context missing visible_context")?;
-    let hidden_boundary = json_field(pre_turn, "hidden_visibility_boundary");
+    let pre_turn = prompt_safe_projection(
+        full.get("pre_turn_simulation")
+            .context("prompt context missing pre_turn_simulation")?
+            .clone(),
+    );
+    let visible = prompt_safe_projection(
+        full.get("visible_context")
+            .context("prompt context missing visible_context")?
+            .clone(),
+    );
+    let hidden_boundary = json_field(&pre_turn, "hidden_visibility_boundary");
     Ok(serde_json::json!({
         "schema_version": NARRATIVE_TURN_PACKET_SCHEMA_VERSION,
         "world_id": prompt_context.world_id,
@@ -610,29 +227,29 @@ fn build_narrative_turn_packet(prompt_context: &PromptContextPacket) -> Result<V
         "opening_randomizer": prompt_context.opening_randomizer,
         "output_contract": prompt_context.output_contract,
         "pre_turn_simulation": {
-            "schema_version": json_field(pre_turn, "schema_version"),
+            "schema_version": json_field(&pre_turn, "schema_version"),
             "world_id": prompt_context.world_id,
             "turn_id": prompt_context.turn_id,
-            "player_input": json_field(pre_turn, "player_input"),
-            "input_kind": json_field(pre_turn, "input_kind"),
-            "selected_choice": json_field(pre_turn, "selected_choice"),
-            "available_affordances": json_array_field(pre_turn, "available_affordances"),
-            "pressure_obligations": json_array_field(pre_turn, "pressure_obligations"),
-            "due_processes": json_array_field(pre_turn, "due_processes"),
-            "required_resolution_fields": json_field(pre_turn, "required_resolution_fields"),
+            "player_input": json_field(&pre_turn, "player_input"),
+            "input_kind": json_field(&pre_turn, "input_kind"),
+            "selected_choice": json_field(&pre_turn, "selected_choice"),
+            "available_affordances": json_array_field(&pre_turn, "available_affordances"),
+            "pressure_obligations": json_array_field(&pre_turn, "pressure_obligations"),
+            "due_processes": json_array_field(&pre_turn, "due_processes"),
+            "required_resolution_fields": json_field(&pre_turn, "required_resolution_fields"),
             "hidden_visibility_boundary": hidden_boundary.clone(),
         },
         "visible_context": {
-            "recent_scene_window": json_array_field(visible, "recent_scene_window"),
-            "active_scene_pressure": json_field(visible, "active_scene_pressure"),
-            "active_plot_threads": json_field(visible, "active_plot_threads"),
-            "active_body_resource_state": json_field(visible, "active_body_resource_state"),
-            "active_location_graph": json_field(visible, "active_location_graph"),
-            "affordance_graph": json_field(visible, "affordance_graph"),
-            "active_scene_director": json_field(visible, "active_scene_director"),
-            "narrative_style_state": json_field(visible, "narrative_style_state"),
-            "active_character_text_design": json_field(visible, "active_character_text_design"),
-            "selected_memory_items": json_array_field(visible, "selected_memory_items"),
+            "recent_scene_window": json_array_field(&visible, "recent_scene_window"),
+            "active_scene_pressure": json_field(&visible, "active_scene_pressure"),
+            "active_plot_threads": json_field(&visible, "active_plot_threads"),
+            "active_body_resource_state": json_field(&visible, "active_body_resource_state"),
+            "active_location_graph": json_field(&visible, "active_location_graph"),
+            "affordance_graph": json_field(&visible, "affordance_graph"),
+            "active_scene_director": json_field(&visible, "active_scene_director"),
+            "narrative_style_state": json_field(&visible, "narrative_style_state"),
+            "active_character_text_design": json_field(&visible, "active_character_text_design"),
+            "selected_memory_items": json_array_field(&visible, "selected_memory_items"),
         },
         "adjudication_boundary": {
             "hidden_visibility_boundary": hidden_boundary,
@@ -642,10 +259,151 @@ fn build_narrative_turn_packet(prompt_context: &PromptContextPacket) -> Result<V
     }))
 }
 
+fn prompt_safe_projection(value: Value) -> Value {
+    prompt_safe_projection_for_key(None, value)
+}
+
+fn prompt_safe_projection_for_key(key: Option<&str>, value: Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(child_key, child_value)| {
+                    let projected =
+                        prompt_safe_projection_for_key(Some(child_key.as_str()), child_value);
+                    (child_key, projected)
+                })
+                .collect(),
+        ),
+        Value::Array(items) if key.is_some_and(is_compactable_prompt_ref_key) => {
+            compact_prompt_reference_array(items)
+        }
+        Value::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .map(|item| prompt_safe_projection_for_key(None, item))
+                .collect(),
+        ),
+        scalar => scalar,
+    }
+}
+
+fn is_compactable_prompt_ref_key(key: &str) -> bool {
+    key.ends_with("_refs")
+        || matches!(
+            key,
+            "source_refs" | "evidence_refs" | "target_refs" | "pressure_refs"
+        )
+}
+
+fn compact_prompt_reference_array(items: Vec<Value>) -> Value {
+    let mut seen = BTreeSet::new();
+    let mut refs = Vec::new();
+    for item in items {
+        if let Some(reference) = item.as_str().map(str::trim)
+            && !reference.is_empty()
+            && seen.insert(reference.to_owned())
+        {
+            refs.push(reference.to_owned());
+        }
+    }
+
+    if refs.len() <= PROMPT_REFERENCE_ARRAY_CAP {
+        return Value::Array(refs.into_iter().map(Value::String).collect());
+    }
+
+    let tail_ref = refs
+        .iter()
+        .rev()
+        .find(|reference| is_event_reference(reference))
+        .or_else(|| refs.last())
+        .cloned();
+    let front_cap = tail_ref.as_ref().map_or(PROMPT_REFERENCE_ARRAY_CAP, |_| {
+        PROMPT_REFERENCE_ARRAY_CAP - 1
+    });
+    let mut compact = Vec::new();
+    for reference in refs {
+        if tail_ref.as_ref() == Some(&reference) {
+            continue;
+        }
+        if compact.len() >= front_cap {
+            break;
+        }
+        compact.push(Value::String(reference));
+    }
+    if let Some(tail_ref) = tail_ref {
+        compact.push(Value::String(tail_ref));
+    }
+    Value::Array(compact)
+}
+
+fn is_event_reference(reference: &str) -> bool {
+    reference.contains("_event:")
+}
+
 fn json_field(source: &Value, key: &str) -> Value {
     source.get(key).cloned().unwrap_or(Value::Null)
 }
 
 fn json_array_field(source: &Value, key: &str) -> Value {
     source.get(key).cloned().unwrap_or(Value::Array(Vec::new()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prompt_safe_projection_caps_repeated_refs_and_keeps_latest_event() {
+        let projected = prompt_safe_projection(serde_json::json!({
+            "active_scene_pressure": [{
+                "pressure_id": "pressure:gate",
+                "source_refs": [
+                    "visible_scene.text_blocks[0]",
+                    "visible_scene.text_blocks[0]",
+                    "scene_pressure_event:scene_pressure_event:turn_0001:00",
+                    "scene_pressure_event:scene_pressure_event:turn_0001:01",
+                    "scene_pressure_event:scene_pressure_event:turn_0001:02",
+                    "scene_pressure_event:scene_pressure_event:turn_0001:03",
+                    "scene_pressure_event:scene_pressure_event:turn_0001:04",
+                    "scene_pressure_event:scene_pressure_event:turn_0001:05",
+                    "scene_pressure_event:scene_pressure_event:turn_0001:06"
+                ]
+            }],
+            "pressure_obligations": [{
+                "pressure_ref": "pressure:gate",
+                "evidence_refs": [
+                    "pressure:gate",
+                    "plot_thread_event:plot_thread_event:turn_0001:00",
+                    "plot_thread_event:plot_thread_event:turn_0001:01",
+                    "plot_thread_event:plot_thread_event:turn_0001:02",
+                    "plot_thread_event:plot_thread_event:turn_0001:03",
+                    "plot_thread_event:plot_thread_event:turn_0001:04",
+                    "plot_thread_event:plot_thread_event:turn_0001:05",
+                    "plot_thread_event:plot_thread_event:turn_0001:06"
+                ]
+            }]
+        }));
+
+        let Some(source_refs) = projected
+            .pointer("/active_scene_pressure/0/source_refs")
+            .and_then(Value::as_array)
+        else {
+            panic!("source refs should remain an array");
+        };
+        let Some(evidence_refs) = projected
+            .pointer("/pressure_obligations/0/evidence_refs")
+            .and_then(Value::as_array)
+        else {
+            panic!("evidence refs should remain an array");
+        };
+
+        assert_eq!(source_refs.len(), PROMPT_REFERENCE_ARRAY_CAP);
+        assert_eq!(evidence_refs.len(), PROMPT_REFERENCE_ARRAY_CAP);
+        assert!(source_refs.contains(&Value::String(
+            "scene_pressure_event:scene_pressure_event:turn_0001:06".to_owned()
+        )));
+        assert!(evidence_refs.contains(&Value::String(
+            "plot_thread_event:plot_thread_event:turn_0001:06".to_owned()
+        )));
+    }
 }

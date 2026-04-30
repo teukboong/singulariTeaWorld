@@ -865,6 +865,7 @@ mod tests {
                 summary: "The gate authority can block passage.".to_owned(),
                 current_question: "How can the protagonist pass the gate?".to_owned(),
                 source_refs: vec!["canon_event:turn_0001".to_owned()],
+                provenance: None,
                 next_scene_hooks: Vec::new(),
             }],
             compiler_policy: PlotThreadPolicy::default(),

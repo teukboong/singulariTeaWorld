@@ -16,7 +16,7 @@ use crate::store::{append_jsonl, read_json, write_json};
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 pub const SCENE_PRESSURE_PACKET_SCHEMA_VERSION: &str = "singulari.scene_pressure_packet.v1";
@@ -29,6 +29,8 @@ pub const ACTIVE_SCENE_PRESSURES_FILENAME: &str = "active_scene_pressures.json";
 
 const VISIBLE_PRESSURE_BUDGET: usize = 3;
 const HIDDEN_PRESSURE_BUDGET: usize = 2;
+const ACTIVE_PRESSURE_SOURCE_REF_CAP: usize = 6;
+const SCENE_PRESSURE_EVENT_REF_PREFIX: &str = "scene_pressure_event:";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ScenePressurePacket {
@@ -65,11 +67,21 @@ pub struct ScenePressure {
     pub urgency: ScenePressureUrgency,
     #[serde(default)]
     pub source_refs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<ScenePressureSourceRefProvenance>,
     #[serde(default)]
     pub observable_signals: Vec<String>,
     #[serde(default)]
     pub choice_affordances: Vec<String>,
     pub prose_effect: ScenePressureProseEffect,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScenePressureSourceRefProvenance {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_event_ref: Option<String>,
+    pub event_count: usize,
+    pub older_refs_omitted: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -299,7 +311,12 @@ pub fn rebuild_active_scene_pressures(
     base: &ScenePressurePacket,
 ) -> Result<ScenePressurePacket> {
     let mut packet = base.clone();
+    let mut event_refs_by_pressure = BTreeMap::<String, ScenePressureEventRefSummary>::new();
     for record in load_scene_pressure_event_records(world_dir)? {
+        event_refs_by_pressure
+            .entry(record.pressure_id.clone())
+            .or_default()
+            .observe(scene_pressure_event_ref(&record.event_id));
         apply_scene_pressure_record(&mut packet, &record);
     }
     "materialized_from_pending_turn_and_scene_pressure_events_v1"
@@ -307,6 +324,7 @@ pub fn rebuild_active_scene_pressures(
     packet
         .visible_active
         .retain(|pressure| pressure.intensity > 0);
+    normalize_scene_pressure_source_refs(&mut packet, &event_refs_by_pressure);
     write_json(&world_dir.join(ACTIVE_SCENE_PRESSURES_FILENAME), &packet)?;
     Ok(packet)
 }
@@ -411,6 +429,7 @@ fn pressure_from_stance(stance: &DialogueStance) -> ScenePressure {
         intensity: pressure_intensity_from_social(stance.intensity),
         urgency: pressure_urgency_from_social(stance.intensity),
         source_refs: stance.source_refs.clone(),
+        provenance: None,
         observable_signals: vec![stance.player_visible_signal.clone()],
         choice_affordances: social_choice_affordances(stance.stance),
         prose_effect: ScenePressureProseEffect {
@@ -430,6 +449,7 @@ fn pressure_from_unresolved_ask(ask: &UnresolvedSocialAsk) -> ScenePressure {
         intensity: 3,
         urgency: ScenePressureUrgency::Soon,
         source_refs: ask.source_refs.clone(),
+        provenance: None,
         observable_signals: vec![ask.last_response.clone()],
         choice_affordances: ask.allowed_next_moves.clone(),
         prose_effect: ScenePressureProseEffect {
@@ -494,6 +514,7 @@ fn pressure_from_consequence(consequence: &ActiveConsequence) -> ScenePressure {
         intensity: pressure_intensity_from_consequence(consequence.severity),
         urgency: pressure_urgency_from_consequence(consequence.severity),
         source_refs: vec![consequence.consequence_id.clone()],
+        provenance: None,
         observable_signals: vec![consequence.player_visible_signal.clone()],
         choice_affordances: vec!["이전 선택의 여파를 감안해 행동한다.".to_owned()],
         prose_effect: ScenePressureProseEffect {
@@ -581,8 +602,115 @@ fn apply_scene_pressure_record(
         pressure.observable_signals = vec![record.summary.clone()];
         pressure
             .source_refs
-            .push(format!("scene_pressure_event:{}", record.event_id));
+            .push(scene_pressure_event_ref(&record.event_id));
     }
+}
+
+#[derive(Debug, Clone, Default)]
+struct ScenePressureEventRefSummary {
+    latest_event_ref: Option<String>,
+    event_count: usize,
+}
+
+impl ScenePressureEventRefSummary {
+    fn observe(&mut self, event_ref: String) {
+        self.latest_event_ref = Some(event_ref);
+        self.event_count += 1;
+    }
+}
+
+fn normalize_scene_pressure_source_refs(
+    packet: &mut ScenePressurePacket,
+    event_refs_by_pressure: &BTreeMap<String, ScenePressureEventRefSummary>,
+) {
+    for pressure in packet
+        .visible_active
+        .iter_mut()
+        .chain(packet.hidden_adjudication_only.iter_mut())
+    {
+        let event_summary = event_refs_by_pressure.get(&pressure.pressure_id);
+        let latest_event_ref =
+            event_summary.and_then(|summary| summary.latest_event_ref.as_deref());
+        pressure.source_refs = compact_scene_pressure_source_refs(
+            &pressure.source_refs,
+            latest_event_ref,
+            ACTIVE_PRESSURE_SOURCE_REF_CAP,
+        );
+        pressure.provenance = event_summary.map(|summary| {
+            let kept_event_refs = pressure
+                .source_refs
+                .iter()
+                .filter(|reference| reference.starts_with(SCENE_PRESSURE_EVENT_REF_PREFIX))
+                .count();
+            ScenePressureSourceRefProvenance {
+                latest_event_ref: summary.latest_event_ref.clone(),
+                event_count: summary.event_count,
+                older_refs_omitted: summary.event_count.saturating_sub(kept_event_refs),
+            }
+        });
+    }
+}
+
+fn compact_scene_pressure_source_refs(
+    source_refs: &[String],
+    latest_event_ref: Option<&str>,
+    cap: usize,
+) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut ordinary_refs = Vec::new();
+    let mut event_refs = Vec::new();
+    for reference in source_refs {
+        let reference = reference.trim();
+        if reference.is_empty() || !seen.insert(reference.to_owned()) {
+            continue;
+        }
+        if reference.starts_with(SCENE_PRESSURE_EVENT_REF_PREFIX) {
+            event_refs.push(reference.to_owned());
+        } else {
+            ordinary_refs.push(reference.to_owned());
+        }
+    }
+
+    let mut compact = Vec::new();
+    push_refs_until_cap(&mut compact, ordinary_refs, cap);
+
+    if let Some(latest_event_ref) =
+        latest_event_ref.filter(|reference| !reference.trim().is_empty())
+    {
+        push_required_ref(&mut compact, latest_event_ref, cap);
+    }
+
+    push_refs_until_cap(&mut compact, event_refs, cap);
+    compact
+}
+
+fn push_refs_until_cap(compact: &mut Vec<String>, refs: Vec<String>, cap: usize) {
+    for reference in refs {
+        if compact.len() >= cap {
+            return;
+        }
+        if !compact.contains(&reference) {
+            compact.push(reference);
+        }
+    }
+}
+
+fn push_required_ref(compact: &mut Vec<String>, reference: &str, cap: usize) {
+    if compact.iter().any(|existing| existing == reference) {
+        return;
+    }
+    if compact.len() >= cap {
+        let remove_index = compact
+            .iter()
+            .rposition(|existing| existing.starts_with(SCENE_PRESSURE_EVENT_REF_PREFIX))
+            .unwrap_or_else(|| compact.len().saturating_sub(1));
+        compact.remove(remove_index);
+    }
+    compact.push(reference.to_owned());
+}
+
+fn scene_pressure_event_ref(event_id: &str) -> String {
+    format!("{SCENE_PRESSURE_EVENT_REF_PREFIX}{event_id}")
 }
 
 fn validate_scene_pressure_event(
@@ -812,6 +940,7 @@ fn collect_hidden_timer_pressure(
                 ScenePressureUrgency::Immediate
             },
             source_refs: vec![format!("hidden_timer:{}", timer.timer_id)],
+            provenance: None,
             observable_signals: Vec::new(),
             choice_affordances: vec![
                 "adjudication-only deadline; do not reveal timer truth in visible text".to_owned(),
@@ -839,6 +968,7 @@ fn visible_pressure(
         intensity,
         urgency,
         source_refs,
+        provenance: None,
         observable_signals,
         choice_affordances,
         prose_effect,
@@ -1113,6 +1243,75 @@ mod tests {
     }
 
     #[test]
+    fn rebuild_caps_scene_pressure_source_refs_and_preserves_latest_event() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let pressure_id = "pressure:gate_alarm";
+        let base = ScenePressurePacket {
+            schema_version: SCENE_PRESSURE_PACKET_SCHEMA_VERSION.to_owned(),
+            world_id: "stw_pressure".to_owned(),
+            turn_id: "turn_0009".to_owned(),
+            visible_active: vec![visible_pressure(
+                "gate_alarm",
+                ScenePressureKind::TimePressure,
+                2,
+                ScenePressureUrgency::Soon,
+                vec!["visible_scene.text_blocks[0]".to_owned()],
+                vec!["the bell keeps ringing".to_owned()],
+                vec!["answer the alarm".to_owned()],
+                prose("tight", vec!["bell"], "urgent"),
+            )],
+            hidden_adjudication_only: Vec::new(),
+            compiler_policy: ScenePressurePolicy::default(),
+        };
+        let records = (0..8)
+            .map(|index| ScenePressureEventRecord {
+                schema_version: SCENE_PRESSURE_EVENT_SCHEMA_VERSION.to_owned(),
+                world_id: "stw_pressure".to_owned(),
+                turn_id: "turn_0009".to_owned(),
+                event_id: format!("scene_pressure_event:turn_0009:{index:02}"),
+                pressure_id: pressure_id.to_owned(),
+                change: ScenePressureChange::Increased,
+                intensity_after: 3,
+                urgency_after: ScenePressureUrgency::Immediate,
+                summary: format!("alarm beat {index}"),
+                evidence_refs: vec!["visible_scene.text_blocks[0]".to_owned()],
+                recorded_at: Utc::now().to_rfc3339(),
+            })
+            .collect::<Vec<_>>();
+        append_scene_pressure_event_plan(
+            temp.path(),
+            &ScenePressureEventPlan {
+                world_id: "stw_pressure".to_owned(),
+                turn_id: "turn_0009".to_owned(),
+                records,
+            },
+        )?;
+
+        let first = rebuild_active_scene_pressures(temp.path(), &base)?;
+        let second = rebuild_active_scene_pressures(temp.path(), &first)?;
+        let first_pressure = &first.visible_active[0];
+        let second_pressure = &second.visible_active[0];
+
+        assert_eq!(first_pressure.source_refs, second_pressure.source_refs);
+        assert!(first_pressure.source_refs.len() <= ACTIVE_PRESSURE_SOURCE_REF_CAP);
+        assert!(
+            first_pressure
+                .source_refs
+                .contains(&"scene_pressure_event:scene_pressure_event:turn_0009:07".to_owned())
+        );
+        let Some(provenance) = first_pressure.provenance.as_ref() else {
+            panic!("rebuild should attach scene pressure event provenance");
+        };
+        assert_eq!(provenance.event_count, 8);
+        assert_eq!(
+            provenance.latest_event_ref.as_deref(),
+            Some("scene_pressure_event:scene_pressure_event:turn_0009:07")
+        );
+        assert!(provenance.older_refs_omitted > 0);
+        Ok(())
+    }
+
+    #[test]
     fn rejects_scene_pressure_events_for_hidden_pressure() {
         let mut packet = ScenePressurePacket {
             world_id: "stw_pressure".to_owned(),
@@ -1127,6 +1326,7 @@ mod tests {
             intensity: 3,
             urgency: ScenePressureUrgency::Soon,
             source_refs: vec!["timer:private".to_owned()],
+            provenance: None,
             observable_signals: Vec::new(),
             choice_affordances: Vec::new(),
             prose_effect: prose("tight", vec!["clock"], "restrained"),

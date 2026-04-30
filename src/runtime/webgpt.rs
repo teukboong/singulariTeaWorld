@@ -2496,7 +2496,7 @@ premise:
         assert!(allowed_refs.iter().any(|value| value == "current_turn"));
         assert!(allowed_refs.iter().any(|value| value == "player_input"));
         assert!(allowed_refs.iter().all(|value| {
-            !value.chars().any(|character| character.is_whitespace())
+            !value.chars().any(char::is_whitespace)
                 && !value.starts_with('/')
                 && !value.starts_with("singulari.")
         }));

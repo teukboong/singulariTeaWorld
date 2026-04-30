@@ -1981,6 +1981,7 @@ mod tests {
                     intensity: 4,
                     urgency: ScenePressureUrgency::Immediate,
                     source_refs: vec!["turn:0002".to_owned()],
+                    provenance: None,
                     observable_signals: vec!["torchlight closes in".to_owned()],
                     choice_affordances: vec!["move before seen".to_owned()],
                     prose_effect: ScenePressureProseEffect {
@@ -2028,6 +2029,7 @@ mod tests {
                     intensity: 4,
                     urgency: ScenePressureUrgency::Crisis,
                     source_refs: vec!["turn:0003".to_owned()],
+                    provenance: None,
                     observable_signals: vec!["horn is about to sound".to_owned()],
                     choice_affordances: vec!["choose quickly".to_owned()],
                     prose_effect: ScenePressureProseEffect {
@@ -2320,6 +2322,7 @@ mod tests {
                 intensity,
                 urgency,
                 source_refs: vec!["turn:0005".to_owned()],
+                provenance: None,
                 observable_signals: vec!["visible signal".to_owned()],
                 choice_affordances: vec!["act on signal".to_owned()],
                 prose_effect: ScenePressureProseEffect {

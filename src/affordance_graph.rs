@@ -460,6 +460,7 @@ mod tests {
                     intensity: 4,
                     urgency: ScenePressureUrgency::Immediate,
                     source_refs: vec!["turn:0001".to_owned()],
+                    provenance: None,
                     observable_signals: vec!["문밖 발소리".to_owned()],
                     choice_affordances: vec!["listen".to_owned()],
                     prose_effect: ScenePressureProseEffect {

@@ -17,6 +17,13 @@ const ACTIVE_CHANGES_PROMPT_LIMIT: usize = 12;
 const ACTIVE_PATTERN_DEBT_PROMPT_LIMIT: usize = 8;
 const SELECTED_CONTEXT_CAPSULE_PROMPT_LIMIT: usize = 8;
 const OMITTED_DEBUG_SECTIONS_PROMPT_LIMIT: usize = 16;
+const ACTIVE_SCENE_PRESSURE_PROMPT_LIMIT: usize = 5;
+const ACTIVE_SCENE_PRESSURE_BYTE_LIMIT: usize = 12_000;
+const ACTIVE_PLOT_THREADS_PROMPT_LIMIT: usize = 5;
+const ACTIVE_PLOT_THREADS_BYTE_LIMIT: usize = 8_000;
+const NARRATIVE_STYLE_STATE_BYTE_LIMIT: usize = 9_000;
+const ACTIVE_CHARACTER_TEXT_DESIGN_BYTE_LIMIT: usize = 6_000;
+const PRESSURE_OBLIGATIONS_BYTE_LIMIT: usize = 8_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PromptContextBudgetReport {
@@ -35,6 +42,10 @@ pub struct PromptContextBudgetReport {
 pub struct PromptContextBudgetBucket {
     pub limit: usize,
     pub used: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub byte_limit: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes_used: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -106,6 +117,11 @@ pub struct PromptContextBudgetReportSource<'a> {
     pub active_change_ledger: &'a Value,
     pub active_pattern_debt: &'a Value,
     pub selected_context_capsules: &'a Value,
+    pub active_scene_pressure: &'a Value,
+    pub active_plot_threads: &'a Value,
+    pub narrative_style_state: &'a Value,
+    pub active_character_text_design: &'a Value,
+    pub pressure_obligations: &'a Value,
     pub omitted_debug_sections: &'a [String],
 }
 
@@ -133,38 +149,53 @@ fn compile_budget_buckets(
     source: PromptContextBudgetReportSource<'_>,
 ) -> Result<BTreeMap<String, PromptContextBudgetBucket>> {
     let mut budgets = BTreeMap::new();
+    insert_core_budget_buckets(&mut budgets, source)?;
+    insert_runtime_budget_buckets(&mut budgets, source)?;
     insert_budget(
         &mut budgets,
+        "omitted_debug_sections",
+        OMITTED_DEBUG_SECTIONS_PROMPT_LIMIT,
+        source.omitted_debug_sections.len(),
+    )?;
+    Ok(budgets)
+}
+
+fn insert_core_budget_buckets(
+    budgets: &mut BTreeMap<String, PromptContextBudgetBucket>,
+    source: PromptContextBudgetReportSource<'_>,
+) -> Result<()> {
+    insert_budget(
+        budgets,
         "selected_memory_items",
         SELECTED_MEMORY_ITEMS_PROMPT_LIMIT,
         array_len(source.selected_memory_items, "selected_memory_items")?,
     )?;
     insert_budget(
-        &mut budgets,
+        budgets,
         "belief_nodes",
         BELIEF_NODES_PROMPT_LIMIT,
         source.belief_graph.protagonist_visible_beliefs.len(),
     )?;
     insert_budget(
-        &mut budgets,
+        budgets,
         "visible_world_processes",
         WORLD_PROCESSES_PROMPT_LIMIT,
         source.world_process_clock.visible_processes.len(),
     )?;
     insert_budget(
-        &mut budgets,
+        budgets,
         "hidden_world_processes",
         WORLD_PROCESSES_PROMPT_LIMIT,
         source.world_process_clock.adjudication_only_processes.len(),
     )?;
     insert_budget(
-        &mut budgets,
+        budgets,
         "affordance_slots",
         AFFORDANCE_SLOTS_PROMPT_LIMIT,
         source.affordance_graph.ordinary_choice_slots.len(),
     )?;
     insert_budget(
-        &mut budgets,
+        budgets,
         "active_changes",
         ACTIVE_CHANGES_PROMPT_LIMIT,
         array_len(
@@ -176,7 +207,7 @@ fn compile_budget_buckets(
         )?,
     )?;
     insert_budget(
-        &mut budgets,
+        budgets,
         "active_patterns",
         ACTIVE_PATTERN_DEBT_PROMPT_LIMIT,
         array_len(
@@ -188,7 +219,7 @@ fn compile_budget_buckets(
         )?,
     )?;
     insert_budget(
-        &mut budgets,
+        budgets,
         "selected_context_capsules",
         SELECTED_CONTEXT_CAPSULE_PROMPT_LIMIT,
         array_len(
@@ -199,13 +230,48 @@ fn compile_budget_buckets(
             "selected_context_capsules.selected_capsules",
         )?,
     )?;
-    insert_budget(
-        &mut budgets,
-        "omitted_debug_sections",
-        OMITTED_DEBUG_SECTIONS_PROMPT_LIMIT,
-        source.omitted_debug_sections.len(),
+    Ok(())
+}
+
+fn insert_runtime_budget_buckets(
+    budgets: &mut BTreeMap<String, PromptContextBudgetBucket>,
+    source: PromptContextBudgetReportSource<'_>,
+) -> Result<()> {
+    insert_count_and_byte_budget(
+        budgets,
+        "active_scene_pressure",
+        ACTIVE_SCENE_PRESSURE_PROMPT_LIMIT,
+        array_len(source.active_scene_pressure, "active_scene_pressure")?,
+        ACTIVE_SCENE_PRESSURE_BYTE_LIMIT,
+        serialized_len(source.active_scene_pressure)?,
     )?;
-    Ok(budgets)
+    insert_count_and_byte_budget(
+        budgets,
+        "active_plot_threads",
+        ACTIVE_PLOT_THREADS_PROMPT_LIMIT,
+        array_len(source.active_plot_threads, "active_plot_threads")?,
+        ACTIVE_PLOT_THREADS_BYTE_LIMIT,
+        serialized_len(source.active_plot_threads)?,
+    )?;
+    insert_byte_budget(
+        budgets,
+        "narrative_style_state",
+        NARRATIVE_STYLE_STATE_BYTE_LIMIT,
+        serialized_len(source.narrative_style_state)?,
+    )?;
+    insert_byte_budget(
+        budgets,
+        "active_character_text_design",
+        ACTIVE_CHARACTER_TEXT_DESIGN_BYTE_LIMIT,
+        serialized_len(source.active_character_text_design)?,
+    )?;
+    insert_byte_budget(
+        budgets,
+        "pressure_obligations",
+        PRESSURE_OBLIGATIONS_BYTE_LIMIT,
+        serialized_len(source.pressure_obligations)?,
+    )?;
+    Ok(())
 }
 
 fn compile_inclusions(
@@ -263,6 +329,36 @@ fn append_derived_inclusions(
         inclusion(
             "visible_context.world_process_clock",
             &source.world_process_clock.schema_version,
+            PromptContextInclusionReason::DerivedVisibleConstraint,
+            true,
+        ),
+        inclusion(
+            "visible_context.active_scene_pressure",
+            "active_scene_pressure.visible_active",
+            PromptContextInclusionReason::VisibleState,
+            true,
+        ),
+        inclusion(
+            "visible_context.active_plot_threads",
+            "active_plot_threads.active_visible",
+            PromptContextInclusionReason::VisibleState,
+            true,
+        ),
+        inclusion(
+            "visible_context.narrative_style_state",
+            "active_narrative_style_state",
+            PromptContextInclusionReason::VisibleState,
+            true,
+        ),
+        inclusion(
+            "visible_context.active_character_text_design",
+            "active_character_text_design",
+            PromptContextInclusionReason::VisibleState,
+            true,
+        ),
+        inclusion(
+            "pre_turn_simulation.pressure_obligations",
+            "pre_turn_simulation.pressure_obligations",
             PromptContextInclusionReason::DerivedVisibleConstraint,
             true,
         ),
@@ -344,9 +440,69 @@ fn insert_budget(
     }
     budgets.insert(
         section.to_owned(),
-        PromptContextBudgetBucket { limit, used },
+        PromptContextBudgetBucket {
+            limit,
+            used,
+            byte_limit: None,
+            bytes_used: None,
+        },
     );
     Ok(())
+}
+
+fn insert_count_and_byte_budget(
+    budgets: &mut BTreeMap<String, PromptContextBudgetBucket>,
+    section: &str,
+    limit: usize,
+    used: usize,
+    byte_limit: usize,
+    bytes_used: usize,
+) -> Result<()> {
+    if used > limit {
+        bail!("prompt context budget overflow: section={section}, used={used}, limit={limit}");
+    }
+    if bytes_used > byte_limit {
+        bail!(
+            "prompt context byte budget overflow: section={section}, used={bytes_used}, limit={byte_limit}"
+        );
+    }
+    budgets.insert(
+        section.to_owned(),
+        PromptContextBudgetBucket {
+            limit,
+            used,
+            byte_limit: Some(byte_limit),
+            bytes_used: Some(bytes_used),
+        },
+    );
+    Ok(())
+}
+
+fn insert_byte_budget(
+    budgets: &mut BTreeMap<String, PromptContextBudgetBucket>,
+    section: &str,
+    byte_limit: usize,
+    bytes_used: usize,
+) -> Result<()> {
+    if bytes_used > byte_limit {
+        bail!(
+            "prompt context byte budget overflow: section={section}, used={bytes_used}, limit={byte_limit}"
+        );
+    }
+    budgets.insert(
+        section.to_owned(),
+        PromptContextBudgetBucket {
+            limit: byte_limit,
+            used: bytes_used,
+            byte_limit: Some(byte_limit),
+            bytes_used: Some(bytes_used),
+        },
+    );
+    Ok(())
+}
+
+fn serialized_len(value: &Value) -> Result<usize> {
+    Ok(serde_json::to_vec(value)?.len())
 }
 
 fn array_len(value: &Value, label: &str) -> Result<usize> {
@@ -476,6 +632,50 @@ mod tests {
     }
 
     #[test]
+    fn reports_prompt_growth_budgets_for_active_runtime_sections() -> anyhow::Result<()> {
+        let report =
+            compile_prompt_context_budget_report(sample_source(serde_json::json!([]), Vec::new()))?;
+
+        assert_eq!(
+            report.budgets["active_scene_pressure"].byte_limit,
+            Some(ACTIVE_SCENE_PRESSURE_BYTE_LIMIT)
+        );
+        assert_eq!(
+            report.budgets["active_plot_threads"].byte_limit,
+            Some(ACTIVE_PLOT_THREADS_BYTE_LIMIT)
+        );
+        assert_eq!(
+            report.budgets["narrative_style_state"].byte_limit,
+            Some(NARRATIVE_STYLE_STATE_BYTE_LIMIT)
+        );
+        assert_eq!(
+            report.budgets["active_character_text_design"].byte_limit,
+            Some(ACTIVE_CHARACTER_TEXT_DESIGN_BYTE_LIMIT)
+        );
+        assert_eq!(
+            report.budgets["pressure_obligations"].byte_limit,
+            Some(PRESSURE_OBLIGATIONS_BYTE_LIMIT)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_over_byte_budget_prompt_runtime_sections() {
+        let oversized = Box::leak(Box::new(Value::String(
+            "x".repeat(NARRATIVE_STYLE_STATE_BYTE_LIMIT + 1),
+        )));
+        let mut source = sample_source(serde_json::json!([]), Vec::new());
+        source.narrative_style_state = oversized;
+
+        let result = compile_prompt_context_budget_report(source);
+        let Err(err) = result else {
+            panic!("oversized narrative style state should fail prompt assembly");
+        };
+
+        assert!(err.to_string().contains("byte budget overflow"));
+    }
+
+    #[test]
     fn reports_selected_and_rejected_context_capsules() -> anyhow::Result<()> {
         let report = compile_prompt_context_budget_report(sample_source_with_capsules(
             serde_json::json!([]),
@@ -571,6 +771,11 @@ mod tests {
         }));
         let active_change_ledger = Box::leak(Box::new(serde_json::json!({"active_changes": []})));
         let active_pattern_debt = Box::leak(Box::new(serde_json::json!({"active_patterns": []})));
+        let active_scene_pressure = Box::leak(Box::new(serde_json::json!([])));
+        let active_plot_threads = Box::leak(Box::new(serde_json::json!([])));
+        let narrative_style_state = Box::leak(Box::new(serde_json::json!({})));
+        let active_character_text_design = Box::leak(Box::new(serde_json::json!({})));
+        let pressure_obligations = Box::leak(Box::new(serde_json::json!([])));
         PromptContextBudgetReportSource {
             world_id: "stw_budget",
             turn_id: "turn_0100",
@@ -581,6 +786,11 @@ mod tests {
             active_change_ledger,
             active_pattern_debt,
             selected_context_capsules,
+            active_scene_pressure,
+            active_plot_threads,
+            narrative_style_state,
+            active_character_text_design,
+            pressure_obligations,
             omitted_debug_sections,
         }
     }

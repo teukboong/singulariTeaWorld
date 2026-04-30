@@ -7,7 +7,7 @@ use crate::store::{append_jsonl, read_json, write_json};
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 pub const PLOT_THREAD_PACKET_SCHEMA_VERSION: &str = "singulari.plot_thread_packet.v1";
@@ -19,6 +19,8 @@ pub const PLOT_THREAD_EVENTS_FILENAME: &str = "plot_thread_events.jsonl";
 pub const PLOT_THREADS_FILENAME: &str = "plot_threads.json";
 
 const ACTIVE_THREAD_BUDGET: usize = 3;
+const ACTIVE_THREAD_SOURCE_REF_CAP: usize = 6;
+const PLOT_THREAD_EVENT_REF_PREFIX: &str = "plot_thread_event:";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PlotThreadPacket {
@@ -54,8 +56,18 @@ pub struct PlotThread {
     pub current_question: String,
     #[serde(default)]
     pub source_refs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<PlotThreadSourceRefProvenance>,
     #[serde(default)]
     pub next_scene_hooks: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlotThreadSourceRefProvenance {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_event_ref: Option<String>,
+    pub event_count: usize,
+    pub older_refs_omitted: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -200,6 +212,7 @@ pub fn compile_plot_thread_packet(snapshot: &TurnSnapshot) -> PlotThreadPacket {
                 summary: format!("current_event {} is at {}", event.event_id, event.progress),
                 current_question: "이번 사건이 다음 행동으로 어떻게 변하는가".to_owned(),
                 source_refs: vec![format!("current_event:{}", event.event_id)],
+                provenance: None,
                 next_scene_hooks: vec![
                     "keep the current event moving from visible evidence".to_owned(),
                 ],
@@ -281,7 +294,12 @@ pub fn append_plot_thread_event_plan(world_dir: &Path, plan: &PlotThreadEventPla
 
 pub fn rebuild_plot_threads(world_dir: &Path, base: &PlotThreadPacket) -> Result<PlotThreadPacket> {
     let mut packet = base.clone();
+    let mut event_refs_by_thread = BTreeMap::<String, PlotThreadEventRefSummary>::new();
     for record in load_plot_thread_event_records(world_dir)? {
+        event_refs_by_thread
+            .entry(record.thread_id.clone())
+            .or_default()
+            .observe(plot_thread_event_ref(&record.event_id));
         apply_plot_thread_record(&mut packet, &record);
     }
     "materialized_from_snapshot_and_plot_thread_events_v1"
@@ -293,6 +311,7 @@ pub fn rebuild_plot_threads(world_dir: &Path, base: &PlotThreadPacket) -> Result
         )
     });
     packet.active_visible.truncate(ACTIVE_THREAD_BUDGET);
+    normalize_plot_thread_source_refs(&mut packet, &event_refs_by_thread);
     write_json(&world_dir.join(PLOT_THREADS_FILENAME), &packet)?;
     Ok(packet)
 }
@@ -329,8 +348,109 @@ fn apply_plot_thread_record(packet: &mut PlotThreadPacket, record: &PlotThreadEv
         thread.summary.clone_from(&record.summary);
         thread
             .source_refs
-            .push(format!("plot_thread_event:{}", record.event_id));
+            .push(plot_thread_event_ref(&record.event_id));
     }
+}
+
+#[derive(Debug, Clone, Default)]
+struct PlotThreadEventRefSummary {
+    latest_event_ref: Option<String>,
+    event_count: usize,
+}
+
+impl PlotThreadEventRefSummary {
+    fn observe(&mut self, event_ref: String) {
+        self.latest_event_ref = Some(event_ref);
+        self.event_count += 1;
+    }
+}
+
+fn normalize_plot_thread_source_refs(
+    packet: &mut PlotThreadPacket,
+    event_refs_by_thread: &BTreeMap<String, PlotThreadEventRefSummary>,
+) {
+    for thread in &mut packet.active_visible {
+        let event_summary = event_refs_by_thread.get(&thread.thread_id);
+        let latest_event_ref =
+            event_summary.and_then(|summary| summary.latest_event_ref.as_deref());
+        thread.source_refs = compact_plot_thread_source_refs(
+            &thread.source_refs,
+            latest_event_ref,
+            ACTIVE_THREAD_SOURCE_REF_CAP,
+        );
+        thread.provenance = event_summary.map(|summary| {
+            let kept_event_refs = thread
+                .source_refs
+                .iter()
+                .filter(|reference| reference.starts_with(PLOT_THREAD_EVENT_REF_PREFIX))
+                .count();
+            PlotThreadSourceRefProvenance {
+                latest_event_ref: summary.latest_event_ref.clone(),
+                event_count: summary.event_count,
+                older_refs_omitted: summary.event_count.saturating_sub(kept_event_refs),
+            }
+        });
+    }
+}
+
+fn compact_plot_thread_source_refs(
+    source_refs: &[String],
+    latest_event_ref: Option<&str>,
+    cap: usize,
+) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut ordinary_refs = Vec::new();
+    let mut event_refs = Vec::new();
+    for reference in source_refs {
+        let reference = reference.trim();
+        if reference.is_empty() || !seen.insert(reference.to_owned()) {
+            continue;
+        }
+        if reference.starts_with(PLOT_THREAD_EVENT_REF_PREFIX) {
+            event_refs.push(reference.to_owned());
+        } else {
+            ordinary_refs.push(reference.to_owned());
+        }
+    }
+
+    let mut compact = Vec::new();
+    push_refs_until_cap(&mut compact, ordinary_refs, cap);
+    if let Some(latest_event_ref) =
+        latest_event_ref.filter(|reference| !reference.trim().is_empty())
+    {
+        push_required_ref(&mut compact, latest_event_ref, cap);
+    }
+    push_refs_until_cap(&mut compact, event_refs, cap);
+    compact
+}
+
+fn push_refs_until_cap(compact: &mut Vec<String>, refs: Vec<String>, cap: usize) {
+    for reference in refs {
+        if compact.len() >= cap {
+            return;
+        }
+        if !compact.contains(&reference) {
+            compact.push(reference);
+        }
+    }
+}
+
+fn push_required_ref(compact: &mut Vec<String>, reference: &str, cap: usize) {
+    if compact.iter().any(|existing| existing == reference) {
+        return;
+    }
+    if compact.len() >= cap {
+        let remove_index = compact
+            .iter()
+            .rposition(|existing| existing.starts_with(PLOT_THREAD_EVENT_REF_PREFIX))
+            .unwrap_or_else(|| compact.len().saturating_sub(1));
+        compact.remove(remove_index);
+    }
+    compact.push(reference.to_owned());
+}
+
+fn plot_thread_event_ref(event_id: &str) -> String {
+    format!("{PLOT_THREAD_EVENT_REF_PREFIX}{event_id}")
 }
 
 fn validate_plot_thread_event(
@@ -380,6 +500,7 @@ fn open_question_thread(index: usize, question: &str) -> PlotThread {
         summary: format!("unresolved player-visible question: {question}"),
         current_question: question.to_owned(),
         source_refs: vec![format!("latest_snapshot.open_questions[{index}]")],
+        provenance: None,
         next_scene_hooks: vec!["preserve the question unless the turn earns an answer".to_owned()],
     }
 }
@@ -493,6 +614,68 @@ mod tests {
         assert_eq!(plan.records.len(), 1);
         assert_eq!(plan.records[0].thread_id, "thread:open_question:00");
         assert_eq!(plan.records[0].event_id, "plot_thread_event:turn_0002:00");
+        Ok(())
+    }
+
+    #[test]
+    fn rebuild_caps_plot_thread_source_refs_and_preserves_latest_event() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let mut base = PlotThreadPacket {
+            schema_version: PLOT_THREAD_PACKET_SCHEMA_VERSION.to_owned(),
+            world_id: "stw_threads".to_owned(),
+            turn_id: "turn_0010".to_owned(),
+            active_visible: vec![open_question_thread(0, "who locked the side gate?")],
+            compiler_policy: PlotThreadPolicy::default(),
+        };
+        let thread_id = base.active_visible[0].thread_id.clone();
+        base.active_visible[0]
+            .source_refs
+            .push("visible_scene.text_blocks[0]".to_owned());
+        let records = (0..8)
+            .map(|index| PlotThreadEventRecord {
+                schema_version: PLOT_THREAD_EVENT_SCHEMA_VERSION.to_owned(),
+                world_id: "stw_threads".to_owned(),
+                turn_id: "turn_0010".to_owned(),
+                event_id: format!("plot_thread_event:turn_0010:{index:02}"),
+                thread_id: thread_id.clone(),
+                change: PlotThreadChange::Advanced,
+                status_after: PlotThreadStatus::Active,
+                urgency_after: PlotThreadUrgency::Immediate,
+                summary: format!("thread beat {index}"),
+                evidence_refs: vec!["visible_scene.text_blocks[0]".to_owned()],
+                recorded_at: Utc::now().to_rfc3339(),
+            })
+            .collect::<Vec<_>>();
+        append_plot_thread_event_plan(
+            temp.path(),
+            &PlotThreadEventPlan {
+                world_id: "stw_threads".to_owned(),
+                turn_id: "turn_0010".to_owned(),
+                records,
+            },
+        )?;
+
+        let first = rebuild_plot_threads(temp.path(), &base)?;
+        let second = rebuild_plot_threads(temp.path(), &first)?;
+        let first_thread = &first.active_visible[0];
+        let second_thread = &second.active_visible[0];
+
+        assert_eq!(first_thread.source_refs, second_thread.source_refs);
+        assert!(first_thread.source_refs.len() <= ACTIVE_THREAD_SOURCE_REF_CAP);
+        assert!(
+            first_thread
+                .source_refs
+                .contains(&"plot_thread_event:plot_thread_event:turn_0010:07".to_owned())
+        );
+        let Some(provenance) = first_thread.provenance.as_ref() else {
+            panic!("rebuild should attach plot thread event provenance");
+        };
+        assert_eq!(provenance.event_count, 8);
+        assert_eq!(
+            provenance.latest_event_ref.as_deref(),
+            Some("plot_thread_event:plot_thread_event:turn_0010:07")
+        );
+        assert!(provenance.older_refs_omitted > 0);
         Ok(())
     }
 

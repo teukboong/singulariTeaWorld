@@ -451,6 +451,7 @@ mod tests {
                     intensity: 3,
                     urgency: ScenePressureUrgency::Immediate,
                     source_refs: vec!["turn:0004".to_owned()],
+                    provenance: None,
                     observable_signals: vec!["문틈의 빛이 줄어든다".to_owned()],
                     choice_affordances: Vec::new(),
                     prose_effect: ScenePressureProseEffect {

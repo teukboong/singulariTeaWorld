@@ -424,6 +424,7 @@ mod tests {
                 summary: "The gate tax blocks passage.".to_owned(),
                 current_question: "How can the protagonist secure a token?".to_owned(),
                 source_refs: vec!["canon_event:turn_0002".to_owned()],
+                provenance: None,
                 next_scene_hooks: Vec::new(),
             }],
             compiler_policy: PlotThreadPolicy::default(),

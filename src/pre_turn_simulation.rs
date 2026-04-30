@@ -573,6 +573,7 @@ mod tests {
                 intensity: 3,
                 urgency: ScenePressureUrgency::Immediate,
                 source_refs: vec!["visible_scene:gate".to_owned()],
+                provenance: None,
                 observable_signals: vec!["signal:closing_gate".to_owned()],
                 choice_affordances: vec!["move".to_owned()],
                 prose_effect: ScenePressureProseEffect {
