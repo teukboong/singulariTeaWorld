@@ -1,7 +1,10 @@
+use crate::body_resource::BodyResourcePacket;
+use crate::encounter_surface::EncounterSurfacePacket;
 use crate::knowledge_ledger::{
     KnowledgeTier, can_render_knowledge_tier_to_player, render_rule_for_player,
     visible_knowledge_text_is_qualified,
 };
+use crate::location_graph::LocationGraphPacket;
 use crate::models::TurnChoice;
 use crate::prompt_context::PromptContextPacket;
 use crate::resolution::{
@@ -9,7 +12,9 @@ use crate::resolution::{
     ResolutionFailureKind, ResolutionOutcomeKind, ResolutionProposal, ResolutionVisibility,
     audit_resolution_choices, audit_resolution_proposal,
 };
-use anyhow::{Result, bail};
+use crate::social_exchange::SocialExchangePacket;
+use anyhow::{Context, Result, bail};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -607,10 +612,27 @@ fn audit_world_change_set_against_context(
     accepted_checks: &mut Vec<String>,
     violations: &mut Vec<WorldCourtViolation>,
 ) {
-    let refs = court_reference_index(context);
+    let refs = match court_reference_index(context) {
+        Ok(refs) => refs,
+        Err(error) => {
+            violations.push(WorldCourtViolation {
+                schema_version: WORLD_COURT_VIOLATION_SCHEMA_VERSION.to_owned(),
+                layer: WorldCourtLayer::Schema,
+                severity: WorldCourtViolationSeverity::Blocking,
+                check: "world_change_set_context_refs".to_owned(),
+                message: format!("world court could not index prompt context refs: {error:#}"),
+                rejected_refs: vec!["visible_context".to_owned()],
+                required_changes: vec![
+                    "repair typed prompt context packets before adjudication".to_owned(),
+                ],
+                allowed_repair_scope: vec!["prompt_context.visible_context".to_owned()],
+            });
+            return;
+        }
+    };
     for event in &change_set.proposed_events {
         if event.event_kind == WorldChangeEventKind::ProcessTicked
-            && !refs.contains(event.target_ref.as_str())
+            && !refs.all.contains(event.target_ref.as_str())
         {
             violations.push(change_set_violation(
                 WorldCourtLayer::Time,
@@ -622,7 +644,9 @@ fn audit_world_change_set_against_context(
         }
     }
     for cost in &change_set.cost_claims {
-        if cost.cost_kind == CostClaimKind::Affordance && !refs.contains(cost.target_ref.as_str()) {
+        if cost.cost_kind == CostClaimKind::Affordance
+            && !refs.all.contains(cost.target_ref.as_str())
+        {
             violations.push(change_set_violation(
                 WorldCourtLayer::ChoiceGrounding,
                 "world_change_set_affordance_exists",
@@ -631,6 +655,10 @@ fn audit_world_change_set_against_context(
                 "use an affordance_id from the pre-turn simulation pass",
             ));
         }
+        audit_cost_claim_context_ref(&refs, cost, accepted_checks, violations);
+    }
+    for mutation in &change_set.fact_mutations {
+        audit_fact_mutation_context_ref(&refs, mutation, accepted_checks, violations);
     }
     if !change_set
         .proposed_events
@@ -654,32 +682,405 @@ fn audit_world_change_set_against_context(
     }
 }
 
-fn court_reference_index(context: &PromptContextPacket) -> BTreeSet<String> {
-    let mut refs = BTreeSet::from(["current_turn".to_owned()]);
-    refs.extend(context.pre_turn_simulation.source_refs.iter().cloned());
+#[derive(Debug, Default)]
+struct CourtReferenceIndex {
+    all: BTreeSet<String>,
+    body_resource: BTreeSet<String>,
+    location: BTreeSet<String>,
+    social: BTreeSet<String>,
+    encounter_surface: BTreeSet<String>,
+}
+
+fn court_reference_index(context: &PromptContextPacket) -> Result<CourtReferenceIndex> {
+    let mut refs = CourtReferenceIndex::default();
+    refs.insert_all("current_turn");
+    for source_ref in &context.pre_turn_simulation.source_refs {
+        refs.insert_all(source_ref);
+    }
     if let Some(choice) = &context.pre_turn_simulation.selected_choice {
-        refs.insert(format!("choice:{}", choice.slot));
+        refs.insert_all(format!("choice:{}", choice.slot));
     }
     for affordance in &context.pre_turn_simulation.available_affordances {
-        refs.insert(affordance.affordance_id.clone());
-        refs.extend(affordance.source_refs.iter().cloned());
-        refs.extend(affordance.pressure_refs.iter().cloned());
+        refs.insert_all(&affordance.affordance_id);
+        for source_ref in &affordance.source_refs {
+            refs.insert_all(source_ref);
+        }
+        for pressure_ref in &affordance.pressure_refs {
+            refs.insert_all(pressure_ref);
+        }
     }
     for affordance in &context.pre_turn_simulation.blocked_affordances {
-        refs.insert(affordance.affordance_id.clone());
+        refs.insert_all(&affordance.affordance_id);
     }
     for pressure in &context.pre_turn_simulation.pressure_obligations {
-        refs.insert(pressure.pressure_id.clone());
-        refs.extend(pressure.evidence_refs.iter().cloned());
+        refs.insert_all(&pressure.pressure_id);
+        for evidence_ref in &pressure.evidence_refs {
+            refs.insert_all(evidence_ref);
+        }
     }
     for process in &context.pre_turn_simulation.due_processes {
-        refs.insert(process.process_id.clone());
-        refs.extend(process.evidence_refs.iter().cloned());
+        refs.insert_all(&process.process_id);
+        for evidence_ref in &process.evidence_refs {
+            refs.insert_all(evidence_ref);
+        }
     }
     for risk in &context.pre_turn_simulation.causal_risks {
-        refs.extend(risk.evidence_refs.iter().cloned());
+        for evidence_ref in &risk.evidence_refs {
+            refs.insert_all(evidence_ref);
+        }
     }
-    refs
+    refs.index_visible_context(context)?;
+    Ok(refs)
+}
+
+impl CourtReferenceIndex {
+    fn insert_all(&mut self, item_ref: impl AsRef<str>) {
+        let item_ref = item_ref.as_ref();
+        if !item_ref.trim().is_empty() {
+            self.all.insert(item_ref.to_owned());
+        }
+    }
+
+    fn insert_body_resource(&mut self, item_ref: impl AsRef<str>) {
+        let item_ref = item_ref.as_ref();
+        if !item_ref.trim().is_empty() {
+            self.body_resource.insert(item_ref.to_owned());
+            self.all.insert(item_ref.to_owned());
+        }
+    }
+
+    fn insert_location(&mut self, item_ref: impl AsRef<str>) {
+        let item_ref = item_ref.as_ref();
+        if !item_ref.trim().is_empty() {
+            self.location.insert(item_ref.to_owned());
+            self.all.insert(item_ref.to_owned());
+        }
+    }
+
+    fn insert_social(&mut self, item_ref: impl AsRef<str>) {
+        let item_ref = item_ref.as_ref();
+        if !item_ref.trim().is_empty() {
+            self.social.insert(item_ref.to_owned());
+            self.all.insert(item_ref.to_owned());
+        }
+    }
+
+    fn insert_surface(&mut self, item_ref: impl AsRef<str>) {
+        let item_ref = item_ref.as_ref();
+        if !item_ref.trim().is_empty() {
+            self.encounter_surface.insert(item_ref.to_owned());
+            self.all.insert(item_ref.to_owned());
+        }
+    }
+
+    fn index_visible_context(&mut self, context: &PromptContextPacket) -> Result<()> {
+        if let Some(packet) = parse_visible_packet::<BodyResourcePacket>(
+            &context.visible_context.active_body_resource_state,
+            "active_body_resource_state",
+        )? {
+            self.index_body_resource_packet(&packet);
+        }
+        if let Some(packet) = parse_visible_packet::<LocationGraphPacket>(
+            &context.visible_context.active_location_graph,
+            "active_location_graph",
+        )? {
+            self.index_location_graph_packet(&packet);
+        }
+        if let Some(packet) = parse_visible_packet::<SocialExchangePacket>(
+            &context.visible_context.active_social_exchange,
+            "active_social_exchange",
+        )? {
+            self.index_social_exchange_packet(&packet);
+        }
+        if let Some(packet) = parse_visible_packet::<EncounterSurfacePacket>(
+            &context.visible_context.active_encounter_surface,
+            "active_encounter_surface",
+        )? {
+            self.index_encounter_surface_packet(&packet);
+        }
+        Ok(())
+    }
+
+    fn index_body_resource_packet(&mut self, packet: &BodyResourcePacket) {
+        for constraint in &packet.body_constraints {
+            self.insert_body_resource(&constraint.constraint_id);
+            for source_ref in &constraint.source_refs {
+                self.insert_body_resource(source_ref);
+            }
+            if let Some(alias) = sanitized_ref_alias("body", constraint.summary.as_str()) {
+                self.insert_body_resource(alias);
+            }
+        }
+        for resource in &packet.resources {
+            self.insert_body_resource(&resource.resource_id);
+            for source_ref in &resource.source_refs {
+                self.insert_body_resource(source_ref);
+            }
+            if let Some(alias) = sanitized_ref_alias("inventory", resource.summary.as_str()) {
+                self.insert_body_resource(alias);
+            }
+            if let Some(alias) = sanitized_ref_alias("resource", resource.summary.as_str()) {
+                self.insert_body_resource(alias);
+            }
+        }
+    }
+
+    fn index_location_graph_packet(&mut self, packet: &LocationGraphPacket) {
+        if let Some(location) = &packet.current_location {
+            self.insert_location(&location.location_id);
+            for source_ref in &location.source_refs {
+                self.insert_location(source_ref);
+            }
+            if let Some(alias) = sanitized_ref_alias("location", location.name.as_str()) {
+                self.insert_location(alias);
+            }
+        }
+        for location in &packet.known_nearby_locations {
+            self.insert_location(&location.location_id);
+            for source_ref in &location.source_refs {
+                self.insert_location(source_ref);
+            }
+            if let Some(alias) = sanitized_ref_alias("location", location.name.as_str()) {
+                self.insert_location(alias);
+            }
+        }
+    }
+
+    fn index_social_exchange_packet(&mut self, packet: &SocialExchangePacket) {
+        for stance in &packet.active_stances {
+            self.insert_social(&stance.stance_id);
+            self.insert_social(&stance.actor_ref);
+            self.insert_social(&stance.target_ref);
+            for relationship_ref in &stance.relationship_refs {
+                self.insert_social(relationship_ref);
+            }
+            for source_ref in &stance.source_refs {
+                self.insert_social(source_ref);
+            }
+        }
+        for commitment in &packet.active_commitments {
+            self.insert_social(&commitment.commitment_id);
+            self.insert_social(&commitment.actor_ref);
+            self.insert_social(&commitment.target_ref);
+            for source_ref in &commitment.source_refs {
+                self.insert_social(source_ref);
+            }
+        }
+        for ask in &packet.unresolved_asks {
+            self.insert_social(&ask.ask_id);
+            self.insert_social(&ask.asked_by_ref);
+            self.insert_social(&ask.asked_to_ref);
+            for source_ref in &ask.source_refs {
+                self.insert_social(source_ref);
+            }
+        }
+        for leverage in &packet.leverage {
+            self.insert_social(&leverage.leverage_id);
+            self.insert_social(&leverage.holder_ref);
+            self.insert_social(&leverage.target_ref);
+            for source_ref in &leverage.source_refs {
+                self.insert_social(source_ref);
+            }
+        }
+    }
+
+    fn index_encounter_surface_packet(&mut self, packet: &EncounterSurfacePacket) {
+        for surface in &packet.active_surfaces {
+            self.insert_surface(&surface.surface_id);
+            if let Some(location_ref) = &surface.location_ref {
+                self.insert_location(location_ref);
+            }
+            if let Some(holder_ref) = &surface.holder_ref {
+                self.insert_social(holder_ref);
+            }
+            for source_ref in &surface.source_refs {
+                self.insert_surface(source_ref);
+            }
+            for entity_ref in &surface.linked_entity_refs {
+                self.insert_surface(entity_ref);
+            }
+            for social_ref in &surface.linked_social_refs {
+                self.insert_social(social_ref);
+            }
+            for affordance in &surface.affordances {
+                self.insert_surface(&affordance.affordance_id);
+                for required_ref in &affordance.required_refs {
+                    self.insert_all(required_ref);
+                }
+                for evidence_ref in &affordance.evidence_refs {
+                    self.insert_all(evidence_ref);
+                }
+            }
+            for constraint in &surface.constraints {
+                self.insert_surface(&constraint.constraint_id);
+                for unblock_ref in &constraint.unblock_refs {
+                    self.insert_all(unblock_ref);
+                }
+                for evidence_ref in &constraint.evidence_refs {
+                    self.insert_all(evidence_ref);
+                }
+            }
+        }
+        for contract in &packet.choice_contracts {
+            self.insert_surface(&contract.choice_id);
+            self.insert_surface(&contract.target_ref);
+            for evidence_ref in &contract.evidence_refs {
+                self.insert_all(evidence_ref);
+            }
+        }
+        for blocked in &packet.blocked_interactions {
+            self.insert_surface(&blocked.surface_id);
+            for unblock_ref in &blocked.unblock_refs {
+                self.insert_all(unblock_ref);
+            }
+            for evidence_ref in &blocked.evidence_refs {
+                self.insert_all(evidence_ref);
+            }
+        }
+    }
+}
+
+fn parse_visible_packet<T: DeserializeOwned>(
+    value: &serde_json::Value,
+    context_name: &str,
+) -> Result<Option<T>> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    serde_json::from_value(value.clone())
+        .with_context(|| format!("invalid visible context packet: {context_name}"))
+        .map(Some)
+}
+
+fn sanitized_ref_alias(prefix: &str, label: &str) -> Option<String> {
+    let mut body = String::new();
+    for character in label.chars().flat_map(char::to_lowercase) {
+        if character.is_ascii_alphanumeric() {
+            body.push(character);
+        } else if !body.ends_with('_') {
+            body.push('_');
+        }
+    }
+    let trimmed = body.trim_matches('_');
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(format!("{prefix}:{trimmed}"))
+    }
+}
+
+fn audit_cost_claim_context_ref(
+    refs: &CourtReferenceIndex,
+    cost: &CostClaim,
+    accepted_checks: &mut Vec<String>,
+    violations: &mut Vec<WorldCourtViolation>,
+) {
+    let Some(domain_refs) = refs_for_cost_claim(refs, cost.cost_kind) else {
+        return;
+    };
+    if domain_refs.is_empty() || ref_set_contains(domain_refs, cost.target_ref.as_str()) {
+        push_accepted_check(accepted_checks, context_cost_check_name(cost.cost_kind));
+        return;
+    }
+    violations.push(change_set_violation(
+        layer_for_cost_claim_kind(cost.cost_kind),
+        context_cost_check_name(cost.cost_kind),
+        "cost claim references a world ref that is not present in the compiled prompt context",
+        cost.target_ref.as_str(),
+        "use a current visible context ref or adjudicate the action as an attempted/blocked action",
+    ));
+}
+
+fn audit_fact_mutation_context_ref(
+    refs: &CourtReferenceIndex,
+    mutation: &FactMutation,
+    accepted_checks: &mut Vec<String>,
+    violations: &mut Vec<WorldCourtViolation>,
+) {
+    let Some(domain_refs) = refs_for_fact_mutation(refs, mutation.mutation_kind) else {
+        return;
+    };
+    if domain_refs.is_empty() || ref_set_contains(domain_refs, mutation.target_ref.as_str()) {
+        push_accepted_check(
+            accepted_checks,
+            context_fact_mutation_check_name(mutation.mutation_kind),
+        );
+        return;
+    }
+    violations.push(change_set_violation(
+        layer_for_fact_mutation_kind(mutation.mutation_kind),
+        context_fact_mutation_check_name(mutation.mutation_kind),
+        "fact mutation references a world ref that is not present in the compiled prompt context",
+        mutation.target_ref.as_str(),
+        "retarget to a current visible context ref or add a discovery/observation event first",
+    ));
+}
+
+fn refs_for_cost_claim(
+    refs: &CourtReferenceIndex,
+    cost_kind: CostClaimKind,
+) -> Option<&BTreeSet<String>> {
+    match cost_kind {
+        CostClaimKind::Body | CostClaimKind::Resource => Some(&refs.body_resource),
+        CostClaimKind::Location => Some(&refs.location),
+        CostClaimKind::SocialPermission => Some(&refs.social),
+        CostClaimKind::Affordance => Some(&refs.encounter_surface),
+        CostClaimKind::Knowledge
+        | CostClaimKind::TimePressure
+        | CostClaimKind::HiddenConstraint
+        | CostClaimKind::WorldLaw => None,
+    }
+}
+
+fn refs_for_fact_mutation(
+    refs: &CourtReferenceIndex,
+    mutation_kind: FactMutationKind,
+) -> Option<&BTreeSet<String>> {
+    match mutation_kind {
+        FactMutationKind::BodyResourceDelta => Some(&refs.body_resource),
+        FactMutationKind::LocationDelta => Some(&refs.location),
+        FactMutationKind::RelationshipDelta => Some(&refs.social),
+        FactMutationKind::ScenePressureDelta
+        | FactMutationKind::BeliefDelta
+        | FactMutationKind::WorldLoreDelta
+        | FactMutationKind::PatternDebt
+        | FactMutationKind::PlayerIntentTrace => None,
+    }
+}
+
+const fn context_cost_check_name(cost_kind: CostClaimKind) -> &'static str {
+    match cost_kind {
+        CostClaimKind::Body | CostClaimKind::Resource => "body_resource_context_ref_exists",
+        CostClaimKind::Location => "space_context_ref_exists",
+        CostClaimKind::SocialPermission => "social_authority_context_ref_exists",
+        CostClaimKind::Affordance => "encounter_affordance_context_ref_exists",
+        CostClaimKind::Knowledge
+        | CostClaimKind::TimePressure
+        | CostClaimKind::HiddenConstraint
+        | CostClaimKind::WorldLaw => "world_change_set_context_ref_exists",
+    }
+}
+
+const fn context_fact_mutation_check_name(mutation_kind: FactMutationKind) -> &'static str {
+    match mutation_kind {
+        FactMutationKind::BodyResourceDelta => "body_resource_mutation_context_ref_exists",
+        FactMutationKind::LocationDelta => "space_mutation_context_ref_exists",
+        FactMutationKind::RelationshipDelta => "social_authority_mutation_context_ref_exists",
+        FactMutationKind::ScenePressureDelta
+        | FactMutationKind::BeliefDelta
+        | FactMutationKind::WorldLoreDelta
+        | FactMutationKind::PatternDebt
+        | FactMutationKind::PlayerIntentTrace => "world_change_set_mutation_context_ref_exists",
+    }
+}
+
+fn ref_set_contains(refs: &BTreeSet<String>, item_ref: &str) -> bool {
+    refs.contains(item_ref)
+        || refs.iter().any(|known_ref| {
+            known_ref
+                .strip_prefix(item_ref)
+                .is_some_and(|suffix| suffix.starts_with("->") || suffix.starts_with(':'))
+        })
 }
 
 fn audit_fact_mutation(
@@ -1101,7 +1502,16 @@ mod tests {
     };
     use crate::TurnInputKind;
     use crate::affordance_graph::AffordanceKind;
+    use crate::body_resource::{
+        BODY_CONSTRAINT_SCHEMA_VERSION, BODY_RESOURCE_PACKET_SCHEMA_VERSION, BodyConstraint,
+        BodyResourcePacket, BodyResourcePolicy, BodyResourceVisibility,
+        RESOURCE_ITEM_SCHEMA_VERSION, ResourceItem, ResourceKind,
+    };
     use crate::knowledge_ledger::KnowledgeTier;
+    use crate::location_graph::{
+        LOCATION_GRAPH_PACKET_SCHEMA_VERSION, LOCATION_NODE_SCHEMA_VERSION, LocationGraphPacket,
+        LocationGraphPolicy, LocationKnowledgeState, LocationNode,
+    };
     use crate::pre_turn_simulation::{
         CompiledAffordance, DueProcess, HiddenVisibilityBoundary,
         PRE_TURN_SIMULATION_PASS_SCHEMA_VERSION, PreTurnSimulationPass, PreTurnSimulationPolicy,
@@ -1120,7 +1530,12 @@ mod tests {
         ResolutionOutcome, ResolutionOutcomeKind, ResolutionProposal, ResolutionVisibility,
     };
     use crate::scene_pressure::ScenePressureKind;
+    use crate::social_exchange::{
+        DialogueStance, DialogueStanceKind, SocialExchangePacket, SocialExchangePolicy,
+        SocialIntensity,
+    };
     use crate::world_process_clock::WorldProcessTempo;
+    use serde::Serialize;
     use std::collections::BTreeMap;
 
     #[test]
@@ -1534,6 +1949,156 @@ mod tests {
     }
 
     #[test]
+    fn world_change_set_rejects_resource_cost_absent_from_context() {
+        let context = context_with_reference_packets();
+        let change_set = super::WorldChangeSet {
+            schema_version: super::WORLD_CHANGE_SET_SCHEMA_VERSION.to_owned(),
+            world_id: "stw_court".to_owned(),
+            turn_id: "turn_0001".to_owned(),
+            proposed_events: vec![attempt_event("current_turn")],
+            fact_mutations: Vec::new(),
+            cost_claims: vec![super::CostClaim {
+                schema_version: super::COST_CLAIM_SCHEMA_VERSION.to_owned(),
+                cost_kind: super::CostClaimKind::Resource,
+                target_ref: "inventory:missing_key".to_owned(),
+                status: GateStatus::Blocked,
+                visibility: ResolutionVisibility::PlayerVisible,
+                reason: "missing key".to_owned(),
+                evidence_refs: vec!["current_turn".to_owned()],
+            }],
+            visibility_claims: Vec::new(),
+            evidence_refs: vec!["current_turn".to_owned()],
+        };
+        let mut accepted_checks = Vec::new();
+        let mut violations = Vec::new();
+
+        super::audit_world_change_set_against_context(
+            &context,
+            &change_set,
+            &mut accepted_checks,
+            &mut violations,
+        );
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].layer, WorldCourtLayer::BodyResource);
+        assert_eq!(violations[0].check, "body_resource_context_ref_exists");
+    }
+
+    #[test]
+    fn world_change_set_accepts_resource_alias_from_context() {
+        let context = context_with_reference_packets();
+        let change_set = super::WorldChangeSet {
+            schema_version: super::WORLD_CHANGE_SET_SCHEMA_VERSION.to_owned(),
+            world_id: "stw_court".to_owned(),
+            turn_id: "turn_0001".to_owned(),
+            proposed_events: vec![attempt_event("current_turn")],
+            fact_mutations: Vec::new(),
+            cost_claims: vec![super::CostClaim {
+                schema_version: super::COST_CLAIM_SCHEMA_VERSION.to_owned(),
+                cost_kind: super::CostClaimKind::Resource,
+                target_ref: "inventory:entry_token".to_owned(),
+                status: GateStatus::Passed,
+                visibility: ResolutionVisibility::PlayerVisible,
+                reason: "player has the entry token".to_owned(),
+                evidence_refs: vec!["resource:inventory:00".to_owned()],
+            }],
+            visibility_claims: Vec::new(),
+            evidence_refs: vec!["current_turn".to_owned()],
+        };
+        let mut accepted_checks = Vec::new();
+        let mut violations = Vec::new();
+
+        super::audit_world_change_set_against_context(
+            &context,
+            &change_set,
+            &mut accepted_checks,
+            &mut violations,
+        );
+
+        assert!(violations.is_empty());
+        assert!(
+            accepted_checks
+                .iter()
+                .any(|check| { check == "body_resource_context_ref_exists" })
+        );
+    }
+
+    #[test]
+    fn world_change_set_rejects_location_mutation_absent_from_context() {
+        let context = context_with_reference_packets();
+        let change_set = super::WorldChangeSet {
+            schema_version: super::WORLD_CHANGE_SET_SCHEMA_VERSION.to_owned(),
+            world_id: "stw_court".to_owned(),
+            turn_id: "turn_0001".to_owned(),
+            proposed_events: vec![attempt_event("current_turn")],
+            fact_mutations: vec![super::FactMutation {
+                schema_version: super::FACT_MUTATION_SCHEMA_VERSION.to_owned(),
+                mutation_kind: super::FactMutationKind::LocationDelta,
+                target_ref: "place:secret_harbor".to_owned(),
+                visibility: ResolutionVisibility::PlayerVisible,
+                summary: "invented location jump".to_owned(),
+                knowledge_tier: None,
+                evidence_refs: vec!["current_turn".to_owned()],
+            }],
+            cost_claims: Vec::new(),
+            visibility_claims: Vec::new(),
+            evidence_refs: vec!["current_turn".to_owned()],
+        };
+        let mut accepted_checks = Vec::new();
+        let mut violations = Vec::new();
+
+        super::audit_world_change_set_against_context(
+            &context,
+            &change_set,
+            &mut accepted_checks,
+            &mut violations,
+        );
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].layer, WorldCourtLayer::Space);
+        assert_eq!(violations[0].check, "space_mutation_context_ref_exists");
+    }
+
+    #[test]
+    fn world_change_set_accepts_social_family_ref_from_context() {
+        let context = context_with_reference_packets();
+        let change_set = super::WorldChangeSet {
+            schema_version: super::WORLD_CHANGE_SET_SCHEMA_VERSION.to_owned(),
+            world_id: "stw_court".to_owned(),
+            turn_id: "turn_0001".to_owned(),
+            proposed_events: vec![attempt_event("current_turn")],
+            fact_mutations: Vec::new(),
+            cost_claims: vec![super::CostClaim {
+                schema_version: super::COST_CLAIM_SCHEMA_VERSION.to_owned(),
+                cost_kind: super::CostClaimKind::SocialPermission,
+                target_ref: "rel:guard".to_owned(),
+                status: GateStatus::CostImposed,
+                visibility: ResolutionVisibility::PlayerVisible,
+                reason: "guard controls the gate".to_owned(),
+                evidence_refs: vec!["rel:guard->protagonist:distance".to_owned()],
+            }],
+            visibility_claims: Vec::new(),
+            evidence_refs: vec!["current_turn".to_owned()],
+        };
+        let mut accepted_checks = Vec::new();
+        let mut violations = Vec::new();
+
+        super::audit_world_change_set_against_context(
+            &context,
+            &change_set,
+            &mut accepted_checks,
+            &mut violations,
+        );
+
+        assert!(violations.is_empty());
+        assert!(
+            accepted_checks
+                .iter()
+                .any(|check| { check == "social_authority_context_ref_exists" })
+        );
+    }
+
+    #[test]
     fn semantic_causality_rejects_full_success_when_gate_is_blocked() {
         let mut proposal = semantic_probe();
         proposal.outcome.kind = ResolutionOutcomeKind::Success;
@@ -1642,6 +2207,100 @@ mod tests {
                 excluded: Vec::new(),
                 compiler_policy: PromptContextBudgetPolicy::default(),
             },
+        }
+    }
+
+    fn context_with_reference_packets() -> PromptContextPacket {
+        let mut context = minimal_context(false);
+        context.visible_context.active_body_resource_state = test_json(BodyResourcePacket {
+            schema_version: BODY_RESOURCE_PACKET_SCHEMA_VERSION.to_owned(),
+            world_id: "stw_court".to_owned(),
+            turn_id: "turn_0001".to_owned(),
+            body_constraints: vec![BodyConstraint {
+                schema_version: BODY_CONSTRAINT_SCHEMA_VERSION.to_owned(),
+                constraint_id: "body:constraint:00".to_owned(),
+                visibility: BodyResourceVisibility::PlayerVisible,
+                summary: "left wrist aches".to_owned(),
+                severity: 2,
+                source_refs: vec!["latest_snapshot.protagonist_state.body[0]".to_owned()],
+                scene_pressure_kinds: vec!["body".to_owned()],
+            }],
+            resources: vec![ResourceItem {
+                schema_version: RESOURCE_ITEM_SCHEMA_VERSION.to_owned(),
+                resource_id: "resource:inventory:00".to_owned(),
+                visibility: BodyResourceVisibility::PlayerVisible,
+                summary: "entry token".to_owned(),
+                resource_kind: ResourceKind::Document,
+                source_refs: vec!["latest_snapshot.protagonist_state.inventory[0]".to_owned()],
+            }],
+            compiler_policy: BodyResourcePolicy::default(),
+        });
+        context.visible_context.active_location_graph = test_json(LocationGraphPacket {
+            schema_version: LOCATION_GRAPH_PACKET_SCHEMA_VERSION.to_owned(),
+            world_id: "stw_court".to_owned(),
+            turn_id: "turn_0001".to_owned(),
+            current_location: Some(LocationNode {
+                schema_version: LOCATION_NODE_SCHEMA_VERSION.to_owned(),
+                location_id: "place:gate".to_owned(),
+                name: "Gate".to_owned(),
+                knowledge_state: LocationKnowledgeState::Visited,
+                notes: Vec::new(),
+                source_refs: vec!["latest_snapshot.protagonist_state.location".to_owned()],
+            }),
+            known_nearby_locations: vec![LocationNode {
+                schema_version: LOCATION_NODE_SCHEMA_VERSION.to_owned(),
+                location_id: "place:west_gate".to_owned(),
+                name: "West Gate".to_owned(),
+                knowledge_state: LocationKnowledgeState::Known,
+                notes: Vec::new(),
+                source_refs: vec!["entities.places[west_gate]".to_owned()],
+            }],
+            compiler_policy: LocationGraphPolicy::default(),
+        });
+        context.visible_context.active_social_exchange = test_json(SocialExchangePacket {
+            schema_version: crate::social_exchange::SOCIAL_EXCHANGE_PACKET_SCHEMA_VERSION
+                .to_owned(),
+            world_id: "stw_court".to_owned(),
+            turn_id: "turn_0001".to_owned(),
+            active_stances: vec![DialogueStance {
+                schema_version: crate::social_exchange::SOCIAL_EXCHANGE_STANCE_SCHEMA_VERSION
+                    .to_owned(),
+                stance_id: "stance:guard".to_owned(),
+                actor_ref: "char:guard".to_owned(),
+                target_ref: "char:protagonist".to_owned(),
+                stance: DialogueStanceKind::WaryTesting,
+                intensity: SocialIntensity::Medium,
+                summary: "guard is wary".to_owned(),
+                player_visible_signal: "The guard watches you closely.".to_owned(),
+                source_refs: vec!["social_exchange_event:test".to_owned()],
+                relationship_refs: vec!["rel:guard->protagonist:distance".to_owned()],
+                consequence_refs: Vec::new(),
+                opened_turn_id: "turn_0001".to_owned(),
+                last_changed_turn_id: "turn_0001".to_owned(),
+            }],
+            active_commitments: Vec::new(),
+            unresolved_asks: Vec::new(),
+            recent_exchanges: Vec::new(),
+            leverage: Vec::new(),
+            compiler_policy: SocialExchangePolicy::default(),
+        });
+        context
+    }
+
+    fn test_json<T: Serialize>(value: T) -> serde_json::Value {
+        match serde_json::to_value(value) {
+            Ok(value) => value,
+            Err(error) => panic!("test fixture should serialize: {error}"),
+        }
+    }
+
+    fn attempt_event(target_ref: &str) -> super::WorldChangeEvent {
+        super::WorldChangeEvent {
+            schema_version: super::WORLD_CHANGE_EVENT_SCHEMA_VERSION.to_owned(),
+            event_kind: super::WorldChangeEventKind::PlayerActionAttempted,
+            target_ref: target_ref.to_owned(),
+            summary: "attempt".to_owned(),
+            evidence_refs: vec!["current_turn".to_owned()],
         }
     }
 
