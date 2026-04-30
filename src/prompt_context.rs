@@ -69,6 +69,7 @@ pub struct PromptVisibleContext {
     pub active_world_process_clock: Value,
     pub active_actor_agency: Value,
     pub active_player_intent_trace: Value,
+    pub active_hook_ledger: Value,
     pub active_turn_retrieval_controller: Value,
     pub selected_context_capsules: Value,
     pub active_autobiographical_index: Value,
@@ -288,6 +289,7 @@ struct PromptMemoryValues {
     active_world_process_clock: Value,
     active_actor_agency: Value,
     active_player_intent_trace: Value,
+    active_hook_ledger: Value,
     active_narrative_style_state: Value,
     active_turn_retrieval_controller: Value,
     selected_context_capsules: Value,
@@ -359,6 +361,7 @@ fn load_prompt_memory_values(memory: &Value, active_memory: &Value) -> Result<Pr
             .cloned()
             .unwrap_or_else(|| serde_json::json!({"active_goals": [], "recent_moves": []})),
         active_player_intent_trace: required_path(memory, "/active_player_intent_trace")?.clone(),
+        active_hook_ledger: required_path(memory, "/active_hook_ledger")?.clone(),
         active_narrative_style_state: required_path(memory, "/active_narrative_style_state")?
             .clone(),
         active_turn_retrieval_controller: required_path(
@@ -563,6 +566,7 @@ fn compile_visible_context(source: VisibleContextSource<'_>) -> Result<PromptVis
         active_world_process_clock: source.prompt_memory.active_world_process_clock,
         active_actor_agency: source.prompt_memory.active_actor_agency,
         active_player_intent_trace: source.prompt_memory.active_player_intent_trace,
+        active_hook_ledger: source.prompt_memory.active_hook_ledger,
         active_turn_retrieval_controller: source.prompt_memory.active_turn_retrieval_controller,
         selected_context_capsules: source.prompt_memory.selected_context_capsules,
         active_autobiographical_index: source.prompt_memory.active_autobiographical_index,
@@ -800,6 +804,29 @@ mod tests {
                     "active_actor_agency": {"active_goals": [], "recent_moves": []},
                     "active_player_intent_trace": {"active_intents": []},
                     "active_narrative_style_state": {"active_style_events": []},
+                    "active_hook_ledger": {
+                        "schema_version": "singulari.hook_ledger_packet.v1",
+                        "world_id": "stw_prompt",
+                        "turn_id": "turn_0003",
+                        "active_promises": [],
+                        "due_promises": [],
+                        "active_echoes": [],
+                        "returning_echoes": [],
+                        "choice_biases": [],
+                        "tea_recap": {
+                            "schema_version": "singulari.session_receipt.v1",
+                            "remaining_fragrance": [],
+                            "remaining_words": [],
+                            "residual_heat": []
+                        },
+                        "compiler_policy": {
+                            "source": "test",
+                            "max_new_promises_per_turn": 1,
+                            "max_new_echoes_per_turn": 1,
+                            "max_teases_without_progress": 3,
+                            "use_rules": []
+                        }
+                    },
                     "active_turn_retrieval_controller": {"active_goals": [], "active_role_stance": [], "retrieval_cues": []},
                     "selected_context_capsules": {"selected_capsules": [], "budget_report": {}},
                     "active_autobiographical_index": {"periods": [], "general_events": []},
@@ -886,6 +913,7 @@ mod tests {
                 active_social_exchange: crate::social_exchange::SocialExchangePacket::default(),
                 active_encounter_surface: crate::encounter_surface::EncounterSurfacePacket::default(
                 ),
+                active_hook_ledger: crate::hook_ledger::HookPacket::default(),
                 active_turn_retrieval_controller:
                     crate::turn_retrieval_controller::TurnRetrievalControllerPacket::default(),
                 selected_context_capsules: crate::context_capsule::ContextCapsuleSelection::default(

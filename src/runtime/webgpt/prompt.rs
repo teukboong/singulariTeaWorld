@@ -10,7 +10,7 @@ const COMPACT_AGENT_TURN_RESPONSE_SCHEMA_GUIDE: &str = r#"AgentTurnResponse JSON
 필수 top-level:
 - schema_version="singulari.agent_turn_response.v1", world_id, turn_id
 - resolution_proposal, visible_scene, next_choices
-- 선택 필드(scene_director_proposal, consequence_proposal, social_exchange_proposal, encounter_proposal, *_updates, *_events, actor_*_events)는 이번 턴에서 실제 변화가 있을 때만 쓴다. 없으면 생략하거나 []/null로 둔다.
+- 선택 필드(scene_director_proposal, consequence_proposal, social_exchange_proposal, encounter_proposal, hook_events, *_updates, *_events, actor_*_events)는 이번 턴에서 실제 변화가 있을 때만 쓴다. 없으면 생략하거나 []/null로 둔다.
 - 선택 배열 이름: "plot_thread_events", "scene_pressure_events", "world_lore_updates", "character_text_design_updates", "body_resource_events", "location_events", "hidden_state_delta".
 
 resolution_proposal 필수:
@@ -102,6 +102,7 @@ pub(super) fn build_webgpt_turn_prompt(prompt_context: &PromptContextPacket) -> 
 - ChatGPT Project의 새 세션이나 기존 conversation history는 세계 상태 저장소가 아니다. 세계 연속성은 narrative_turn_packet으로만 복원한다.
 - narrative_turn_packet.visible_context.active_scene_pressure는 이번 턴 선택지와 문단 박자를 누르는 압력 계약이다.
 - narrative_turn_packet.visible_context.affordance_graph와 pre_turn_simulation.available_affordances는 slot 1..5의 행동 허가표다.
+- narrative_turn_packet.visible_context.active_hook_ledger는 Promise/Echo 후킹 장부다. 새 사실을 만들지 말고, due promise는 진전/상환 후보로, returning echo는 비처벌적 여운/선택 압력으로만 반영한다.
 - narrative_turn_packet.visible_context.active_body_resource_state와 active_location_graph는 몸/자원/장소 제약의 최소 상태다.
 - narrative_turn_packet.visible_context.active_character_text_design과 selected_memory_items는 말맛과 가까운 연속성에만 쓴다.
 - narrative_turn_packet.adjudication_boundary는 판정 전용이다. hidden/adjudication-only 세부 내용을 visible_scene, next_choices, canon_event, image prompt에 복사하지 마라.
@@ -255,6 +256,7 @@ fn build_narrative_turn_packet(prompt_context: &PromptContextPacket) -> Result<V
             "active_location_graph": json_field(&visible, "active_location_graph"),
             "affordance_graph": json_field(&visible, "affordance_graph"),
             "active_scene_director": json_field(&visible, "active_scene_director"),
+            "active_hook_ledger": json_field(&visible, "active_hook_ledger"),
             "narrative_style_state": json_field(&visible, "narrative_style_state"),
             "active_character_text_design": json_field(&visible, "active_character_text_design"),
             "selected_memory_items": json_array_field(&visible, "selected_memory_items"),

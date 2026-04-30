@@ -2034,6 +2034,38 @@ select {
   overflow-wrap: anywhere;
 }
 
+.tea-recap {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--line-soft);
+  background: rgba(238, 238, 238, 0.04);
+  padding: 9px;
+}
+
+.tea-recap-group {
+  display: grid;
+  gap: 5px;
+}
+
+.tea-recap-group strong {
+  color: var(--gold);
+  font-family: var(--font-sans);
+  font-size: 0.82rem;
+}
+
+.tea-recap-group ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.tea-recap-group li {
+  color: var(--paper);
+  font-size: 0.84rem;
+  line-height: 1.45;
+  margin: 3px 0;
+  overflow-wrap: anywhere;
+}
+
 .ops-drawer {
   position: absolute;
   right: 24px;

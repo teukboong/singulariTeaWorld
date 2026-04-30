@@ -87,6 +87,9 @@ history_match_key() {
   local label="$1"
   local pattern="$2"
   local match="$3"
+  if [[ "$label" == "git history" ]]; then
+    match="${match#*:}"
+  fi
   printf '%s\t%s\t%s' "$label" "$pattern" "$match" | shasum -a 256 | awk '{print $1}'
 }
 

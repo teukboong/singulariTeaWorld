@@ -2,6 +2,7 @@
 
 use crate::agent_bridge::AgentTurnResponse;
 use crate::body_resource::BodyResourcePacket;
+use crate::hook_ledger::{OmissionProfile, omission_profile_for_choice};
 use crate::location_graph::{LocationGraphPacket, LocationNode};
 use crate::models::TurnChoice;
 use crate::resolution::{GateKind, GateStatus, ResolutionOutcomeKind, ResolutionVisibility};
@@ -294,6 +295,8 @@ pub struct ChoiceContract {
     pub evidence_refs: Vec<String>,
     #[serde(default)]
     pub forbidden_outcomes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omission_profile: Option<OmissionProfile>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -970,7 +973,30 @@ fn choice_contract_from_affordance(
         possible_event_kinds: possible_event_kinds_for_action(affordance.action_kind),
         evidence_refs: affordance.evidence_refs.clone(),
         forbidden_outcomes: forbidden_outcomes_for_action(affordance.action_kind),
+        omission_profile: Some(omission_profile_for_choice(
+            choice_slot_from_surface(surface, affordance),
+            affordance.label_seed.as_str(),
+            affordance.intent_seed.as_str(),
+            affordance.risk_tags.as_slice(),
+            affordance.evidence_refs.as_slice(),
+        )),
     }
+}
+
+fn choice_slot_from_surface(surface: &EncounterSurface, affordance: &EncounterAffordance) -> u8 {
+    surface
+        .source_refs
+        .iter()
+        .chain(affordance.evidence_refs.iter())
+        .find_map(|source_ref| choice_slot_from_ref(source_ref))
+        .unwrap_or(0)
+}
+
+fn choice_slot_from_ref(source_ref: &str) -> Option<u8> {
+    let slot_text = source_ref
+        .strip_prefix("next_choices[slot=")?
+        .strip_suffix(']')?;
+    slot_text.parse::<u8>().ok()
 }
 
 const fn expected_cost_for_action(action: EncounterActionKind) -> ChoiceTimeCost {
@@ -2280,6 +2306,7 @@ mod tests {
             ],
             actor_goal_events: Vec::new(),
             actor_move_events: Vec::new(),
+            hook_events: Vec::new(),
         }
     }
 }

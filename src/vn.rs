@@ -2,6 +2,7 @@ use crate::backend_selection::{WorldVisualBackend, load_world_backend_selection}
 use crate::encounter_surface::{
     EncounterSurfacePacket, encounter_status, load_encounter_surface_state,
 };
+use crate::hook_ledger::{TeaRecap, load_hook_packet_state};
 use crate::models::{
     CodexView, DashboardSummary, EntityRecords, FREEFORM_CHOICE_SLOT, GUIDE_CHOICE_SLOT,
     GUIDE_CHOICE_TAG, INITIAL_TURN_ID, PROTAGONIST_CHARACTER_ID, RenderPacket, ScanTarget,
@@ -146,6 +147,8 @@ pub struct VnCodexSurface {
     pub context_events: Vec<AgentContextEventRecord>,
     #[serde(default)]
     pub context_projection: AgentContextProjection,
+    #[serde(default)]
+    pub tea_recap: TeaRecap,
     pub redaction_policy: String,
 }
 
@@ -639,6 +642,11 @@ fn vn_codex_surface(
             ..EncounterSurfacePacket::default()
         },
     )?;
+    let active_hook_ledger = load_hook_packet_state(
+        files.dir.as_path(),
+        world.world_id.as_str(),
+        packet.turn_id.as_str(),
+    )?;
     Ok(VnCodexSurface {
         full_markdown: redact_guide_choice_public_hints(&render_packet_markdown(packet)),
         dashboard: player_visible_dashboard(world, &packet.visible_state.dashboard, place_record),
@@ -658,6 +666,7 @@ fn vn_codex_surface(
         turn_log,
         context_events,
         context_projection,
+        tea_recap: active_hook_ledger.tea_recap,
         redaction_policy:
             "player-visible Codex surface only; deprecated Guide-choice hints and hidden truth stay filtered"
                 .to_owned(),

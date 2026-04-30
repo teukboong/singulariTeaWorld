@@ -18,6 +18,7 @@ mod encounter_surface;
 mod entity_update;
 mod event_ledger;
 mod extra_memory;
+mod hook_ledger;
 mod host_supervisor;
 mod job_ledger;
 mod knowledge_ledger;
@@ -200,6 +201,17 @@ pub use extra_memory::{
     commit_extra_memory_projection_terminal, compile_extra_memory_projection,
     failed_projection_records_after_latest_repair, load_extra_memory_projection_records,
     local_faces_for_codex_view, repair_extra_memory_projection, retrieve_extra_memory_packet,
+};
+pub use hook_ledger::{
+    AgentHookEvent, DecayMode, EchoLedgerState, EchoStatus, HOOK_EVENTS_FILENAME,
+    HOOK_LEDGER_PACKET_SCHEMA_VERSION, HOOK_THREADS_FILENAME, HookChoiceBias, HookEventKind,
+    HookKind, HookLedgerPolicy, HookLedgerState, HookPacket, HookReturnRights, HookStatus,
+    HookThread, OFFERED_CHOICE_SETS_FILENAME, OfferedChoice, OfferedChoiceSet, OmissionMeaning,
+    OmissionProfile, PayoffContract, PayoffKind, ResolutionMode, SESSION_RECEIPT_FILENAME,
+    SessionReceipt, TeaRecap, TouchCondition, UNCHOSEN_ECHOES_FILENAME, UnchosenEcho,
+    accepted_agent_hook_events, append_agent_hook_events, initialize_hook_ledger_files,
+    load_hook_packet_state, omission_profile_for_choice, rebuild_hook_packet,
+    record_offered_choice_set_and_echo,
 };
 pub use host_supervisor::{
     HOST_SUPERVISOR_PLAN_SCHEMA_VERSION, HostSupervisorLaneKind, HostSupervisorLanePlan,

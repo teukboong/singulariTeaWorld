@@ -41,6 +41,10 @@ use crate::extra_memory::{
     ExtraMemoryPacket, commit_extra_memory_projection_terminal, compile_extra_memory_projection,
     retrieve_extra_memory_packet,
 };
+use crate::hook_ledger::{
+    AgentHookEvent, HookPacket, append_agent_hook_events, load_hook_packet_state,
+    record_offered_choice_set_and_echo,
+};
 use crate::location_graph::{
     LocationEvent, LocationGraphPacket, append_location_event_plan, compile_location_graph_packet,
     load_location_graph_state, prepare_location_event_plan, rebuild_location_graph,
@@ -233,6 +237,8 @@ pub struct AgentVisibleContext {
     #[serde(default)]
     pub active_encounter_surface: EncounterSurfacePacket,
     #[serde(default)]
+    pub active_hook_ledger: HookPacket,
+    #[serde(default)]
     pub active_turn_retrieval_controller: TurnRetrievalControllerPacket,
     #[serde(default)]
     pub selected_context_capsules: ContextCapsuleSelection,
@@ -351,6 +357,8 @@ pub struct AgentTurnResponse {
     pub actor_goal_events: Vec<AgentActorGoalUpdate>,
     #[serde(default)]
     pub actor_move_events: Vec<AgentActorMoveUpdate>,
+    #[serde(default)]
+    pub hook_events: Vec<AgentHookEvent>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -793,6 +801,40 @@ pub fn commit_agent_turn(options: &AgentCommitTurnOptions) -> Result<CommittedAg
             &advanced.snapshot,
             &response.next_choices,
         )?;
+        commit_post_advance_materialization(
+            &files,
+            options.world_id.as_str(),
+            pending.turn_id.as_str(),
+            "hook_ledger_offered_choices",
+            || {
+                record_offered_choice_set_and_echo(
+                    files.dir.as_path(),
+                    options.world_id.as_str(),
+                    pending.turn_id.as_str(),
+                    before_commit_snapshot.protagonist_state.location.as_str(),
+                    &before_commit_snapshot.last_choices,
+                    pending.selected_choice.as_ref().map(|choice| choice.slot),
+                )?;
+                Ok(())
+            },
+        )?;
+        if !response.hook_events.is_empty() {
+            commit_post_advance_materialization(
+                &files,
+                options.world_id.as_str(),
+                pending.turn_id.as_str(),
+                "hook_ledger_promises",
+                || {
+                    append_agent_hook_events(
+                        files.dir.as_path(),
+                        options.world_id.as_str(),
+                        pending.turn_id.as_str(),
+                        &response.hook_events,
+                    )?;
+                    Ok(())
+                },
+            )?;
+        }
 
         let committed_at = Utc::now().to_rfc3339();
         let turn_dir = committed_agent_turn_dir(&files, pending.turn_id.as_str());
@@ -1462,6 +1504,7 @@ fn audit_agent_world_court(
         context: &prompt_context,
         resolution_proposal: response.resolution_proposal.as_ref(),
         next_choices: &response.next_choices,
+        hook_events: &response.hook_events,
     });
     if verdict.status == WorldCourtVerdictStatus::Accept {
         return Ok(verdict);
@@ -1898,6 +1941,11 @@ fn visible_context(input: &VisibleContextInput<'_>) -> Result<AgentVisibleContex
     let active_encounter_surface =
         load_encounter_surface_state(files.dir.as_path(), compiled_encounter_surface)?;
     let active_encounter_surface_value = serde_json::to_value(&active_encounter_surface)?;
+    let active_hook_ledger = load_hook_packet_state(
+        files.dir.as_path(),
+        input.current_packet.world_id.as_str(),
+        next_turn_id.as_str(),
+    )?;
     let compiled_scene_director =
         compile_scene_director_packet_from_input(SceneDirectorCompileInput {
             world_id: input.current_packet.world_id.as_str(),
@@ -1953,6 +2001,7 @@ fn visible_context(input: &VisibleContextInput<'_>) -> Result<AgentVisibleContex
         active_consequence_spine,
         active_social_exchange,
         active_encounter_surface,
+        active_hook_ledger,
         active_turn_retrieval_controller,
         selected_context_capsules: context_capsules.selection,
         active_autobiographical_index,
@@ -2249,6 +2298,7 @@ mod tests {
         ExtraMemoryPacket, ExtraMemoryProjectionStatus, load_extra_memory_projection_records,
         load_remembered_extras,
     };
+    use crate::hook_ledger::HookPacket;
     use crate::location_graph::LocationGraphPacket;
     use crate::models::{
         EventAuthority, GUIDE_CHOICE_TAG, NARRATIVE_SCENE_SCHEMA_VERSION, NarrativeScene,
@@ -2373,6 +2423,7 @@ premise:
             next_choices: scene_specific_choices(),
             actor_goal_events: Vec::new(),
             actor_move_events: Vec::new(),
+            hook_events: Vec::new(),
         })
     }
 
@@ -2571,6 +2622,7 @@ premise:
             next_choices: legacy_slot_contract_choices(),
             actor_goal_events: Vec::new(),
             actor_move_events: Vec::new(),
+            hook_events: Vec::new(),
         };
 
         let canonical = canonical_agent_turn_response(response);
@@ -2619,6 +2671,7 @@ premise:
                 active_consequence_spine: ConsequenceSpinePacket::default(),
                 active_social_exchange: SocialExchangePacket::default(),
                 active_encounter_surface: EncounterSurfacePacket::default(),
+                active_hook_ledger: HookPacket::default(),
                 active_turn_retrieval_controller: TurnRetrievalControllerPacket::default(),
                 selected_context_capsules: ContextCapsuleSelection::default(),
                 active_autobiographical_index: AutobiographicalIndexPacket::default(),
@@ -2677,6 +2730,7 @@ premise:
             next_choices: scene_specific_choices(),
             actor_goal_events: Vec::new(),
             actor_move_events: Vec::new(),
+            hook_events: Vec::new(),
         };
 
         let Err(error) = validate_agent_response(&pending, &response) else {
@@ -2740,41 +2794,11 @@ premise:
         let committed = commit_agent_turn(&AgentCommitTurnOptions {
             store_root: Some(store.clone()),
             world_id: "stw_agent".to_owned(),
-            response: AgentTurnResponse {
-                schema_version: AGENT_TURN_RESPONSE_SCHEMA_VERSION.to_owned(),
-                world_id: pending.world_id.clone(),
-                turn_id: pending.turn_id.clone(),
-                resolution_proposal: Some(valid_resolution_proposal_for_pending(
-                    store.as_path(),
-                    &pending,
-                )?),
-                scene_director_proposal: None,
-                consequence_proposal: None,
-                social_exchange_proposal: None,
-                encounter_proposal: None,
-                visible_scene: NarrativeScene {
-                    schema_version: NARRATIVE_SCENE_SCHEMA_VERSION.to_owned(),
-                    speaker: None,
-                    text_blocks: vec!["agent-authored visible scene".to_owned()],
-                    tone_notes: vec!["test".to_owned()],
-                },
-                adjudication: None,
-                canon_event: None,
-                entity_updates: Vec::new(),
-                relationship_updates: Vec::new(),
-                plot_thread_events: Vec::new(),
-                scene_pressure_events: Vec::new(),
-                world_lore_updates: Vec::new(),
-                character_text_design_updates: Vec::new(),
-                body_resource_events: Vec::new(),
-                location_events: Vec::new(),
-                extra_contacts: Vec::new(),
-                hidden_state_delta: Vec::new(),
-                needs_context: Vec::new(),
-                next_choices: scene_specific_choices(),
-                actor_goal_events: Vec::new(),
-                actor_move_events: Vec::new(),
-            },
+            response: basic_agent_turn_response(
+                store.as_path(),
+                &pending,
+                "agent-authored visible scene",
+            )?,
         })?;
         assert_eq!(committed.turn_id, "turn_0001");
         let store_paths = resolve_store_paths(Some(store.as_path()))?;
@@ -2890,6 +2914,7 @@ premise:
                 next_choices: scene_specific_choices(),
                 actor_goal_events: Vec::new(),
                 actor_move_events: Vec::new(),
+                hook_events: Vec::new(),
             },
         });
 
@@ -3134,6 +3159,7 @@ premise:
                 next_choices: scene_specific_choices(),
                 actor_goal_events: Vec::new(),
                 actor_move_events: Vec::new(),
+                hook_events: Vec::new(),
             },
         })?;
 
@@ -3231,6 +3257,7 @@ premise:
                 next_choices: scene_specific_choices(),
                 actor_goal_events: Vec::new(),
                 actor_move_events: Vec::new(),
+                hook_events: Vec::new(),
             },
         });
         let Err(error) = result else {
@@ -3296,6 +3323,7 @@ premise:
                 next_choices: Vec::new(),
                 actor_goal_events: Vec::new(),
                 actor_move_events: Vec::new(),
+                hook_events: Vec::new(),
             },
         }) else {
             anyhow::bail!("empty next_choices reached VN instead of failing");
@@ -3360,6 +3388,7 @@ premise:
                 next_choices: default_turn_choices(),
                 actor_goal_events: Vec::new(),
                 actor_move_events: Vec::new(),
+                hook_events: Vec::new(),
             },
         }) else {
             anyhow::bail!("default next_choices survived as agent-authored choices");
@@ -3427,6 +3456,7 @@ premise:
                 next_choices: scene_specific_choices(),
                 actor_goal_events: Vec::new(),
                 actor_move_events: Vec::new(),
+                hook_events: Vec::new(),
             },
         }) else {
             anyhow::bail!("invalid resolution proposal reached turn advance");
@@ -3517,6 +3547,7 @@ premise:
                 next_choices: scene_specific_choices(),
                 actor_goal_events: Vec::new(),
                 actor_move_events: Vec::new(),
+                hook_events: Vec::new(),
             },
         }) else {
             anyhow::bail!("missing resolution proposal reached turn advance");
@@ -3581,6 +3612,7 @@ premise:
             extra_contacts: Vec::new(),
             actor_goal_events: Vec::new(),
             actor_move_events: Vec::new(),
+            hook_events: Vec::new(),
         };
         response.next_choices[2].intent = "char:anchor의 반 걸음 뒤에 멈춰 선다".to_owned();
 
@@ -3663,6 +3695,7 @@ premise:
                 next_choices: scene_specific_choices(),
                 actor_goal_events: Vec::new(),
                 actor_move_events: Vec::new(),
+                hook_events: Vec::new(),
             },
         }) else {
             anyhow::bail!("placeholder extra contact reached world commit");

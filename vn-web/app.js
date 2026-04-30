@@ -1128,6 +1128,10 @@ function renderContextSurface(surface, packet) {
   for (const card of cards) {
     els.contextSurfacePanel.append(card);
   }
+  const teaRecap = teaRecapPanel(surface.tea_recap || {});
+  if (teaRecap) {
+    els.contextSurfacePanel.append(teaRecap);
+  }
   const projectionList = projectionSummaryList(projection);
   if (projectionList) {
     els.contextSurfacePanel.append(projectionList);
@@ -1152,6 +1156,37 @@ function renderContextSurface(surface, packet) {
     list.append(row);
   }
   els.contextSurfacePanel.append(list);
+}
+
+function teaRecapPanel(recap) {
+  const groups = [
+    ["찻잔에 남은 향", recap.remaining_fragrance],
+    ["찻잔에 남은 말", recap.remaining_words],
+    ["잔열", recap.residual_heat],
+  ];
+  const activeGroups = groups
+    .map(([label, items]) => [label, Array.isArray(items) ? items.filter(Boolean) : []])
+    .filter(([, items]) => items.length);
+  if (!activeGroups.length) {
+    return null;
+  }
+  const section = document.createElement("section");
+  section.className = "tea-recap";
+  for (const [label, items] of activeGroups) {
+    const group = document.createElement("article");
+    group.className = "tea-recap-group";
+    const title = document.createElement("strong");
+    title.textContent = label;
+    const list = document.createElement("ul");
+    for (const item of items.slice(0, 3)) {
+      const row = document.createElement("li");
+      row.textContent = item;
+      list.append(row);
+    }
+    group.append(title, list);
+    section.append(group);
+  }
+  return section;
 }
 
 function projectionSummaryList(projection) {

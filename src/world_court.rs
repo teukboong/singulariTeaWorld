@@ -1,5 +1,6 @@
 use crate::body_resource::BodyResourcePacket;
 use crate::encounter_surface::{EncounterSurfaceKind, EncounterSurfacePacket};
+use crate::hook_ledger::{AgentHookEvent, accepted_agent_hook_events};
 use crate::knowledge_ledger::{
     KnowledgeTier, can_render_knowledge_tier_to_player, render_rule_for_player,
     visible_knowledge_text_is_qualified,
@@ -31,6 +32,7 @@ pub struct WorldCourtInput<'a> {
     pub context: &'a PromptContextPacket,
     pub resolution_proposal: Option<&'a ResolutionProposal>,
     pub next_choices: &'a [TurnChoice],
+    pub hook_events: &'a [AgentHookEvent],
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -264,6 +266,7 @@ pub fn adjudicate_world_changes(input: &WorldCourtInput<'_>) -> WorldCourtVerdic
             }
         }
     }
+    audit_hook_events(input, &mut accepted_checks, &mut violations);
 
     let status = if violations.is_empty() {
         WorldCourtVerdictStatus::Accept
@@ -279,6 +282,54 @@ pub fn adjudicate_world_changes(input: &WorldCourtInput<'_>) -> WorldCourtVerdic
         violations,
         repair_actions: Vec::new(),
     }
+}
+
+fn audit_hook_events(
+    input: &WorldCourtInput<'_>,
+    accepted_checks: &mut Vec<String>,
+    violations: &mut Vec<WorldCourtViolation>,
+) {
+    if input.hook_events.is_empty() {
+        accepted_checks.push("hook_events_optional_absent".to_owned());
+        return;
+    }
+    if let Err(error) = accepted_agent_hook_events(input.hook_events) {
+        violations.push(domain_violation(
+            WorldCourtLayer::ProjectionHook,
+            "hook_event_contract",
+            format!("hook events must be evidence-backed and payoff-bound: {error}").as_str(),
+            "hook_events",
+            "provide evidence_refs, opened_by_event, and payoff_contract or remove the hook event",
+        ));
+        return;
+    }
+    for event in input.hook_events {
+        for needle in &input
+            .context
+            .pre_turn_simulation
+            .hidden_visibility_boundary
+            .forbidden_visible_needles
+        {
+            if !needle.is_empty()
+                && (event.visible_promise.contains(needle) || event.summary.contains(needle))
+            {
+                violations.push(domain_violation(
+                    WorldCourtLayer::Visibility,
+                    "hook_event_hidden_leak",
+                    "hook visible text contains hidden-only forbidden detail",
+                    event.hook_id.as_str(),
+                    "render only observable symptoms or omit the hook event",
+                ));
+            }
+        }
+    }
+    if !violations
+        .iter()
+        .any(|violation| violation.check == "hook_event_hidden_leak")
+    {
+        accepted_checks.push("hook_event_visibility".to_owned());
+    }
+    accepted_checks.push("hook_event_contract".to_owned());
 }
 
 /// Return an accepted world-court verdict or fail closed with a rendered verdict.
@@ -1681,6 +1732,10 @@ mod tests {
         BodyResourcePacket, BodyResourcePolicy, BodyResourceVisibility,
         RESOURCE_ITEM_SCHEMA_VERSION, ResourceItem, ResourceKind,
     };
+    use crate::hook_ledger::{
+        AgentHookEvent, HOOK_EVENT_SCHEMA_VERSION, HookEventKind, HookKind, HookReturnRights,
+        PayoffContract,
+    };
     use crate::knowledge_ledger::KnowledgeTier;
     use crate::location_graph::{
         LOCATION_GRAPH_PACKET_SCHEMA_VERSION, LOCATION_NODE_SCHEMA_VERSION, LocationGraphPacket,
@@ -1720,12 +1775,19 @@ mod tests {
             context: &context,
             resolution_proposal: None,
             next_choices: &[],
+            hook_events: &[],
         });
 
         assert_eq!(verdict.status, WorldCourtVerdictStatus::Accept);
-        assert_eq!(
-            verdict.accepted_checks,
-            vec!["resolution_proposal_optional_absent"]
+        assert!(
+            verdict
+                .accepted_checks
+                .contains(&"resolution_proposal_optional_absent".to_owned())
+        );
+        assert!(
+            verdict
+                .accepted_checks
+                .contains(&"hook_events_optional_absent".to_owned())
         );
     }
 
@@ -1736,6 +1798,7 @@ mod tests {
             context: &context,
             resolution_proposal: None,
             next_choices: &[],
+            hook_events: &[],
         });
 
         assert_eq!(verdict.status, WorldCourtVerdictStatus::Reject);
@@ -1749,11 +1812,73 @@ mod tests {
             context: &context,
             resolution_proposal: None,
             next_choices: &[],
+            hook_events: &[],
         });
         let Err(error) = result else {
             panic!("missing required resolution proposal should fail world court");
         };
         assert!(format!("{error:#}").contains("world court verdict"));
+    }
+
+    #[test]
+    fn rejects_hook_event_without_evidence() {
+        let context = minimal_context(false);
+        let hook_event = AgentHookEvent {
+            schema_version: HOOK_EVENT_SCHEMA_VERSION.to_owned(),
+            event_kind: HookEventKind::Opened,
+            hook_id: "hook:north_gate".to_owned(),
+            kind: HookKind::Mystery,
+            visible_promise: "북문 안쪽 걸쇠는 아직 설명되지 않았다.".to_owned(),
+            anchor_refs: vec!["place:north_gate".to_owned()],
+            evidence_refs: Vec::new(),
+            opened_by_event: "event:north_gate".to_owned(),
+            payoff_contract: PayoffContract::default(),
+            return_rights: HookReturnRights::default(),
+            summary: String::new(),
+        };
+
+        let verdict = adjudicate_world_changes(&WorldCourtInput {
+            context: &context,
+            resolution_proposal: None,
+            next_choices: &[],
+            hook_events: &[hook_event],
+        });
+
+        assert_eq!(verdict.status, WorldCourtVerdictStatus::Reject);
+        assert_eq!(verdict.violations[0].layer, WorldCourtLayer::ProjectionHook);
+    }
+
+    #[test]
+    fn rejects_hook_event_hidden_visible_text() {
+        let mut context = minimal_context(false);
+        context
+            .pre_turn_simulation
+            .hidden_visibility_boundary
+            .forbidden_visible_needles = vec!["밀서".to_owned()];
+        let hook_event = AgentHookEvent {
+            schema_version: HOOK_EVENT_SCHEMA_VERSION.to_owned(),
+            event_kind: HookEventKind::Opened,
+            hook_id: "hook:sealed_letter".to_owned(),
+            kind: HookKind::Mystery,
+            visible_promise: "자루 안의 밀서는 아직 설명되지 않았다.".to_owned(),
+            anchor_refs: vec!["item:bag".to_owned()],
+            evidence_refs: vec!["current_turn".to_owned()],
+            opened_by_event: "event:bag_signal".to_owned(),
+            payoff_contract: PayoffContract::default(),
+            return_rights: HookReturnRights::default(),
+            summary: String::new(),
+        };
+
+        let verdict = adjudicate_world_changes(&WorldCourtInput {
+            context: &context,
+            resolution_proposal: None,
+            next_choices: &[],
+            hook_events: &[hook_event],
+        });
+
+        assert_eq!(verdict.status, WorldCourtVerdictStatus::Reject);
+        assert_eq!(verdict.violations[0].layer, WorldCourtLayer::Visibility);
+        assert_eq!(verdict.violations[0].check, "hook_event_hidden_leak");
     }
 
     #[test]
@@ -2525,6 +2650,7 @@ mod tests {
                 active_world_process_clock: serde_json::Value::Null,
                 active_actor_agency: serde_json::Value::Null,
                 active_player_intent_trace: serde_json::Value::Null,
+                active_hook_ledger: serde_json::Value::Null,
                 active_turn_retrieval_controller: serde_json::Value::Null,
                 selected_context_capsules: serde_json::Value::Null,
                 active_autobiographical_index: serde_json::Value::Null,

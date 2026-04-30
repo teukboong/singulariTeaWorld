@@ -2,6 +2,7 @@ use crate::character_text_design::{
     CHARACTER_TEXT_DESIGN_EVENTS_FILENAME, CHARACTER_TEXT_DESIGN_FILENAME,
     compile_character_text_design_packet,
 };
+use crate::hook_ledger::initialize_hook_ledger_files;
 use crate::memory_revival::MEMORY_REVIVAL_EVENTS_FILENAME;
 use crate::models::{
     ANCHOR_CHARACTER_INVARIANT, CanonEvent, DashboardSummary, EntityRecords, HiddenState,
@@ -178,6 +179,7 @@ pub(crate) fn init_world_from_seed(
     )?;
     write_json(&world_dir.join(ENTITIES_FILENAME), &entities)?;
     initialize_blueprint_projection_files(&world_dir, &world, &entities)?;
+    initialize_hook_ledger_files(&world_dir, world.world_id.as_str(), "turn_0000")?;
     let initial_event = append_canon_event(&world_dir.join(CANON_EVENTS_FILENAME), &initial_event)?;
     fs::write(world_dir.join(ENTITY_UPDATES_FILENAME), "").with_context(|| {
         format!(
