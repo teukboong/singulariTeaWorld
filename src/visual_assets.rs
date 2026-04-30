@@ -317,6 +317,10 @@ pub struct VisualCanonAudit {
 #[serde(rename_all = "snake_case")]
 pub enum VisualCanonAuditStatus {
     PendingReview,
+    AcceptedDisplayOnly,
+    AcceptedReferenceOnly,
+    ManualReviewRequired,
+    RejectedPolicyViolation,
 }
 
 /// Build or refresh the player-visible visual asset manifest for a world.
@@ -503,6 +507,7 @@ pub fn complete_visual_job(options: &CompleteVisualJobOptions) -> Result<VisualJ
     let bytes = fs::metadata(&destination)
         .with_context(|| format!("failed to stat {}", destination.display()))?
         .len();
+    let canon_audit = completed_visual_canon_audit(&job, &destination, bytes)?;
     let completion_path = visual_job_completion_path(&files.dir, options.slot.as_str());
     let completion = VisualJobCompletion {
         schema_version: VISUAL_JOB_COMPLETION_SCHEMA_VERSION.to_owned(),
@@ -517,7 +522,7 @@ pub fn complete_visual_job(options: &CompleteVisualJobOptions) -> Result<VisualJ
             .map(|path| path.display().to_string()),
         bytes,
         completion_path: completion_path.display().to_string(),
-        canon_audit: pending_visual_canon_audit(&job),
+        canon_audit,
     };
     ensure_parent_dir(&completion_path)?;
     write_json(&completion_path, &completion)?;
@@ -933,14 +938,68 @@ fn policy_forbids(policy: &VisualCanonPolicy, needle: &str) -> bool {
         .any(|item| item.to_ascii_lowercase().contains(needle))
 }
 
-fn pending_visual_canon_audit(job: &ImageGenerationJob) -> VisualCanonAudit {
+fn completed_visual_canon_audit(
+    job: &ImageGenerationJob,
+    destination: &Path,
+    bytes: u64,
+) -> Result<VisualCanonAudit> {
+    validate_visual_canon_policy_for_job(job)?;
+    if bytes == 0 {
+        bail!(
+            "visual canon completion audit rejected empty artifact: slot={}",
+            job.slot
+        );
+    }
+    if destination != Path::new(job.destination_path.as_str()) {
+        bail!(
+            "visual canon completion audit destination mismatch: slot={}, expected={}, actual={}",
+            job.slot,
+            job.destination_path,
+            destination.display()
+        );
+    }
+
+    let (status, use_label) = match job.artifact_kind {
+        VisualArtifactKind::SceneCg | VisualArtifactKind::UiBackground => {
+            if !job.display_allowed {
+                return Ok(completed_visual_policy_violation(
+                    job,
+                    "display artifact is not display_allowed",
+                ));
+            }
+            (VisualCanonAuditStatus::AcceptedDisplayOnly, "display")
+        }
+        VisualArtifactKind::CharacterDesignSheet | VisualArtifactKind::LocationDesignSheet => {
+            if !job.reference_allowed {
+                return Ok(completed_visual_policy_violation(
+                    job,
+                    "reference artifact is not reference_allowed",
+                ));
+            }
+            (VisualCanonAuditStatus::AcceptedReferenceOnly, "reference")
+        }
+    };
+
+    Ok(VisualCanonAudit {
+        schema_version: VISUAL_CANON_AUDIT_SCHEMA_VERSION.to_owned(),
+        status,
+        review_required: false,
+        policy_snapshot: job.visual_canon_policy.clone(),
+        message: format!(
+            "completed visual artifact for slot={} is accepted for {use_label} use only; generated pixels are not world truth and cannot promote new canon without accepted event evidence",
+            job.slot
+        ),
+    })
+}
+
+fn completed_visual_policy_violation(job: &ImageGenerationJob, reason: &str) -> VisualCanonAudit {
     VisualCanonAudit {
         schema_version: VISUAL_CANON_AUDIT_SCHEMA_VERSION.to_owned(),
-        status: VisualCanonAuditStatus::PendingReview,
+        status: VisualCanonAuditStatus::RejectedPolicyViolation,
         review_required: true,
         policy_snapshot: job.visual_canon_policy.clone(),
         message: format!(
-            "completed visual artifact for slot={} is display/reference material only; do not promote generated details into canon without accepted event evidence",
+            "completed visual artifact for slot={} is rejected by visual canon policy: {reason}",
             job.slot
         ),
     }
@@ -1774,14 +1833,20 @@ premise:
         assert!(completion.destination_path.ends_with("menu_background.png"));
         assert_eq!(
             completion.canon_audit.status,
-            VisualCanonAuditStatus::PendingReview
+            VisualCanonAuditStatus::AcceptedDisplayOnly
         );
-        assert!(completion.canon_audit.review_required);
+        assert!(!completion.canon_audit.review_required);
         assert!(
             completion
                 .canon_audit
                 .message
-                .contains("do not promote generated details into canon")
+                .contains("accepted for display use only")
+        );
+        assert!(
+            completion
+                .canon_audit
+                .message
+                .contains("generated pixels are not world truth")
         );
 
         let manifest = build_world_visual_assets(&BuildWorldVisualAssetsOptions {
@@ -1815,6 +1880,68 @@ premise:
         assert_eq!(
             release.claim.map(|claim| claim.claim_id),
             Some(stage_claim.claim_id)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn visual_job_completion_accepts_reference_only_assets() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(
+            &seed_path,
+            r#"
+schema_version: singulari.world_seed.v1
+world_id: stw_visual_reference_audit
+title: "레퍼런스 감사"
+premise:
+  genre: "해무 낀 항구 판타지"
+  protagonist: "변경 순찰자, 남자 주인공"
+"#,
+        )?;
+        init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+
+        let claimed = claim_visual_job(&ClaimVisualJobOptions {
+            store_root: Some(store.clone()),
+            world_id: "stw_visual_reference_audit".to_owned(),
+            slot: Some("character_sheet:char:protagonist".to_owned()),
+            claimed_by: "test-worker".to_owned(),
+            force: false,
+            extra_jobs: Vec::new(),
+        })?;
+        let VisualJobClaimOutcome::Claimed { claim } = claimed else {
+            anyhow::bail!("protagonist character sheet should be claimable");
+        };
+        assert_eq!(
+            claim.job.artifact_kind,
+            VisualArtifactKind::CharacterDesignSheet
+        );
+
+        let source = temp.path().join("character-generated.png");
+        std::fs::write(&source, MINIMAL_PNG)?;
+        let completion = complete_visual_job(&CompleteVisualJobOptions {
+            store_root: Some(store),
+            world_id: "stw_visual_reference_audit".to_owned(),
+            slot: "character_sheet:char:protagonist".to_owned(),
+            claim_id: Some(claim.claim_id),
+            generated_path: Some(source),
+        })?;
+
+        assert_eq!(
+            completion.canon_audit.status,
+            VisualCanonAuditStatus::AcceptedReferenceOnly
+        );
+        assert!(!completion.canon_audit.review_required);
+        assert!(
+            completion
+                .canon_audit
+                .message
+                .contains("accepted for reference use only")
         );
         Ok(())
     }
@@ -1880,7 +2007,11 @@ premise:
 
         assert_eq!(completion.slot, "turn_cg:turn_0001");
         assert!(turn_cg_path.is_file());
-        assert!(completion.canon_audit.review_required);
+        assert_eq!(
+            completion.canon_audit.status,
+            VisualCanonAuditStatus::AcceptedDisplayOnly
+        );
+        assert!(!completion.canon_audit.review_required);
         assert!(
             completion
                 .canon_audit
