@@ -19,9 +19,9 @@ resolution_proposal 필수:
 - interpreted_intent.input_kind는 narrative_turn_packet.response_contract.interpreted_intent_input_kind 값만 쓴다. pre_turn_simulation.input_kind를 그대로 복사하지 않는다.
 - interpreted_intent.ambiguity는 clear/minor/high 중 하나다.
 - outcome: kind, summary, evidence_refs. kind는 success/partial_success/blocked/costly_success/delayed/escalated 중 하나다.
-- gate_results 항목: gate_kind, gate_ref, visibility, status, reason, evidence_refs. visibility는 player_visible 또는 adjudication_only만 쓴다. hidden/private/internal은 허용값이 아니다. status는 passed/softened/blocked/cost_imposed/unknown_needs_probe 중 하나다.
-- proposed_effects 항목: effect_kind, target_ref, visibility, summary, evidence_refs. visibility는 player_visible 또는 adjudication_only만 쓴다.
-- process_ticks 항목: process_ref, cause, visibility, summary, evidence_refs. visibility는 player_visible 또는 adjudication_only만 쓴다.
+- gate_results 항목: gate_kind, gate_ref, visibility, status, reason, evidence_refs. gate_kind는 body/resource/location/social_permission/knowledge/time_pressure/hidden_constraint/world_law/affordance 중 하나다. visibility는 player_visible 또는 adjudication_only만 쓴다. hidden/private/internal은 허용값이 아니다. status는 passed/softened/blocked/cost_imposed/unknown_needs_probe 중 하나다.
+- proposed_effects 항목: effect_kind, target_ref, visibility, summary, evidence_refs. effect_kind는 scene_pressure_delta/body_resource_delta/location_delta/relationship_delta/belief_delta/world_lore_delta/pattern_debt/player_intent_trace 중 하나다. affordance, scene_opened 같은 별칭은 허용값이 아니다. visibility는 player_visible 또는 adjudication_only만 쓴다.
+- process_ticks 항목: process_ref, cause, visibility, summary, evidence_refs. cause는 player_action_touched_process/visible_time_passage/scene_pressure_changed/next_tick_condition_met/hidden_reveal_condition_satisfied 중 하나다. visibility는 player_visible 또는 adjudication_only만 쓴다.
 - pressure_noop_reasons: narrative_turn_packet.pre_turn_simulation.pressure_obligations의 각 pressure_id를 움직이지 않으면 반드시 pressure_ref/evidence_refs로 설명
 - narrative_brief: visible_summary, required_beats, forbidden_visible_details
 - next_choice_plan 항목: slot, plan_kind, grounding_ref, label_seed, intent_seed, evidence_refs. slot 1..5 plan_kind=ordinary_affordance, slot 6 plan_kind=freeform, slot 7 plan_kind=delegated_judgment.

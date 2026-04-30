@@ -1970,6 +1970,7 @@ fn normalize_webgpt_agent_turn_response(
     }
     normalize_gate_results(resolution);
     normalize_proposed_effects(resolution);
+    normalize_process_ticks(resolution);
     normalize_choice_plan(resolution, &choice_seeds);
     normalize_plot_thread_events(response);
     normalize_scene_pressure_events(response);
@@ -2053,6 +2054,7 @@ fn normalize_gate_results(resolution: &mut serde_json::Map<String, Value>) {
                 .map_or("knowledge", infer_gate_kind);
             gate.insert("gate_kind".to_owned(), Value::String(inferred.to_owned()));
         }
+        normalize_string_enum_field(gate, "gate_kind", normalize_gate_kind);
         ensure_visibility_field(gate, "visibility", "player_visible");
         if !gate.contains_key("status") {
             let status = if gate.get("passed").and_then(Value::as_bool) == Some(false) {
@@ -2062,6 +2064,7 @@ fn normalize_gate_results(resolution: &mut serde_json::Map<String, Value>) {
             };
             gate.insert("status".to_owned(), Value::String(status.to_owned()));
         }
+        normalize_string_enum_field(gate, "status", normalize_gate_status);
         if !gate.contains_key("reason") {
             let reason = gate
                 .get("summary")
@@ -2087,10 +2090,33 @@ fn normalize_proposed_effects(resolution: &mut serde_json::Map<String, Value>) {
             let inferred = effect
                 .get("kind")
                 .and_then(Value::as_str)
-                .map_or("scene_pressure_delta", infer_effect_kind);
+                .map_or("scene_pressure_delta", normalize_effect_kind);
             effect.insert("effect_kind".to_owned(), Value::String(inferred.to_owned()));
         }
+        normalize_string_enum_field(effect, "effect_kind", normalize_effect_kind);
         ensure_visibility_field(effect, "visibility", "player_visible");
+    }
+}
+
+fn normalize_process_ticks(resolution: &mut serde_json::Map<String, Value>) {
+    let Some(ticks) = resolution
+        .get_mut("process_ticks")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    for tick in ticks {
+        let Some(tick) = tick.as_object_mut() else {
+            continue;
+        };
+        if !tick.contains_key("cause") {
+            tick.insert(
+                "cause".to_owned(),
+                Value::String("scene_pressure_changed".to_owned()),
+            );
+        }
+        normalize_string_enum_field(tick, "cause", normalize_process_tick_cause);
+        ensure_visibility_field(tick, "visibility", "player_visible");
     }
 }
 
@@ -2293,6 +2319,8 @@ fn normalize_resolution_outcome_kind(value: &str) -> &'static str {
 }
 
 fn infer_gate_kind(value: &str) -> &'static str {
+    let value = value.trim().to_ascii_lowercase();
+    let value = value.as_str();
     if value.contains("body") {
         "body"
     } else if value.contains("resource") {
@@ -2312,7 +2340,45 @@ fn infer_gate_kind(value: &str) -> &'static str {
     }
 }
 
-fn infer_effect_kind(value: &str) -> &'static str {
+fn normalize_gate_kind(value: &str) -> &'static str {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "body" => "body",
+        "resource" => "resource",
+        "location" | "place" => "location",
+        "social_permission" | "social" | "permission" => "social_permission",
+        "knowledge" | "evidence" => "knowledge",
+        "time_pressure" | "time" => "time_pressure",
+        "hidden_constraint" | "hidden" | "private" | "internal" => "hidden_constraint",
+        "world_law" | "law" | "causality" => "world_law",
+        "affordance" | "choice_grounding" => "affordance",
+        other => infer_gate_kind(other),
+    }
+}
+
+fn normalize_gate_status(value: &str) -> &'static str {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "softened" | "soften" | "partial" => "softened",
+        "blocked" | "block" | "failed" | "failure" => "blocked",
+        "cost_imposed" | "cost" | "costly" => "cost_imposed",
+        "unknown_needs_probe" | "unknown" | "needs_probe" | "probe" => "unknown_needs_probe",
+        _ => "passed",
+    }
+}
+
+fn normalize_effect_kind(value: &str) -> &'static str {
+    let value = value.trim().to_ascii_lowercase();
+    let value = value.as_str();
+    match value {
+        "scene_pressure_delta" => return "scene_pressure_delta",
+        "body_resource_delta" => return "body_resource_delta",
+        "location_delta" => return "location_delta",
+        "relationship_delta" => return "relationship_delta",
+        "belief_delta" => return "belief_delta",
+        "world_lore_delta" => return "world_lore_delta",
+        "pattern_debt" => return "pattern_debt",
+        "player_intent_trace" => return "player_intent_trace",
+        _ => {}
+    }
     if value.contains("body") || value.contains("resource") {
         "body_resource_delta"
     } else if value.contains("location") || value.contains("place") {
@@ -2329,6 +2395,22 @@ fn infer_effect_kind(value: &str) -> &'static str {
         "player_intent_trace"
     } else {
         "scene_pressure_delta"
+    }
+}
+
+fn normalize_process_tick_cause(value: &str) -> &'static str {
+    let value = value.trim().to_ascii_lowercase();
+    let value = value.as_str();
+    if value.contains("player") || value.contains("action") {
+        "player_action_touched_process"
+    } else if value.contains("time") {
+        "visible_time_passage"
+    } else if value.contains("next") || value.contains("condition") {
+        "next_tick_condition_met"
+    } else if value.contains("hidden") || value.contains("reveal") {
+        "hidden_reveal_condition_satisfied"
+    } else {
+        "scene_pressure_changed"
     }
 }
 
@@ -3172,13 +3254,19 @@ premise:
                     "evidence_refs": ["player_input"]
                 }],
                 "proposed_effects": [{
-                    "effect_kind": "scene_opened",
+                    "effect_kind": "affordance",
                     "target_ref": "scene:active",
                     "visibility": "private",
                     "summary": "test",
                     "evidence_refs": ["player_input"]
                 }],
-                "process_ticks": [],
+                "process_ticks": [{
+                    "process_ref": "process:test",
+                    "cause": "hidden",
+                    "visibility": "hidden",
+                    "summary": "test",
+                    "evidence_refs": ["player_input"]
+                }],
                 "pressure_noop_reasons": [],
                 "narrative_brief": {
                     "visible_summary": "test",
@@ -3203,6 +3291,18 @@ premise:
         );
         assert_eq!(
             value["resolution_proposal"]["proposed_effects"][0]["visibility"],
+            serde_json::json!("adjudication_only")
+        );
+        assert_eq!(
+            value["resolution_proposal"]["proposed_effects"][0]["effect_kind"],
+            serde_json::json!("scene_pressure_delta")
+        );
+        assert_eq!(
+            value["resolution_proposal"]["process_ticks"][0]["cause"],
+            serde_json::json!("hidden_reveal_condition_satisfied")
+        );
+        assert_eq!(
+            value["resolution_proposal"]["process_ticks"][0]["visibility"],
             serde_json::json!("adjudication_only")
         );
     }
@@ -3313,6 +3413,7 @@ premise:
             "AgentTurnResponse JSON만 반환한다.",
             "schema_version=\"singulari.agent_turn_response.v1\"",
             "visibility는 player_visible 또는 adjudication_only만 쓴다.",
+            "effect_kind는 scene_pressure_delta/body_resource_delta/location_delta/relationship_delta/belief_delta/world_lore_delta/pattern_debt/player_intent_trace 중 하나다.",
             "slot 6 tag=\"자유서술\"",
             "slot 7 tag=\"판단 위임\"",
             "world_id는 \"stw_contract\", turn_id는 \"turn_0001\"와 정확히 같아야 한다.",
