@@ -560,6 +560,7 @@ mod tests {
                         linked_entity_refs: Vec::new(),
                         linked_pressure_refs: Vec::new(),
                         linked_social_refs: Vec::new(),
+                        physical_anchors: Vec::new(),
                         affordances: vec![crate::encounter_surface::EncounterAffordance {
                             schema_version:
                                 crate::encounter_surface::ENCOUNTER_AFFORDANCE_SCHEMA_VERSION

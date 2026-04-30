@@ -2,7 +2,7 @@
 
 use crate::agent_bridge::AgentTurnResponse;
 use crate::body_resource::BodyResourcePacket;
-use crate::location_graph::LocationGraphPacket;
+use crate::location_graph::{LocationGraphPacket, LocationNode};
 use crate::models::TurnChoice;
 use crate::resolution::{GateKind, GateStatus, ResolutionOutcomeKind, ResolutionVisibility};
 use crate::scene_pressure::{ScenePressureKind, ScenePressurePacket};
@@ -112,12 +112,36 @@ pub struct EncounterSurface {
     #[serde(default)]
     pub linked_social_refs: Vec<String>,
     #[serde(default)]
+    pub physical_anchors: Vec<EncounterPhysicalAnchor>,
+    #[serde(default)]
     pub affordances: Vec<EncounterAffordance>,
     #[serde(default)]
     pub constraints: Vec<EncounterConstraint>,
     #[serde(default)]
     pub change_potential: Vec<EncounterChangePotential>,
     pub lifecycle: EncounterSurfaceLifecycle,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EncounterPhysicalAnchor {
+    pub anchor_ref: String,
+    pub kind: EncounterPhysicalAnchorKind,
+    pub relation: String,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum EncounterPhysicalAnchorKind {
+    CurrentLocation,
+    NearbyLocation,
+    BodyConstraint,
+    Resource,
+    Actor,
+    SocialExchange,
+    ChoiceSlot,
+    Gate,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -369,6 +393,8 @@ pub struct EncounterSurfaceMutation {
     #[serde(default)]
     pub linked_social_refs: Vec<String>,
     #[serde(default)]
+    pub physical_anchors: Vec<EncounterPhysicalAnchor>,
+    #[serde(default)]
     pub affordances: Vec<EncounterAffordance>,
     #[serde(default)]
     pub constraints: Vec<EncounterConstraint>,
@@ -437,6 +463,8 @@ pub fn compile_encounter_surface_packet(
         })
         .collect::<Vec<_>>();
     surfaces.extend(social_surfaces(turn_id, scene_id, social_exchange));
+    surfaces.extend(location_surfaces(turn_id, scene_id, location_graph));
+    surfaces.extend(body_constraint_surfaces(turn_id, scene_id, body_resource));
     surfaces.extend(resource_surfaces(turn_id, scene_id, body_resource));
     surfaces.sort_by(|left, right| {
         right
@@ -643,6 +671,7 @@ pub fn rebuild_encounter_surface(
                     linked_entity_refs: mutation.linked_entity_refs,
                     linked_pressure_refs: mutation.linked_pressure_refs,
                     linked_social_refs: mutation.linked_social_refs,
+                    physical_anchors: mutation.physical_anchors,
                     affordances: mutation.affordances,
                     constraints: mutation.constraints,
                     change_potential: mutation.change_potential,
@@ -820,6 +849,9 @@ fn surface_from_choice(
         .map(|location| location.location_id.clone())
         .or_else(|| Some(scene_id.to_owned()));
     let mutation = mutation_from_choice(turn_id, scene_id, choice, &pressure_refs, source_refs);
+    let mut physical_anchors = choice_physical_anchors(choice, location_graph);
+    physical_anchors.extend(mutation.physical_anchors.clone());
+    dedupe_physical_anchors(&mut physical_anchors);
     EncounterSurface {
         schema_version: ENCOUNTER_SURFACE_SCHEMA_VERSION.to_owned(),
         surface_id: mutation.surface_id,
@@ -835,6 +867,7 @@ fn surface_from_choice(
         linked_entity_refs: mutation.linked_entity_refs,
         linked_pressure_refs: mutation.linked_pressure_refs,
         linked_social_refs: mutation.linked_social_refs,
+        physical_anchors,
         affordances: mutation.affordances,
         constraints: mutation.constraints,
         change_potential: mutation.change_potential,
@@ -886,6 +919,12 @@ fn mutation_from_choice(
         linked_entity_refs: Vec::new(),
         linked_pressure_refs: pressure_refs.to_owned(),
         linked_social_refs: Vec::new(),
+        physical_anchors: vec![EncounterPhysicalAnchor {
+            anchor_ref: format!("next_choices[slot={}]", choice.slot),
+            kind: EncounterPhysicalAnchorKind::ChoiceSlot,
+            relation: "choice_surface_source".to_owned(),
+            evidence_refs: vec![format!("next_choices[slot={}]", choice.slot)],
+        }],
         affordances: vec![EncounterAffordance {
             schema_version: ENCOUNTER_AFFORDANCE_SCHEMA_VERSION.to_owned(),
             affordance_id: format!("{surface_id}:affordance"),
@@ -1023,6 +1062,227 @@ fn forbidden_outcomes_for_action(action: EncounterActionKind) -> Vec<String> {
     outcomes
 }
 
+fn choice_physical_anchors(
+    choice: &TurnChoice,
+    location_graph: &LocationGraphPacket,
+) -> Vec<EncounterPhysicalAnchor> {
+    let mut anchors = Vec::new();
+    let evidence_refs = vec![format!("next_choices[slot={}]", choice.slot)];
+    anchors.push(EncounterPhysicalAnchor {
+        anchor_ref: format!("next_choices[slot={}]", choice.slot),
+        kind: EncounterPhysicalAnchorKind::ChoiceSlot,
+        relation: "choice_surface_source".to_owned(),
+        evidence_refs: evidence_refs.clone(),
+    });
+    if let Some(current_location) = &location_graph.current_location {
+        anchors.push(EncounterPhysicalAnchor {
+            anchor_ref: current_location.location_id.clone(),
+            kind: EncounterPhysicalAnchorKind::CurrentLocation,
+            relation: "choice_scene_origin".to_owned(),
+            evidence_refs: location_evidence_refs(current_location),
+        });
+    }
+
+    let choice_text = format!("{} {}", choice.tag, choice.intent);
+    for nearby in &location_graph.known_nearby_locations {
+        if choice_text.contains(nearby.name.as_str())
+            || choice_text.contains(nearby.location_id.as_str())
+        {
+            anchors.push(EncounterPhysicalAnchor {
+                anchor_ref: nearby.location_id.clone(),
+                kind: EncounterPhysicalAnchorKind::NearbyLocation,
+                relation: "choice_movement_target".to_owned(),
+                evidence_refs: location_evidence_refs(nearby),
+            });
+        }
+    }
+    anchors
+}
+
+fn location_physical_anchors(
+    current_location_ref: &str,
+    destination: &LocationNode,
+    evidence_refs: &[String],
+) -> Vec<EncounterPhysicalAnchor> {
+    vec![
+        EncounterPhysicalAnchor {
+            anchor_ref: current_location_ref.to_owned(),
+            kind: EncounterPhysicalAnchorKind::CurrentLocation,
+            relation: "movement_origin".to_owned(),
+            evidence_refs: evidence_refs.to_owned(),
+        },
+        EncounterPhysicalAnchor {
+            anchor_ref: destination.location_id.clone(),
+            kind: EncounterPhysicalAnchorKind::NearbyLocation,
+            relation: "movement_destination".to_owned(),
+            evidence_refs: evidence_refs.to_owned(),
+        },
+    ]
+}
+
+fn location_evidence_refs(location: &LocationNode) -> Vec<String> {
+    if location.source_refs.is_empty() {
+        vec![format!("location_graph:{}", location.location_id)]
+    } else {
+        location.source_refs.clone()
+    }
+}
+
+fn dedupe_physical_anchors(anchors: &mut Vec<EncounterPhysicalAnchor>) {
+    let mut seen = BTreeSet::new();
+    anchors.retain(|anchor| {
+        seen.insert((
+            anchor.anchor_ref.clone(),
+            anchor.kind,
+            anchor.relation.clone(),
+        ))
+    });
+}
+
+fn location_surfaces(
+    turn_id: &str,
+    scene_id: &str,
+    location_graph: &LocationGraphPacket,
+) -> Vec<EncounterSurface> {
+    let current_location = location_graph
+        .current_location
+        .as_ref()
+        .map_or(scene_id, |location| location.location_id.as_str());
+    location_graph
+        .known_nearby_locations
+        .iter()
+        .map(|location| {
+            let surface_id = format!(
+                "encounter:{turn_id}:location:{}",
+                normalize_id(&location.location_id)
+            );
+            let evidence_refs = location_evidence_refs(location);
+            let physical_anchors =
+                location_physical_anchors(current_location, location, &evidence_refs);
+            EncounterSurface {
+                schema_version: ENCOUNTER_SURFACE_SCHEMA_VERSION.to_owned(),
+                surface_id: surface_id.clone(),
+                label: location.name.clone(),
+                kind: EncounterSurfaceKind::Exit,
+                status: EncounterSurfaceStatus::Available,
+                salience: EncounterSalience::Useful,
+                summary: format!("현재 장면에서 도달 가능한 인접 위치: {}", location.name),
+                player_visible_signal: location.name.clone(),
+                location_ref: Some(current_location.to_owned()),
+                holder_ref: None,
+                source_refs: evidence_refs.clone(),
+                linked_entity_refs: Vec::new(),
+                linked_pressure_refs: Vec::new(),
+                linked_social_refs: Vec::new(),
+                physical_anchors: physical_anchors.clone(),
+                affordances: vec![EncounterAffordance {
+                    schema_version: ENCOUNTER_AFFORDANCE_SCHEMA_VERSION.to_owned(),
+                    affordance_id: format!("{surface_id}:move"),
+                    action_kind: EncounterActionKind::Move,
+                    label_seed: location.name.clone(),
+                    intent_seed: format!("{} 쪽으로 이동한다", location.name),
+                    availability: AffordanceAvailability::Available,
+                    required_refs: vec![location.location_id.clone()],
+                    risk_tags: Vec::new(),
+                    evidence_refs: evidence_refs.clone(),
+                }],
+                constraints: Vec::new(),
+                change_potential: vec![EncounterChangePotential {
+                    schema_version: ENCOUNTER_CHANGE_POTENTIAL_SCHEMA_VERSION.to_owned(),
+                    change_id: format!("{surface_id}:move"),
+                    kind: EncounterChangeKind::MoveSurface,
+                    summary: "플레이어 위치가 바뀔 수 있다.".to_owned(),
+                    likely_scope: "current_scene_or_next_scene".to_owned(),
+                    evidence_refs,
+                }],
+                lifecycle: EncounterSurfaceLifecycle {
+                    opened_turn_id: turn_id.to_owned(),
+                    last_changed_turn_id: turn_id.to_owned(),
+                    persistence: EncounterPersistence::CurrentScene,
+                },
+            }
+        })
+        .collect()
+}
+
+fn body_constraint_surfaces(
+    turn_id: &str,
+    scene_id: &str,
+    body_resource: &BodyResourcePacket,
+) -> Vec<EncounterSurface> {
+    body_resource
+        .body_constraints
+        .iter()
+        .take(4)
+        .map(|constraint| {
+            let surface_id = format!(
+                "encounter:{turn_id}:body:{}",
+                normalize_id(&constraint.constraint_id)
+            );
+            let physical_anchors = vec![EncounterPhysicalAnchor {
+                anchor_ref: constraint.constraint_id.clone(),
+                kind: EncounterPhysicalAnchorKind::BodyConstraint,
+                relation: "player_body_state".to_owned(),
+                evidence_refs: constraint.source_refs.clone(),
+            }];
+            EncounterSurface {
+                schema_version: ENCOUNTER_SURFACE_SCHEMA_VERSION.to_owned(),
+                surface_id: surface_id.clone(),
+                label: constraint.summary.clone(),
+                kind: EncounterSurfaceKind::Hazard,
+                status: EncounterSurfaceStatus::Degraded,
+                salience: if constraint.severity >= 3 {
+                    EncounterSalience::Important
+                } else {
+                    EncounterSalience::Useful
+                },
+                summary: constraint.summary.clone(),
+                player_visible_signal: constraint.summary.clone(),
+                location_ref: Some(scene_id.to_owned()),
+                holder_ref: Some("player".to_owned()),
+                source_refs: constraint.source_refs.clone(),
+                linked_entity_refs: vec!["player".to_owned()],
+                linked_pressure_refs: constraint.scene_pressure_kinds.clone(),
+                linked_social_refs: Vec::new(),
+                physical_anchors,
+                affordances: vec![EncounterAffordance {
+                    schema_version: ENCOUNTER_AFFORDANCE_SCHEMA_VERSION.to_owned(),
+                    affordance_id: format!("{surface_id}:adjust"),
+                    action_kind: EncounterActionKind::Inspect,
+                    label_seed: constraint.summary.clone(),
+                    intent_seed: "몸 상태가 현재 행동에 어떤 제약을 주는지 확인한다".to_owned(),
+                    availability: AffordanceAvailability::Risky,
+                    required_refs: vec![constraint.constraint_id.clone()],
+                    risk_tags: vec!["body".to_owned()],
+                    evidence_refs: constraint.source_refs.clone(),
+                }],
+                constraints: vec![EncounterConstraint {
+                    schema_version: ENCOUNTER_CONSTRAINT_SCHEMA_VERSION.to_owned(),
+                    constraint_id: format!("{surface_id}:constraint"),
+                    kind: EncounterConstraintKind::Body,
+                    summary: constraint.summary.clone(),
+                    visible_reason: constraint.summary.clone(),
+                    unblock_refs: Vec::new(),
+                    evidence_refs: constraint.source_refs.clone(),
+                }],
+                change_potential: vec![EncounterChangePotential {
+                    schema_version: ENCOUNTER_CHANGE_POTENTIAL_SCHEMA_VERSION.to_owned(),
+                    change_id: format!("{surface_id}:cost"),
+                    kind: EncounterChangeKind::AdvanceClock,
+                    summary: "몸 상태가 행동 비용이나 위험을 바꿀 수 있다.".to_owned(),
+                    likely_scope: "current_action".to_owned(),
+                    evidence_refs: constraint.source_refs.clone(),
+                }],
+                lifecycle: EncounterSurfaceLifecycle {
+                    opened_turn_id: turn_id.to_owned(),
+                    last_changed_turn_id: turn_id.to_owned(),
+                    persistence: EncounterPersistence::UntilChanged,
+                },
+            }
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_lines)]
 fn social_surfaces(
     turn_id: &str,
@@ -1050,6 +1310,20 @@ fn social_surfaces(
             linked_entity_refs: vec![stance.actor_ref.clone(), stance.target_ref.clone()],
             linked_pressure_refs: Vec::new(),
             linked_social_refs: vec![stance.stance_id.clone()],
+            physical_anchors: vec![
+                EncounterPhysicalAnchor {
+                    anchor_ref: stance.actor_ref.clone(),
+                    kind: EncounterPhysicalAnchorKind::Actor,
+                    relation: "stance_actor".to_owned(),
+                    evidence_refs: stance.source_refs.clone(),
+                },
+                EncounterPhysicalAnchor {
+                    anchor_ref: stance.stance_id.clone(),
+                    kind: EncounterPhysicalAnchorKind::SocialExchange,
+                    relation: "relationship_stance".to_owned(),
+                    evidence_refs: stance.source_refs.clone(),
+                },
+            ],
             affordances: vec![EncounterAffordance {
                 schema_version: ENCOUNTER_AFFORDANCE_SCHEMA_VERSION.to_owned(),
                 affordance_id: format!("{surface_id}:talk"),
@@ -1100,6 +1374,20 @@ fn social_surfaces(
             linked_entity_refs: vec![ask.asked_by_ref.clone(), ask.asked_to_ref.clone()],
             linked_pressure_refs: Vec::new(),
             linked_social_refs: vec![ask.ask_id.clone()],
+            physical_anchors: vec![
+                EncounterPhysicalAnchor {
+                    anchor_ref: ask.asked_to_ref.clone(),
+                    kind: EncounterPhysicalAnchorKind::Actor,
+                    relation: "ask_controller".to_owned(),
+                    evidence_refs: ask.source_refs.clone(),
+                },
+                EncounterPhysicalAnchor {
+                    anchor_ref: ask.ask_id.clone(),
+                    kind: EncounterPhysicalAnchorKind::SocialExchange,
+                    relation: "unresolved_ask".to_owned(),
+                    evidence_refs: ask.source_refs.clone(),
+                },
+            ],
             affordances: vec![EncounterAffordance {
                 schema_version: ENCOUNTER_AFFORDANCE_SCHEMA_VERSION.to_owned(),
                 affordance_id: format!("{surface_id}:probe"),
@@ -1174,9 +1462,15 @@ fn resource_surfaces(
                 location_ref: Some(scene_id.to_owned()),
                 holder_ref: Some("player".to_owned()),
                 source_refs: resource.source_refs.clone(),
-                linked_entity_refs: Vec::new(),
+                linked_entity_refs: vec!["player".to_owned()],
                 linked_pressure_refs: Vec::new(),
                 linked_social_refs: Vec::new(),
+                physical_anchors: vec![EncounterPhysicalAnchor {
+                    anchor_ref: resource.resource_id.clone(),
+                    kind: EncounterPhysicalAnchorKind::Resource,
+                    relation: "held_resource".to_owned(),
+                    evidence_refs: resource.source_refs.clone(),
+                }],
                 affordances: vec![EncounterAffordance {
                     schema_version: ENCOUNTER_AFFORDANCE_SCHEMA_VERSION.to_owned(),
                     affordance_id: format!("{surface_id}:use"),
@@ -1184,7 +1478,7 @@ fn resource_surfaces(
                     label_seed: resource_label,
                     intent_seed: resource.summary.clone(),
                     availability: AffordanceAvailability::Available,
-                    required_refs: Vec::new(),
+                    required_refs: vec![resource.resource_id.clone()],
                     risk_tags: Vec::new(),
                     evidence_refs: resource.source_refs.clone(),
                 }],
@@ -1595,6 +1889,12 @@ pub fn mutation_from_resolution_gate(
         linked_entity_refs: Vec::new(),
         linked_pressure_refs: Vec::new(),
         linked_social_refs: Vec::new(),
+        physical_anchors: vec![EncounterPhysicalAnchor {
+            anchor_ref: gate_ref.to_owned(),
+            kind: EncounterPhysicalAnchorKind::Gate,
+            relation: "resolution_gate".to_owned(),
+            evidence_refs: evidence_refs.to_vec(),
+        }],
         affordances: vec![EncounterAffordance {
             schema_version: ENCOUNTER_AFFORDANCE_SCHEMA_VERSION.to_owned(),
             affordance_id: format!("{surface_id}:probe"),
@@ -1756,6 +2056,98 @@ mod tests {
     }
 
     #[test]
+    fn compiles_physical_location_and_body_surfaces() {
+        let location_graph = LocationGraphPacket {
+            world_id: "world".to_owned(),
+            turn_id: "turn_0002".to_owned(),
+            current_location: Some(LocationNode {
+                schema_version: crate::location_graph::LOCATION_NODE_SCHEMA_VERSION.to_owned(),
+                location_id: "place:gate".to_owned(),
+                name: "북문".to_owned(),
+                knowledge_state: crate::location_graph::LocationKnowledgeState::Visited,
+                notes: Vec::new(),
+                source_refs: vec!["location_graph.current_location".to_owned()],
+            }),
+            known_nearby_locations: vec![LocationNode {
+                schema_version: crate::location_graph::LOCATION_NODE_SCHEMA_VERSION.to_owned(),
+                location_id: "place:courtyard".to_owned(),
+                name: "안뜰".to_owned(),
+                knowledge_state: crate::location_graph::LocationKnowledgeState::Known,
+                notes: Vec::new(),
+                source_refs: vec!["location_graph.known_nearby_locations[0]".to_owned()],
+            }],
+            ..LocationGraphPacket::default()
+        };
+        let body_resource = BodyResourcePacket {
+            world_id: "world".to_owned(),
+            turn_id: "turn_0002".to_owned(),
+            body_constraints: vec![crate::body_resource::BodyConstraint {
+                schema_version: crate::body_resource::BODY_CONSTRAINT_SCHEMA_VERSION.to_owned(),
+                constraint_id: "body:constraint:left_hand_numb".to_owned(),
+                visibility: crate::body_resource::BodyResourceVisibility::PlayerVisible,
+                summary: "왼손이 저리다".to_owned(),
+                severity: 3,
+                source_refs: vec!["latest_snapshot.protagonist_state.body[0]".to_owned()],
+                scene_pressure_kinds: vec!["body".to_owned()],
+            }],
+            ..BodyResourcePacket::default()
+        };
+        let packet = compile_encounter_surface_packet(
+            "world",
+            "turn_0002",
+            "place:gate",
+            &[TurnChoice {
+                slot: 1,
+                tag: "안뜰 쪽으로 움직인다".to_owned(),
+                intent: "북문에서 안뜰로 들어갈 길을 확인한다".to_owned(),
+            }],
+            &ScenePressurePacket::default(),
+            &location_graph,
+            &body_resource,
+            &SocialExchangePacket::default(),
+        );
+
+        let Some(location_surface) = packet
+            .active_surfaces
+            .iter()
+            .find(|surface| surface.surface_id == "encounter:turn_0002:location:place-courtyard")
+        else {
+            panic!("nearby location should compile into an exit surface");
+        };
+        assert_eq!(location_surface.kind, EncounterSurfaceKind::Exit);
+        assert!(location_surface.physical_anchors.iter().any(|anchor| {
+            anchor.kind == EncounterPhysicalAnchorKind::NearbyLocation
+                && anchor.anchor_ref == "place:courtyard"
+        }));
+
+        let Some(choice_surface) = packet
+            .active_surfaces
+            .iter()
+            .find(|surface| surface.surface_id.contains(":slot:1:"))
+        else {
+            panic!("choice surface should compile");
+        };
+        assert!(choice_surface.physical_anchors.iter().any(|anchor| {
+            anchor.kind == EncounterPhysicalAnchorKind::NearbyLocation
+                && anchor.anchor_ref == "place:courtyard"
+                && anchor.relation == "choice_movement_target"
+        }));
+
+        let Some(body_surface) = packet
+            .active_surfaces
+            .iter()
+            .find(|surface| surface.kind == EncounterSurfaceKind::Hazard)
+        else {
+            panic!("body constraint should compile into a hazard surface");
+        };
+        assert!(body_surface.physical_anchors.iter().any(|anchor| {
+            anchor.kind == EncounterPhysicalAnchorKind::BodyConstraint
+                && anchor.anchor_ref == "body:constraint:left_hand_numb"
+        }));
+        assert_eq!(packet.choice_contracts.len(), packet.active_surfaces.len());
+    }
+
+    #[test]
     fn proposal_materializes_surface() -> anyhow::Result<()> {
         let temp = tempdir()?;
         let base = EncounterSurfacePacket {
@@ -1783,6 +2175,7 @@ mod tests {
                 linked_entity_refs: Vec::new(),
                 linked_pressure_refs: Vec::new(),
                 linked_social_refs: Vec::new(),
+                physical_anchors: Vec::new(),
                 affordances: vec![EncounterAffordance {
                     schema_version: ENCOUNTER_AFFORDANCE_SCHEMA_VERSION.to_owned(),
                     affordance_id: "encounter:turn_0002:trace:mud:inspect".to_owned(),
