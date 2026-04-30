@@ -141,6 +141,7 @@ pub const AGENT_COMMIT_RECORD_SCHEMA_VERSION: &str = "singulari.agent_commit_rec
 pub const WORLD_COURT_REJECTION_RECORD_SCHEMA_VERSION: &str = "singulari.world_court_rejection.v1";
 pub const POST_COMMIT_MATERIALIZATION_EVENT_SCHEMA_VERSION: &str =
     "singulari.post_commit_materialization_event.v1";
+pub const ADVISORY_WARNING_EVENT_SCHEMA_VERSION: &str = "singulari.advisory_warning_event.v1";
 
 const AGENT_BRIDGE_DIR: &str = "agent_bridge";
 const PENDING_AGENT_TURN_FILENAME: &str = "pending_turn.json";
@@ -1539,7 +1540,7 @@ fn record_advisory_warning(
     message: &str,
 ) {
     let warning = AdvisoryWarningEvent {
-        schema_version: POST_COMMIT_MATERIALIZATION_EVENT_SCHEMA_VERSION.to_owned(),
+        schema_version: ADVISORY_WARNING_EVENT_SCHEMA_VERSION.to_owned(),
         world_id: world_id.to_owned(),
         turn_id: turn_id.to_owned(),
         component: component.to_owned(),

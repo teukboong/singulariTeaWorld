@@ -996,6 +996,8 @@ fn apply_hook_event_record(threads: &mut Vec<HookThread>, record: HookEventRecor
 
 fn reject_hidden_hook_ref(item_ref: &str, owner_ref: &str) -> Result<()> {
     let normalized = item_ref.to_ascii_lowercase();
+    // MVP guard: replace this denylist with allowed-prefix validation once all
+    // hook source ref families are enumerated.
     if normalized.starts_with("hidden:")
         || normalized.starts_with("secret:")
         || normalized.contains("adjudication_only")

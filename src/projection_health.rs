@@ -1,3 +1,4 @@
+use crate::agent_bridge::{ADVISORY_WARNING_EVENT_SCHEMA_VERSION, AdvisoryWarningEvent};
 use crate::event_ledger::{
     WorldEventLedgerChainStatus, replay_world_events, verify_world_event_ledger,
 };
@@ -101,6 +102,7 @@ pub fn build_projection_health_report(
         &world_dir,
         snapshot.value.as_ref(),
     ));
+    components.push(advisory_warning_health(world_id, &world_dir));
     components.push(extra_memory_health(world_id, &world_dir));
     components.push(world_jobs_health(store_root, world_id));
 
@@ -453,6 +455,72 @@ fn turn_has_committed_envelope(envelopes: &[TurnCommitEnvelope], turn_id: &str) 
     })
 }
 
+fn advisory_warning_health(world_id: &str, world_dir: &Path) -> ProjectionComponentHealth {
+    let path = world_dir
+        .join("agent_bridge")
+        .join("advisory_warnings.jsonl");
+    if !path.exists() {
+        return ProjectionComponentHealth {
+            component: "advisory_warnings".to_owned(),
+            status: ProjectionHealthStatus::Healthy,
+            detail: "warnings=0".to_owned(),
+            warnings: Vec::new(),
+            errors: Vec::new(),
+        };
+    }
+    let events = match read_advisory_warning_events(&path) {
+        Ok(events) => events,
+        Err(error) => return failed_component("advisory_warnings", format!("{error:#}")),
+    };
+    let mut errors = Vec::new();
+    for event in &events {
+        if event.schema_version != ADVISORY_WARNING_EVENT_SCHEMA_VERSION {
+            errors.push(format!(
+                "advisory warning schema mismatch: expected={}, actual={}, turn={}",
+                ADVISORY_WARNING_EVENT_SCHEMA_VERSION, event.schema_version, event.turn_id
+            ));
+        }
+        if event.world_id != world_id {
+            errors.push(format!(
+                "advisory warning world mismatch: expected={world_id}, actual={}, turn={}",
+                event.world_id, event.turn_id
+            ));
+        }
+    }
+    if !errors.is_empty() {
+        return component_from_errors(
+            "advisory_warnings",
+            format!("warnings={}", events.len()),
+            Vec::new(),
+            errors,
+        );
+    }
+    let Some(latest) = events.last() else {
+        return ProjectionComponentHealth {
+            component: "advisory_warnings".to_owned(),
+            status: ProjectionHealthStatus::Healthy,
+            detail: "warnings=0".to_owned(),
+            warnings: Vec::new(),
+            errors: Vec::new(),
+        };
+    };
+    ProjectionComponentHealth {
+        component: "advisory_warnings".to_owned(),
+        status: ProjectionHealthStatus::Degraded,
+        detail: format!(
+            "warnings={}, latest_component={}, latest_kind={}",
+            events.len(),
+            latest.component,
+            latest.warning_kind
+        ),
+        warnings: vec![format!(
+            "latest advisory warning: turn={}, component={}, kind={}, message={}",
+            latest.turn_id, latest.component, latest.warning_kind, latest.message
+        )],
+        errors: Vec::new(),
+    }
+}
+
 fn extra_memory_health(world_id: &str, world_dir: &Path) -> ProjectionComponentHealth {
     let store = match load_remembered_extras(world_dir, world_id) {
         Ok(store) => store,
@@ -627,8 +695,22 @@ fn read_turn_commit_envelopes(path: &Path) -> Result<Vec<TurnCommitEnvelope>> {
         .collect()
 }
 
+fn read_advisory_warning_events(path: &Path) -> Result<Vec<AdvisoryWarningEvent>> {
+    let raw =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    raw.lines()
+        .enumerate()
+        .filter(|(_, line)| !line.trim().is_empty())
+        .map(|(index, line)| {
+            serde_json::from_str::<AdvisoryWarningEvent>(line)
+                .with_context(|| format!("failed to parse {} line {}", path.display(), index + 1))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
+    use crate::agent_bridge::{ADVISORY_WARNING_EVENT_SCHEMA_VERSION, AdvisoryWarningEvent};
     use crate::projection_health::{
         ProjectionHealthStatus, build_projection_health_report, render_projection_health_report,
     };
@@ -952,6 +1034,50 @@ premise:
         assert!(turn_commit.detail.contains("committed=1"));
         assert!(turn_commit.detail.contains("failed=1"));
         assert!(turn_commit.errors.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn projection_health_surfaces_advisory_warning_latest() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(&seed_path, seed_body())?;
+        let initialized = init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+        let warning_path = initialized
+            .world_dir
+            .join("agent_bridge")
+            .join("advisory_warnings.jsonl");
+        let Some(warning_dir) = warning_path.parent() else {
+            anyhow::bail!("advisory warning path has no parent");
+        };
+        std::fs::create_dir_all(warning_dir)?;
+        append_jsonl(
+            &warning_path,
+            &AdvisoryWarningEvent {
+                schema_version: ADVISORY_WARNING_EVENT_SCHEMA_VERSION.to_owned(),
+                world_id: "stw_projection_health".to_owned(),
+                turn_id: "turn_0001".to_owned(),
+                component: "hook_ledger_promises".to_owned(),
+                warning_kind: "advisory_journal_append_failed".to_owned(),
+                message: "simulated append loss".to_owned(),
+                recorded_at: "2026-04-30T00:00:00Z".to_owned(),
+            },
+        )?;
+
+        let report = build_projection_health_report(Some(&store), "stw_projection_health")?;
+
+        assert_eq!(report.status, ProjectionHealthStatus::Degraded);
+        let rendered = render_projection_health_report(&report);
+        assert!(rendered.contains("advisory_warnings: degraded"));
+        assert!(rendered.contains("warnings=1"));
+        assert!(rendered.contains("latest_component=hook_ledger_promises"));
+        assert!(rendered.contains("latest_kind=advisory_journal_append_failed"));
+        assert!(rendered.contains("simulated append loss"));
         Ok(())
     }
 }
