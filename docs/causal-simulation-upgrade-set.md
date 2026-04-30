@@ -27,11 +27,12 @@ The current runtime already has the important platform pieces:
 - WebGPT text and image lanes as the default backend
 - typed projection families for pressure, body/resources, location,
   relationships, belief, processes, consequences, encounters, and actor agency
-- Rust-side validation and redaction before commit
+- Rust-side validation, redaction, and world-court adjudication before commit
 
-The remaining gap is authority. The LLM can currently propose many structured
-deltas, and Rust checks them, but the turn's causal affordances and obligations
-are not yet compiled as one explicit pre-turn artifact before the LLM writes.
+The former authority gap is now the center of the runtime contract. The LLM can
+propose structured deltas, but Rust compiles `PreTurnSimulationPass` and
+`PromptContext` first, audits the proposal through `WorldCourt`, and only then
+commits accepted events/projections.
 
 ## Outcome
 
@@ -379,19 +380,22 @@ cargo test --locked agent_bridge
 
 ### Phase 3: Choice Grounding Tightening
 
-Implementation status: partially done through resolution/choice audit.
+Implementation status: done for the current contract through affordance graph,
+resolution choice-plan audit, and persisted freeform gate traces.
 
 - Make slots 1-5 originate from compiled affordances.
 - Preserve WebGPT ownership of labels and intent wording.
 - Reject labels/intents that expose internal ids, hidden causes, or forbidden
   shortcuts.
-- Keep slot 6 freeform and slot 7 delegated judgment compatibility.
+- Keep slot 6 freeform and record its gate trace through `player_intent_trace`.
+- Keep slot 7 delegated judgment compatibility.
 
 Acceptance:
 
 ```text
 cargo test --locked affordance_graph
 cargo test --locked vn
+cargo test --locked player_intent::tests
 ```
 
 ### Phase 4: Soak Harness
