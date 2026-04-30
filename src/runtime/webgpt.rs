@@ -2221,6 +2221,7 @@ fn normalize_scene_pressure_events(response: &mut serde_json::Map<String, Value>
             continue;
         };
         move_string_field(event, "pressure_ref", "pressure_id");
+        move_string_field(event, "event_kind", "change");
         if !event.contains_key("change") {
             let change = event
                 .get("kind")
@@ -2228,6 +2229,7 @@ fn normalize_scene_pressure_events(response: &mut serde_json::Map<String, Value>
                 .map_or("redirected", normalize_scene_pressure_change);
             event.insert("change".to_owned(), Value::String(change.to_owned()));
         }
+        normalize_string_enum_field(event, "change", normalize_scene_pressure_change);
         if !event.contains_key("intensity_after") {
             event.insert("intensity_after".to_owned(), Value::Number(2.into()));
         }
@@ -2437,17 +2439,17 @@ fn normalize_plot_thread_change(value: &str) -> &'static str {
 }
 
 fn normalize_scene_pressure_change(value: &str) -> &'static str {
-    match value {
-        "surfaced" => "surfaced",
-        "increased" => "increased",
-        "softened" => "softened",
-        "resolved" => "resolved",
+    match value.trim().to_ascii_lowercase().as_str() {
+        "surfaced" | "surface" => "surfaced",
+        "increased" | "increase" => "increased",
+        "softened" | "soften" | "preserved" | "preserve" => "softened",
+        "resolved" | "resolve" | "satisfied" | "satisfy" => "resolved",
         _ => "redirected",
     }
 }
 
 fn normalize_location_event_kind(value: &str) -> &'static str {
-    match value {
+    match value.trim().to_ascii_lowercase().as_str() {
         "discovered" | "opened" | "open" => "discovered",
         "route_opened" => "route_opened",
         "route_blocked" => "route_blocked",
@@ -3282,13 +3284,7 @@ premise:
                 "text_blocks": ["test"],
                 "tone_notes": []
             },
-            "next_choices": [],
-            "location_events": [{
-                "location_ref": "place:opening_location",
-                "event_kind": "opened",
-                "summary": "test",
-                "evidence_refs": ["player_input"]
-            }]
+            "next_choices": []
         });
 
         normalize_webgpt_agent_turn_response(&mut value, &HashMap::new());
@@ -3313,6 +3309,31 @@ premise:
             value["resolution_proposal"]["process_ticks"][0]["visibility"],
             serde_json::json!("adjudication_only")
         );
+    }
+
+    #[test]
+    fn normalizes_webgpt_event_aliases_before_schema_parse() {
+        let mut value = serde_json::json!({
+            "schema_version": "singulari.agent_turn_response.v1",
+            "world_id": "stw_alias",
+            "turn_id": "turn_0001",
+            "resolution_proposal": {},
+            "scene_pressure_events": [{
+                "pressure_ref": "pressure:open_questions",
+                "event_kind": "preserved",
+                "summary": "test",
+                "evidence_refs": ["player_input"]
+            }],
+            "location_events": [{
+                "location_ref": "place:opening_location",
+                "event_kind": "opened",
+                "summary": "test",
+                "evidence_refs": ["player_input"]
+            }]
+        });
+
+        normalize_webgpt_agent_turn_response(&mut value, &HashMap::new());
+
         assert_eq!(
             value["location_events"][0]["location_id"],
             serde_json::json!("place:opening_location")
@@ -3320,6 +3341,14 @@ premise:
         assert_eq!(
             value["location_events"][0]["event_kind"],
             serde_json::json!("discovered")
+        );
+        assert_eq!(
+            value["scene_pressure_events"][0]["pressure_id"],
+            serde_json::json!("pressure:open_questions")
+        );
+        assert_eq!(
+            value["scene_pressure_events"][0]["change"],
+            serde_json::json!("softened")
         );
     }
 
