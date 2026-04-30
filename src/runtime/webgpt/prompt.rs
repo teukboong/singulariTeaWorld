@@ -16,16 +16,20 @@ const COMPACT_AGENT_TURN_RESPONSE_SCHEMA_GUIDE: &str = r#"AgentTurnResponse JSON
 resolution_proposal 필수:
 - schema_version="singulari.resolution_proposal.v1", world_id, turn_id
 - interpreted_intent: input_kind, summary, target_refs, pressure_refs, evidence_refs, ambiguity
-- outcome: kind, summary, evidence_refs
-- gate_results, proposed_effects, process_ticks
+- interpreted_intent.input_kind는 narrative_turn_packet.response_contract.interpreted_intent_input_kind 값만 쓴다. pre_turn_simulation.input_kind를 그대로 복사하지 않는다.
+- interpreted_intent.ambiguity는 clear/minor/high 중 하나다.
+- outcome: kind, summary, evidence_refs. kind는 success/partial_success/blocked/costly_success/delayed/escalated 중 하나다.
+- gate_results 항목: gate_kind, gate_ref, visibility, status, reason, evidence_refs. status는 passed/softened/blocked/cost_imposed/unknown_needs_probe 중 하나다.
+- proposed_effects 항목: effect_kind, target_ref, visibility, summary, evidence_refs.
+- process_ticks 항목: process_ref, cause, visibility, summary, evidence_refs.
 - pressure_noop_reasons: narrative_turn_packet.pre_turn_simulation.pressure_obligations의 각 pressure_id를 움직이지 않으면 반드시 pressure_ref/evidence_refs로 설명
 - narrative_brief: visible_summary, required_beats, forbidden_visible_details
-- next_choice_plan: slot 1..5는 narrative_turn_packet.pre_turn_simulation.available_affordances의 같은 slot affordance_id를 grounding_ref/evidence_refs로 사용. slot 6은 freeform/current_turn, slot 7은 delegated_judgment/current_turn.
+- next_choice_plan 항목: slot, plan_kind, grounding_ref, label_seed, intent_seed, evidence_refs. slot 1..5 plan_kind=ordinary_affordance, slot 6 plan_kind=freeform, slot 7 plan_kind=delegated_judgment.
 
 visible_scene:
 - schema_version="singulari.narrative_scene.v1"
 - text_blocks: 한국어 VN prose 문단 배열
-- tone_notes: 짧게
+- tone_notes: 문자열 배열. 예: ["전역 서사는 감각 압력을 유지했다."]
 
 next_choices:
 - slot 1..5는 이번 visible_scene에서 곧바로 이어지는 구체 행동
@@ -226,6 +230,10 @@ fn build_narrative_turn_packet(prompt_context: &PromptContextPacket) -> Result<V
         "current_turn": prompt_context.current_turn,
         "opening_randomizer": prompt_context.opening_randomizer,
         "output_contract": prompt_context.output_contract,
+        "response_contract": {
+            "interpreted_intent_input_kind": response_input_kind_from_pre_turn(&pre_turn),
+            "input_kind_mapping": "copy this value into resolution_proposal.interpreted_intent.input_kind"
+        },
         "pre_turn_simulation": {
             "schema_version": json_field(&pre_turn, "schema_version"),
             "world_id": prompt_context.world_id,
@@ -257,6 +265,15 @@ fn build_narrative_turn_packet(prompt_context: &PromptContextPacket) -> Result<V
         },
         "source_of_truth_policy": prompt_context.source_of_truth_policy,
     }))
+}
+
+fn response_input_kind_from_pre_turn(pre_turn: &Value) -> &'static str {
+    match pre_turn.get("input_kind").and_then(Value::as_str) {
+        Some("guide_choice") => "delegated_judgment",
+        Some("codex_query") => "codex_query",
+        Some("numeric_choice" | "macro_time_flow" | "cc_canvas") => "presented_choice",
+        _ => "freeform",
+    }
 }
 
 fn prompt_safe_projection(value: Value) -> Value {

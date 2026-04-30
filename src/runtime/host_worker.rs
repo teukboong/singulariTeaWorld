@@ -264,9 +264,14 @@ fn effective_host_worker_backends(
     if !selection.locked {
         anyhow::bail!("backend selection is not locked for world_id={world_id}");
     }
+    let visual_backend = if options.visual_backend == HostWorkerVisualBackend::None {
+        HostWorkerVisualBackend::None
+    } else {
+        HostWorkerVisualBackend::from(selection.visual_backend)
+    };
     Ok((
         HostWorkerTextBackend::from(selection.text_backend),
-        HostWorkerVisualBackend::from(selection.visual_backend),
+        visual_backend,
     ))
 }
 
@@ -1031,30 +1036,15 @@ mod tests {
         DEFAULT_WEBGPT_IMAGE_CDP_PORT, DEFAULT_WEBGPT_REFERENCE_IMAGE_CDP_PORT,
         DEFAULT_WEBGPT_TEXT_CDP_PORT,
     };
-    use singulari_world::{HostImageGenerationCall, VisualArtifactKind};
+    use singulari_world::{
+        HostImageGenerationCall, VisualArtifactKind, WorldBackendSelection,
+        save_world_backend_selection,
+    };
 
     #[test]
     fn one_shot_host_worker_skips_blocking_webgpt_prewarm() -> anyhow::Result<()> {
         let mut emitted = HashSet::new();
-        let options = HostWorkerOptions {
-            interval_ms: 750,
-            once: true,
-            text_backend: HostWorkerTextBackend::Webgpt,
-            visual_backend: HostWorkerVisualBackend::Webgpt,
-            webgpt_turn_command: None,
-            webgpt_mcp_wrapper: Some("/definitely/missing/webgpt-mcp.sh".into()),
-            webgpt_model: None,
-            webgpt_reasoning_level: None,
-            webgpt_text_profile_dir: Some("/tmp/singulari-webgpt-test-text".into()),
-            webgpt_image_profile_dir: Some("/tmp/singulari-webgpt-test-image".into()),
-            webgpt_reference_image_profile_dir: Some(
-                "/tmp/singulari-webgpt-test-reference-image".into(),
-            ),
-            webgpt_text_cdp_port: DEFAULT_WEBGPT_TEXT_CDP_PORT,
-            webgpt_image_cdp_port: DEFAULT_WEBGPT_IMAGE_CDP_PORT,
-            webgpt_reference_image_cdp_port: DEFAULT_WEBGPT_REFERENCE_IMAGE_CDP_PORT,
-            webgpt_timeout_secs: 900,
-        };
+        let options = host_worker_options_for_test(HostWorkerVisualBackend::Webgpt);
 
         prewarm_effective_webgpt_lanes_once(
             &mut emitted,
@@ -1067,6 +1057,28 @@ mod tests {
             emitted.is_empty(),
             "one-shot worker should dispatch directly without prewarm bookkeeping"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn host_worker_visual_none_overrides_world_locked_visual_backend() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = temp.path().join("store");
+        let world_id = "stw_locked_visual_override";
+        let selection = WorldBackendSelection::new(
+            world_id.to_owned(),
+            WorldTextBackend::Webgpt,
+            WorldVisualBackend::Webgpt,
+            "test",
+        );
+        save_world_backend_selection(Some(store.as_path()), &selection)?;
+
+        let options = host_worker_options_for_test(HostWorkerVisualBackend::None);
+        let (text_backend, visual_backend) =
+            effective_host_worker_backends(Some(store.as_path()), world_id, &options)?;
+
+        assert_eq!(text_backend, HostWorkerTextBackend::Webgpt);
+        assert_eq!(visual_backend, HostWorkerVisualBackend::None);
         Ok(())
     }
 
@@ -1182,6 +1194,28 @@ mod tests {
                 register_policy: "turn_cg".to_owned(),
             },
             claim_path: "/tmp/singulari-world-test-claim.json".to_owned(),
+        }
+    }
+
+    fn host_worker_options_for_test(visual_backend: HostWorkerVisualBackend) -> HostWorkerOptions {
+        HostWorkerOptions {
+            interval_ms: 750,
+            once: true,
+            text_backend: HostWorkerTextBackend::Webgpt,
+            visual_backend,
+            webgpt_turn_command: None,
+            webgpt_mcp_wrapper: Some("/definitely/missing/webgpt-mcp.sh".into()),
+            webgpt_model: None,
+            webgpt_reasoning_level: None,
+            webgpt_text_profile_dir: Some("/tmp/singulari-webgpt-test-text".into()),
+            webgpt_image_profile_dir: Some("/tmp/singulari-webgpt-test-image".into()),
+            webgpt_reference_image_profile_dir: Some(
+                "/tmp/singulari-webgpt-test-reference-image".into(),
+            ),
+            webgpt_text_cdp_port: DEFAULT_WEBGPT_TEXT_CDP_PORT,
+            webgpt_image_cdp_port: DEFAULT_WEBGPT_IMAGE_CDP_PORT,
+            webgpt_reference_image_cdp_port: DEFAULT_WEBGPT_REFERENCE_IMAGE_CDP_PORT,
+            webgpt_timeout_secs: 900,
         }
     }
 

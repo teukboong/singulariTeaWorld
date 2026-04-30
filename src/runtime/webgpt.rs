@@ -242,12 +242,6 @@ pub(super) fn dispatch_pending_agent_turn_via_webgpt(
     fs::create_dir_all(&dispatch_dir)
         .with_context(|| format!("failed to create {}", dispatch_dir.display()))?;
     let record_path = dispatch_dir.join(format!("{}-webgpt.json", pending.turn_id));
-    if record_path.exists() && !existing_dispatch_is_retryable(record_path.as_path())? {
-        return Ok(WebGptDispatchOutcome::AlreadyDispatched(
-            record_path.display().to_string(),
-        ));
-    }
-
     let prompt_path = dispatch_dir.join(format!("{}-webgpt-prompt.md", pending.turn_id));
     let prompt_context_path =
         dispatch_dir.join(format!("{}-webgpt-prompt-context.json", pending.turn_id));
@@ -268,10 +262,7 @@ pub(super) fn dispatch_pending_agent_turn_via_webgpt(
         dispatch_dir.join(format!("{}-webgpt-repair-1-stdout.log", pending.turn_id));
     let repair_stderr_path =
         dispatch_dir.join(format!("{}-webgpt-repair-1-stderr.log", pending.turn_id));
-    let prompt_artifacts =
-        write_webgpt_prompt_artifacts(store_root, pending, &prompt_context_path, &prompt_path)?;
     let dispatcher = resolve_webgpt_dispatcher(store_root, pending, options)?;
-
     let paths = WebGptTurnPaths {
         world_id: pending.world_id.as_str(),
         turn_id: pending.turn_id.as_str(),
@@ -282,6 +273,31 @@ pub(super) fn dispatch_pending_agent_turn_via_webgpt(
         stdout_path: stdout_path.as_path(),
         stderr_path: stderr_path.as_path(),
     };
+
+    if record_path.exists() {
+        if let Some(record) = try_commit_existing_webgpt_response(ExistingWebGptResponseInput {
+            store_root,
+            pending,
+            dispatcher: &dispatcher,
+            record_path: record_path.as_path(),
+            base_paths: paths,
+            repair_prompt_path: repair_prompt_path.as_path(),
+            repair_response_path: repair_response_path.as_path(),
+            repair_result_path: repair_result_path.as_path(),
+            repair_stdout_path: repair_stdout_path.as_path(),
+            repair_stderr_path: repair_stderr_path.as_path(),
+        })? {
+            return Ok(WebGptDispatchOutcome::Started(Box::new(record)));
+        }
+        if !existing_dispatch_is_retryable(record_path.as_path())? {
+            return Ok(WebGptDispatchOutcome::AlreadyDispatched(
+                record_path.display().to_string(),
+            ));
+        }
+    }
+
+    let prompt_artifacts =
+        write_webgpt_prompt_artifacts(store_root, pending, &prompt_context_path, &prompt_path)?;
     let dispatched_at = Utc::now();
     let claim = webgpt_dispatch_claim(
         pending,
@@ -395,6 +411,170 @@ pub(super) fn dispatch_pending_agent_turn_via_webgpt(
         record.error.clone(),
     )?;
     Ok(WebGptDispatchOutcome::Started(Box::new(record)))
+}
+
+#[derive(Clone, Copy)]
+struct ExistingWebGptResponseInput<'a> {
+    store_root: Option<&'a Path>,
+    pending: &'a singulari_world::PendingAgentTurn,
+    dispatcher: &'a WebGptDispatcher,
+    record_path: &'a Path,
+    base_paths: WebGptTurnPaths<'a>,
+    repair_prompt_path: &'a Path,
+    repair_response_path: &'a Path,
+    repair_result_path: &'a Path,
+    repair_stdout_path: &'a Path,
+    repair_stderr_path: &'a Path,
+}
+
+fn try_commit_existing_webgpt_response(
+    input: ExistingWebGptResponseInput<'_>,
+) -> Result<Option<WebGptDispatchRecord>> {
+    let Some(existing) = read_json_value_if_present(input.record_path)? else {
+        return Ok(None);
+    };
+    let status = existing.get("status").and_then(Value::as_str);
+    let retryable_dispatching =
+        matches!(status, Some("dispatching")) && dispatch_record_is_stale(&existing)?;
+    let retryable_commit_failed = matches!(status, Some("commit_failed"))
+        && existing
+            .get("repair_attempts")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            == 0;
+    if !retryable_dispatching && !retryable_commit_failed {
+        return Ok(None);
+    }
+
+    let Some((paths, repair)) = select_existing_webgpt_response_paths(input) else {
+        return Ok(None);
+    };
+
+    let dispatch_result = existing_webgpt_dispatch_result(&existing);
+    let commit_result = commit_webgpt_dispatch_if_success(
+        input.store_root,
+        input.pending,
+        paths.response_path,
+        &dispatch_result,
+    );
+    if repair.attempts == 0
+        && commit_result
+            .error
+            .as_deref()
+            .is_some_and(is_repairable_webgpt_commit_error)
+    {
+        return Ok(None);
+    }
+
+    let dispatched_at = existing_record_time(&existing, "dispatched_at").unwrap_or_else(Utc::now);
+    let mcp_completed_at =
+        existing_record_time(&existing, "mcp_completed_at").unwrap_or_else(Utc::now);
+    let prompt_bytes = existing
+        .get("prompt_bytes")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let prompt_context_bytes = existing
+        .get("prompt_context_bytes")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let record = webgpt_dispatch_record(
+        input.pending,
+        input.dispatcher,
+        paths,
+        input.record_path,
+        dispatch_result,
+        commit_result,
+        repair,
+        WebGptDispatchTiming {
+            dispatched_at,
+            mcp_completed_at,
+            prompt_bytes,
+            prompt_context_bytes,
+        },
+    );
+    fs::write(input.record_path, serde_json::to_vec_pretty(&record)?)
+        .with_context(|| format!("failed to update {}", input.record_path.display()))?;
+    write_webgpt_text_job(
+        input.store_root,
+        input.pending,
+        text_job_status_from_record(&record),
+        Some(text_job_output_ref(&record)),
+        Some(format!("webgpt:{}", input.pending.turn_id)),
+        record.error.clone(),
+    )?;
+    Ok(Some(record))
+}
+
+fn select_existing_webgpt_response_paths(
+    input: ExistingWebGptResponseInput<'_>,
+) -> Option<(WebGptTurnPaths<'_>, WebGptRepairRecord)> {
+    if input.repair_response_path.is_file() {
+        return Some((
+            WebGptTurnPaths {
+                world_id: input.pending.world_id.as_str(),
+                turn_id: input.pending.turn_id.as_str(),
+                prompt_path: input.repair_prompt_path,
+                prompt_context_path: input.base_paths.prompt_context_path,
+                response_path: input.repair_response_path,
+                result_path: input.repair_result_path,
+                stdout_path: input.repair_stdout_path,
+                stderr_path: input.repair_stderr_path,
+            },
+            WebGptRepairRecord {
+                attempts: 1,
+                prompt_path: Some(input.repair_prompt_path.display().to_string()),
+                response_path: Some(input.repair_response_path.display().to_string()),
+            },
+        ));
+    }
+    input.base_paths.response_path.is_file().then_some((
+        input.base_paths,
+        WebGptRepairRecord {
+            attempts: 0,
+            prompt_path: None,
+            response_path: None,
+        },
+    ))
+}
+
+fn existing_webgpt_dispatch_result(existing: &Value) -> WebGptDispatchResult {
+    WebGptDispatchResult {
+        success: true,
+        pid: json_u32_field(existing, "pid"),
+        exit_code: existing
+            .get("exit_code")
+            .and_then(Value::as_i64)
+            .and_then(|value| i32::try_from(value).ok()),
+        raw_conversation_id: existing
+            .get("raw_conversation_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        current_model: existing
+            .get("current_model")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        current_reasoning_level: existing
+            .get("current_reasoning_level")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        error: None,
+    }
+}
+
+fn json_u32_field(value: &Value, key: &str) -> u32 {
+    value
+        .get(key)
+        .and_then(Value::as_u64)
+        .and_then(|raw| u32::try_from(raw).ok())
+        .unwrap_or(0)
+}
+
+fn existing_record_time(value: &Value, key: &str) -> Option<DateTime<Utc>> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .and_then(|raw| DateTime::parse_from_rfc3339(raw).ok())
+        .map(|value| value.with_timezone(&Utc))
 }
 
 struct WebGptPromptArtifacts {
@@ -679,7 +859,7 @@ fn commit_webgpt_dispatch_if_success(
         Err(error) => WebGptCommitResult {
             status: "commit_failed".to_owned(),
             committed: None,
-            error: Some(error.to_string()),
+            error: Some(format!("{error:#}")),
         },
     }
 }
@@ -1634,13 +1814,469 @@ fn commit_webgpt_agent_response(
 ) -> Result<singulari_world::CommittedAgentTurn> {
     let raw_body = fs::read_to_string(response_path)
         .with_context(|| format!("failed to read {}", response_path.display()))?;
-    let response = serde_json::from_str::<AgentTurnResponse>(&raw_body)
-        .with_context(|| format!("failed to parse {}", response_path.display()))?;
+    let response = parse_webgpt_agent_turn_response(store_root, pending, &raw_body, response_path)?;
     commit_agent_turn(&AgentCommitTurnOptions {
         store_root: store_root.map(Path::to_path_buf),
         world_id: pending.world_id.clone(),
         response,
     })
+}
+
+fn parse_webgpt_agent_turn_response(
+    store_root: Option<&Path>,
+    pending: &singulari_world::PendingAgentTurn,
+    raw_body: &str,
+    response_path: &Path,
+) -> Result<AgentTurnResponse> {
+    let mut value = serde_json::from_str::<Value>(raw_body)
+        .with_context(|| format!("failed to parse {}", response_path.display()))?;
+    let reference_aliases = webgpt_reference_aliases(store_root, pending);
+    normalize_webgpt_agent_turn_response(&mut value, &reference_aliases);
+    serde_json::from_value::<AgentTurnResponse>(value)
+        .with_context(|| format!("failed to parse {}", response_path.display()))
+}
+
+fn webgpt_reference_aliases(
+    store_root: Option<&Path>,
+    pending: &singulari_world::PendingAgentTurn,
+) -> HashMap<String, String> {
+    let Ok(prompt_context) = compile_prompt_context_packet(&CompilePromptContextPacketOptions {
+        store_root,
+        pending,
+        engine_session_kind: "webgpt_project_session",
+    }) else {
+        return HashMap::new();
+    };
+    prompt_context
+        .pre_turn_simulation
+        .available_affordances
+        .into_iter()
+        .flat_map(|affordance| {
+            let canonical = affordance.affordance_id;
+            let aliases = [
+                canonical.replace(":___:", "::"),
+                canonical.replace(":__:", "::"),
+            ];
+            aliases
+                .into_iter()
+                .filter(|alias| alias != &canonical)
+                .map(|alias| (alias, canonical.clone()))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn normalize_webgpt_agent_turn_response(
+    value: &mut Value,
+    reference_aliases: &HashMap<String, String>,
+) {
+    normalize_reference_values(value, reference_aliases);
+    let choice_seeds = collect_webgpt_choice_seeds(value);
+    let Some(response) = value.as_object_mut() else {
+        return;
+    };
+    normalize_visible_scene(response);
+    let Some(resolution) = response
+        .get_mut("resolution_proposal")
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+
+    if let Some(intent) = resolution
+        .get_mut("interpreted_intent")
+        .and_then(Value::as_object_mut)
+    {
+        normalize_string_enum_field(intent, "input_kind", normalize_action_input_kind);
+        normalize_string_enum_field(intent, "ambiguity", normalize_action_ambiguity);
+    }
+    if let Some(outcome) = resolution.get_mut("outcome").and_then(Value::as_object_mut) {
+        normalize_string_enum_field(outcome, "kind", normalize_resolution_outcome_kind);
+    }
+    normalize_gate_results(resolution);
+    normalize_proposed_effects(resolution);
+    normalize_choice_plan(resolution, &choice_seeds);
+    normalize_plot_thread_events(response);
+    normalize_scene_pressure_events(response);
+    normalize_location_events(response);
+}
+
+fn normalize_visible_scene(response: &mut serde_json::Map<String, Value>) {
+    let Some(scene) = response
+        .get_mut("visible_scene")
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    if let Some(note) = scene.get("tone_notes").and_then(Value::as_str) {
+        scene.insert(
+            "tone_notes".to_owned(),
+            Value::Array(vec![Value::String(note.to_owned())]),
+        );
+    }
+}
+
+fn normalize_reference_values(value: &mut Value, reference_aliases: &HashMap<String, String>) {
+    match value {
+        Value::String(text) => {
+            if let Some(canonical) = reference_aliases.get(text.as_str()) {
+                text.clone_from(canonical);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                normalize_reference_values(item, reference_aliases);
+            }
+        }
+        Value::Object(map) => {
+            for child in map.values_mut() {
+                normalize_reference_values(child, reference_aliases);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
+fn collect_webgpt_choice_seeds(value: &Value) -> HashMap<u8, (String, String)> {
+    value
+        .get("next_choices")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|choice| {
+            let slot = u8::try_from(choice.get("slot")?.as_u64()?).ok()?;
+            let tag = choice
+                .get("tag")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let intent = choice
+                .get("intent")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            Some((slot, (tag, intent)))
+        })
+        .collect()
+}
+
+fn normalize_gate_results(resolution: &mut serde_json::Map<String, Value>) {
+    let Some(gates) = resolution
+        .get_mut("gate_results")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    for gate in gates {
+        let Some(gate) = gate.as_object_mut() else {
+            continue;
+        };
+        if !gate.contains_key("gate_kind") {
+            let inferred = gate
+                .get("gate_ref")
+                .and_then(Value::as_str)
+                .map_or("knowledge", infer_gate_kind);
+            gate.insert("gate_kind".to_owned(), Value::String(inferred.to_owned()));
+        }
+        ensure_string_field(gate, "visibility", "player_visible");
+        if !gate.contains_key("status") {
+            let status = if gate.get("passed").and_then(Value::as_bool) == Some(false) {
+                "blocked"
+            } else {
+                "passed"
+            };
+            gate.insert("status".to_owned(), Value::String(status.to_owned()));
+        }
+        if !gate.contains_key("reason") {
+            let reason = gate
+                .get("summary")
+                .and_then(Value::as_str)
+                .unwrap_or("gate evaluated");
+            gate.insert("reason".to_owned(), Value::String(reason.to_owned()));
+        }
+    }
+}
+
+fn normalize_proposed_effects(resolution: &mut serde_json::Map<String, Value>) {
+    let Some(effects) = resolution
+        .get_mut("proposed_effects")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    for effect in effects {
+        let Some(effect) = effect.as_object_mut() else {
+            continue;
+        };
+        if !effect.contains_key("effect_kind") {
+            let inferred = effect
+                .get("kind")
+                .and_then(Value::as_str)
+                .map_or("scene_pressure_delta", infer_effect_kind);
+            effect.insert("effect_kind".to_owned(), Value::String(inferred.to_owned()));
+        }
+        ensure_string_field(effect, "visibility", "player_visible");
+    }
+}
+
+fn normalize_choice_plan(
+    resolution: &mut serde_json::Map<String, Value>,
+    choice_seeds: &HashMap<u8, (String, String)>,
+) {
+    let Some(choices) = resolution
+        .get_mut("next_choice_plan")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    for choice in choices {
+        let Some(choice) = choice.as_object_mut() else {
+            continue;
+        };
+        let slot = choice
+            .get("slot")
+            .and_then(Value::as_u64)
+            .and_then(|value| u8::try_from(value).ok())
+            .unwrap_or(0);
+        if !choice.contains_key("plan_kind") {
+            let plan_kind = choice.get("kind").and_then(Value::as_str).map_or_else(
+                || match slot {
+                    6 => "freeform",
+                    7 => "delegated_judgment",
+                    _ => "ordinary_affordance",
+                },
+                normalize_choice_plan_kind,
+            );
+            choice.insert("plan_kind".to_owned(), Value::String(plan_kind.to_owned()));
+        }
+        if !choice.contains_key("label_seed") {
+            let label = choice_seeds
+                .get(&slot)
+                .map_or("행동", |(tag, _)| tag.as_str());
+            choice.insert("label_seed".to_owned(), Value::String(label.to_owned()));
+        }
+        if !choice.contains_key("intent_seed") {
+            let intent = choice
+                .get("summary")
+                .and_then(Value::as_str)
+                .or_else(|| choice_seeds.get(&slot).map(|(_, intent)| intent.as_str()))
+                .unwrap_or("다음 행동을 정한다.");
+            choice.insert("intent_seed".to_owned(), Value::String(intent.to_owned()));
+        }
+    }
+}
+
+fn normalize_plot_thread_events(response: &mut serde_json::Map<String, Value>) {
+    let Some(events) = response
+        .get_mut("plot_thread_events")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    for event in events {
+        let Some(event) = event.as_object_mut() else {
+            continue;
+        };
+        move_string_field(event, "thread_ref", "thread_id");
+        if !event.contains_key("change") {
+            let change = event
+                .get("kind")
+                .and_then(Value::as_str)
+                .map_or("advanced", normalize_plot_thread_change);
+            event.insert("change".to_owned(), Value::String(change.to_owned()));
+        }
+        ensure_string_field(event, "status_after", "active");
+        ensure_string_field(event, "urgency_after", "soon");
+    }
+}
+
+fn normalize_scene_pressure_events(response: &mut serde_json::Map<String, Value>) {
+    let Some(events) = response
+        .get_mut("scene_pressure_events")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    for event in events {
+        let Some(event) = event.as_object_mut() else {
+            continue;
+        };
+        move_string_field(event, "pressure_ref", "pressure_id");
+        if !event.contains_key("change") {
+            let change = event
+                .get("kind")
+                .and_then(Value::as_str)
+                .map_or("redirected", normalize_scene_pressure_change);
+            event.insert("change".to_owned(), Value::String(change.to_owned()));
+        }
+        if !event.contains_key("intensity_after") {
+            event.insert("intensity_after".to_owned(), Value::Number(2.into()));
+        }
+        ensure_string_field(event, "urgency_after", "soon");
+    }
+}
+
+fn normalize_location_events(response: &mut serde_json::Map<String, Value>) {
+    let Some(events) = response
+        .get_mut("location_events")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    for event in events {
+        let Some(event) = event.as_object_mut() else {
+            continue;
+        };
+        move_string_field(event, "target_ref", "location_id");
+        if !event.contains_key("event_kind") {
+            let kind = event
+                .get("kind")
+                .and_then(Value::as_str)
+                .map_or("visited", normalize_location_event_kind);
+            event.insert("event_kind".to_owned(), Value::String(kind.to_owned()));
+        }
+        ensure_string_field(event, "name", "미정");
+        ensure_string_field(event, "knowledge_state", "visited");
+    }
+}
+
+fn ensure_string_field(map: &mut serde_json::Map<String, Value>, key: &str, value: &str) {
+    map.entry(key.to_owned())
+        .or_insert_with(|| Value::String(value.to_owned()));
+}
+
+fn move_string_field(map: &mut serde_json::Map<String, Value>, from: &str, to: &str) {
+    if map.contains_key(to) {
+        return;
+    }
+    if let Some(value) = map.get(from).and_then(Value::as_str) {
+        map.insert(to.to_owned(), Value::String(value.to_owned()));
+    }
+}
+
+fn normalize_string_enum_field(
+    map: &mut serde_json::Map<String, Value>,
+    key: &str,
+    normalize: fn(&str) -> &'static str,
+) {
+    let Some(current) = map.get(key).and_then(Value::as_str) else {
+        return;
+    };
+    map.insert(key.to_owned(), Value::String(normalize(current).to_owned()));
+}
+
+fn normalize_action_input_kind(value: &str) -> &'static str {
+    match value {
+        "presented_choice" | "numeric_choice" | "macro_time_flow" | "cc_canvas" => {
+            "presented_choice"
+        }
+        "delegated_judgment" | "guide_choice" => "delegated_judgment",
+        "codex_query" => "codex_query",
+        _ => "freeform",
+    }
+}
+
+fn normalize_action_ambiguity(value: &str) -> &'static str {
+    match value {
+        "clear" => "clear",
+        "high" => "high",
+        _ => "minor",
+    }
+}
+
+fn normalize_resolution_outcome_kind(value: &str) -> &'static str {
+    match value {
+        "success" => "success",
+        "partial_success" => "partial_success",
+        "blocked" => "blocked",
+        "costly_success" => "costly_success",
+        "delayed" => "delayed",
+        "escalated" => "escalated",
+        other if other.contains("blocked") || other.contains("failed") => "blocked",
+        other if other.contains("delay") => "delayed",
+        other if other.contains("cost") => "costly_success",
+        _ => "success",
+    }
+}
+
+fn infer_gate_kind(value: &str) -> &'static str {
+    if value.contains("body") {
+        "body"
+    } else if value.contains("resource") {
+        "resource"
+    } else if value.contains("location") || value.contains("place") {
+        "location"
+    } else if value.contains("social") {
+        "social_permission"
+    } else if value.contains("time") {
+        "time_pressure"
+    } else if value.contains("hidden") {
+        "hidden_constraint"
+    } else if value.contains("affordance") {
+        "affordance"
+    } else {
+        "knowledge"
+    }
+}
+
+fn infer_effect_kind(value: &str) -> &'static str {
+    if value.contains("body") || value.contains("resource") {
+        "body_resource_delta"
+    } else if value.contains("location") || value.contains("place") {
+        "location_delta"
+    } else if value.contains("relationship") {
+        "relationship_delta"
+    } else if value.contains("belief") || value.contains("question") {
+        "belief_delta"
+    } else if value.contains("world_lore") || value.contains("lore") {
+        "world_lore_delta"
+    } else if value.contains("pattern") {
+        "pattern_debt"
+    } else if value.contains("intent") {
+        "player_intent_trace"
+    } else {
+        "scene_pressure_delta"
+    }
+}
+
+fn normalize_choice_plan_kind(value: &str) -> &'static str {
+    match value {
+        "freeform" => "freeform",
+        "delegated_judgment" | "guide_choice" => "delegated_judgment",
+        _ => "ordinary_affordance",
+    }
+}
+
+fn normalize_plot_thread_change(value: &str) -> &'static str {
+    match value {
+        "complicated" => "complicated",
+        "softened" | "preserve" | "preserved" => "softened",
+        "blocked" => "blocked",
+        "resolved" => "resolved",
+        "failed" => "failed",
+        "retired" => "retired",
+        _ => "advanced",
+    }
+}
+
+fn normalize_scene_pressure_change(value: &str) -> &'static str {
+    match value {
+        "surfaced" => "surfaced",
+        "increased" => "increased",
+        "softened" => "softened",
+        "resolved" => "resolved",
+        _ => "redirected",
+    }
+}
+
+fn normalize_location_event_kind(value: &str) -> &'static str {
+    match value {
+        "discovered" => "discovered",
+        "route_opened" => "route_opened",
+        "route_blocked" => "route_blocked",
+        "visited" | "establish_visible" | "established" => "visited",
+        _ => "updated",
+    }
 }
 
 fn read_json_value_if_present(path: &Path) -> Result<Option<serde_json::Value>> {
@@ -1693,9 +2329,15 @@ pub(super) fn existing_dispatch_is_retryable(path: &Path) -> Result<bool> {
         .get("error")
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
+    let repair_attempts = value
+        .get("repair_attempts")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
     Ok(matches!(status, Some("failed"))
         || (matches!(status, Some("dispatching")) && dispatch_record_is_stale(&value)?)
-        || (matches!(status, Some("commit_failed")) && is_repairable_webgpt_commit_error(error)))
+        || (matches!(status, Some("commit_failed"))
+            && repair_attempts == 0
+            && is_repairable_webgpt_commit_error(error)))
 }
 
 fn dispatch_record_is_stale(value: &serde_json::Value) -> Result<bool> {
@@ -1832,6 +2474,25 @@ mod tests {
         )?;
 
         assert!(existing_dispatch_is_retryable(&path)?);
+        Ok(())
+    }
+
+    #[test]
+    fn repaired_commit_failures_are_not_reprompted() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("turn_0002-webgpt.json");
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema_version": "singulari.webgpt_dispatch_record.v1",
+                "status": "commit_failed",
+                "turn_id": "turn_0002",
+                "repair_attempts": 1,
+                "error": "failed to parse /tmp/turn_0002-webgpt-agent-response.json: unknown variant `freeform_action`",
+            }))?,
+        )?;
+
+        assert!(!existing_dispatch_is_retryable(&path)?);
         Ok(())
     }
 

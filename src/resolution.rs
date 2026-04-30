@@ -49,8 +49,15 @@ pub struct ActionIntent {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionInputKind {
+    #[serde(
+        alias = "numeric_choice",
+        alias = "macro_time_flow",
+        alias = "cc_canvas"
+    )]
     PresentedChoice,
+    #[serde(alias = "freeform_action")]
     Freeform,
+    #[serde(alias = "guide_choice")]
     DelegatedJudgment,
     CodexQuery,
 }
@@ -819,6 +826,7 @@ fn collect_visible_refs(context: &PromptContextPacket) -> Result<BTreeSet<String
 
     collect_string_refs_from_value(&visible.known_facts, &mut refs);
     collect_string_refs_from_value(&visible.active_plot_threads, &mut refs);
+    collect_string_refs_from_value(&visible.active_scene_director, &mut refs);
     collect_string_refs_from_value(&visible.selected_context_capsules, &mut refs);
     collect_string_refs_from_value(&visible.selected_memory_items, &mut refs);
     insert_visible_ref_aliases(&mut refs);
@@ -1057,6 +1065,23 @@ mod tests {
     };
     use serde::Serialize;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn action_input_kind_accepts_runtime_input_aliases() -> anyhow::Result<()> {
+        assert_eq!(
+            serde_json::from_str::<ActionInputKind>(r#""freeform_action""#)?,
+            ActionInputKind::Freeform
+        );
+        assert_eq!(
+            serde_json::from_str::<ActionInputKind>(r#""numeric_choice""#)?,
+            ActionInputKind::PresentedChoice
+        );
+        assert_eq!(
+            serde_json::from_str::<ActionInputKind>(r#""guide_choice""#)?,
+            ActionInputKind::DelegatedJudgment
+        );
+        Ok(())
+    }
 
     #[test]
     fn accepts_grounded_llm_resolution_proposal() {

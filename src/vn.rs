@@ -24,7 +24,6 @@ use crate::visual_assets::{
     VisualBudgetPolicy, WorldVisualAssets, build_world_visual_assets, compile_turn_visual_prompt,
     visual_generation_job,
 };
-use crate::world_db::sync_world_db_materialized_projections;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -248,11 +247,6 @@ pub fn build_vn_packet(options: &BuildVnPacketOptions) -> Result<VnPacket> {
     let _existing_visual_asset_graph =
         load_visual_asset_graph_state(&files.dir, compiled_visual_asset_graph.clone())?;
     let visual_asset_graph = rebuild_visual_asset_graph(&files.dir, &compiled_visual_asset_graph)?;
-    sync_world_db_materialized_projections(
-        &files.dir,
-        world.world_id.as_str(),
-        chrono::Utc::now().to_rfc3339().as_str(),
-    )?;
     let turn_visual_prompt = compile_turn_visual_prompt(&world, &render_packet, &visual_assets);
     let turn_cg_job = if turn_cg_decision.requested && (!turn_cg_exists || retry_requested) {
         Some(turn_cg_image_generation_job(
@@ -1598,9 +1592,6 @@ premise:
                 .join(crate::visual_asset_graph::VISUAL_ASSET_GRAPH_FILENAME)
                 .is_file()
         );
-        let world_dir = store.join("worlds").join("stw_vn_packet");
-        let stats = crate::world_db::world_db_stats(&world_dir, "stw_vn_packet")?;
-        assert!(stats.materialized_projections >= 1);
         assert!(packet.image.image_prompt.contains("Scene narrative"));
         assert!(
             packet
