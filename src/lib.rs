@@ -449,7 +449,7 @@ pub use vn::{
     BuildVnPacketOptions, VN_PACKET_SCHEMA_VERSION, VnAdjudication, VnChoice, VnHiddenFilter,
     VnPacket, VnScene, VnSceneImage, build_vn_packet,
 };
-pub use vn_server::{VnChooseRequest, VnServeOptions, serve_vn};
+pub use vn_server::{VnChooseRequest, VnExposureMode, VnServeOptions, serve_vn};
 pub use voice_anchor::{
     ApplyCharacterAnchorOptions, CharacterAnchorReport, apply_character_anchor,
 };

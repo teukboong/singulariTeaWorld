@@ -178,11 +178,14 @@ Tailscale address or hostname:
 ```bash
 cargo run --locked --bin singulari-world -- vn-serve \
   --host <tailscale-ip-or-hostname> \
-  --port 4177
+  --port 4177 \
+  --trusted-tailnet
 ```
 
-The VN server is intentionally not a general LAN server. Loopback and Tailscale
-are allowed; `0.0.0.0` and normal LAN addresses should fail closed.
+The VN server is intentionally not a general LAN server. Default exposure is
+loopback-only. `--trusted-tailnet` explicitly opts into Tailscale phone play and
+assumes tailnet peers can read `/app.js` and recover the CSRF token; `0.0.0.0`
+and normal LAN addresses should fail closed.
 
 ## Background Worker Contract
 

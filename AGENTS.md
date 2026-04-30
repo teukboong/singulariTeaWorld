@@ -164,11 +164,14 @@ address or hostname:
 ```bash
 target/release/singulari-world --store-root .world-store vn-serve \
   --host <tailscale-ip-or-hostname> \
-  --port 4177
+  --port 4177 \
+  --trusted-tailnet
 ```
 
-Do not bind the VN server to `0.0.0.0` for convenience. The server allowlist is
-loopback plus Tailscale, so normal LAN exposure should fail closed.
+Do not bind the VN server to `0.0.0.0` for convenience. Default VN exposure is
+loopback-only. `--trusted-tailnet` is an explicit trust decision for Tailscale
+peers; the injected VN token is a CSRF guard, not network authentication.
+Normal LAN exposure should fail closed.
 
 Use a specific store:
 

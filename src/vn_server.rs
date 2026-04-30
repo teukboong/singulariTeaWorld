@@ -77,6 +77,7 @@ pub struct VnServeOptions {
     pub world_id: Option<String>,
     pub host: String,
     pub port: u16,
+    pub exposure: VnExposureMode,
 }
 
 impl VnServeOptions {
@@ -87,6 +88,24 @@ impl VnServeOptions {
             world_id,
             host: DEFAULT_HOST.to_owned(),
             port,
+            exposure: VnExposureMode::LocalOnly,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum VnExposureMode {
+    #[default]
+    LocalOnly,
+    TrustedTailnet,
+}
+
+impl VnExposureMode {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::LocalOnly => "local-only",
+            Self::TrustedTailnet => "trusted-tailnet",
         }
     }
 }
@@ -337,9 +356,9 @@ struct HttpResponse {
 /// # Errors
 ///
 /// Returns an error when an explicit world cannot be resolved, the host is not
-/// loopback/Tailscale-scoped, or the TCP listener cannot bind.
+/// allowed by the selected exposure mode, or the TCP listener cannot bind.
 pub fn serve_vn(options: &VnServeOptions) -> Result<()> {
-    ensure_allowed_vn_host(options.host.as_str())?;
+    ensure_allowed_vn_host(options.host.as_str(), options.exposure)?;
     let world_id = initial_vn_world_id(options)?;
     let state = VnServerState {
         store_root: options.store_root.clone(),
@@ -352,6 +371,11 @@ pub fn serve_vn(options: &VnServeOptions) -> Result<()> {
     let listener = TcpListener::bind(bind_addr.as_str())
         .with_context(|| format!("vn server bind failed: {bind_addr}"))?;
     println!("vn server: http://{bind_addr}/");
+    println!(
+        "exposure: {} ({})",
+        options.exposure.label(),
+        vn_exposure_warning(options.exposure)
+    );
     match state.world_id() {
         Ok(world_id) => println!("world: {world_id}"),
         Err(_) => println!("world: <none>"),
@@ -1884,20 +1908,43 @@ fn is_inline_freeform(input: &str) -> bool {
     !action.is_empty()
 }
 
-fn ensure_allowed_vn_host(host: &str) -> Result<()> {
-    if matches!(host, "127.0.0.1" | "localhost") {
+fn ensure_allowed_vn_host(host: &str, exposure: VnExposureMode) -> Result<()> {
+    if is_loopback_vn_host(host) {
         return Ok(());
     }
-    if host.ends_with(".ts.net") {
-        return Ok(());
+    if is_tailscale_vn_host(host) {
+        return match exposure {
+            VnExposureMode::TrustedTailnet => Ok(()),
+            VnExposureMode::LocalOnly => {
+                bail!(
+                    "vn server Tailscale host requires --trusted-tailnet because the injected VN token is CSRF-only, not network authentication: host={host}"
+                )
+            }
+        };
     }
-    if host
-        .parse::<IpAddr>()
-        .is_ok_and(|addr| addr.is_loopback() || is_tailscale_ipv4(addr))
-    {
-        return Ok(());
+    bail!(
+        "vn server host must be loopback by default or Tailscale with --trusted-tailnet: got {host}"
+    );
+}
+
+fn is_loopback_vn_host(host: &str) -> bool {
+    matches!(host, "127.0.0.1" | "localhost")
+        || host.parse::<IpAddr>().is_ok_and(|addr| addr.is_loopback())
+}
+
+fn is_tailscale_vn_host(host: &str) -> bool {
+    host.ends_with(".ts.net") || host.parse::<IpAddr>().is_ok_and(is_tailscale_ipv4)
+}
+
+const fn vn_exposure_warning(exposure: VnExposureMode) -> &'static str {
+    match exposure {
+        VnExposureMode::LocalOnly => {
+            "loopback only; the browser token protects local POSTs from blind CSRF"
+        }
+        VnExposureMode::TrustedTailnet => {
+            "trusted tailnet peers can read /app.js and recover the CSRF token"
+        }
     }
-    bail!("vn server host must be loopback or Tailscale-scoped: got {host}");
 }
 
 fn configure_vn_stream(stream: &TcpStream) -> Result<()> {
@@ -2082,12 +2129,12 @@ fn choose_request_body(input: &str) -> Vec<u8> {
 mod tests {
     use super::HttpRequest;
     use super::{
-        DEFAULT_HOST, VN_TOKEN_HEADER, VnAgentPendingResponse, VnCgRetryRequest, VnNewWorldRequest,
-        VnSaveWorldResponse, VnServeOptions, VnServerState, VnWorldSwitchResponse, app_js_response,
-        cg_gallery, cg_retry_response, choose_request_body, choose_response,
-        ensure_allowed_vn_host, initial_vn_world_id, load_request_body, load_world_response,
-        new_world, read_world_asset, repair_world_db_response, route_request, runtime_status,
-        save_request_body, save_world_response, validate_vn_input, world_list,
+        DEFAULT_HOST, VN_TOKEN_HEADER, VnAgentPendingResponse, VnCgRetryRequest, VnExposureMode,
+        VnNewWorldRequest, VnSaveWorldResponse, VnServeOptions, VnServerState,
+        VnWorldSwitchResponse, app_js_response, cg_gallery, cg_retry_response, choose_request_body,
+        choose_response, ensure_allowed_vn_host, initial_vn_world_id, load_request_body,
+        load_world_response, new_world, read_world_asset, repair_world_db_response, route_request,
+        runtime_status, save_request_body, save_world_response, validate_vn_input, world_list,
     };
     use crate::backend_selection::{WorldTextBackend, WorldVisualBackend};
     use crate::job_ledger::{WorldJobKind, WorldJobStatus};
@@ -2152,14 +2199,19 @@ mod tests {
     }
 
     #[test]
-    fn vn_host_allows_loopback_and_tailscale_only() {
-        assert!(ensure_allowed_vn_host("127.0.0.1").is_ok());
-        assert!(ensure_allowed_vn_host("localhost").is_ok());
-        assert!(ensure_allowed_vn_host("100.64.0.1").is_ok());
-        assert!(ensure_allowed_vn_host("100.127.255.255").is_ok());
-        assert!(ensure_allowed_vn_host("macbookair.tailnet.ts.net").is_ok());
-        assert!(ensure_allowed_vn_host("0.0.0.0").is_err());
-        assert!(ensure_allowed_vn_host("192.168.0.10").is_err());
+    fn vn_host_defaults_to_local_only_and_requires_trusted_tailnet_flag() {
+        assert!(ensure_allowed_vn_host("127.0.0.1", VnExposureMode::LocalOnly).is_ok());
+        assert!(ensure_allowed_vn_host("localhost", VnExposureMode::LocalOnly).is_ok());
+        assert!(ensure_allowed_vn_host("::1", VnExposureMode::LocalOnly).is_ok());
+        assert!(ensure_allowed_vn_host("100.64.0.1", VnExposureMode::LocalOnly).is_err());
+        assert!(ensure_allowed_vn_host("100.64.0.1", VnExposureMode::TrustedTailnet).is_ok());
+        assert!(ensure_allowed_vn_host("100.127.255.255", VnExposureMode::TrustedTailnet).is_ok());
+        assert!(
+            ensure_allowed_vn_host("macbookair.tailnet.ts.net", VnExposureMode::TrustedTailnet)
+                .is_ok()
+        );
+        assert!(ensure_allowed_vn_host("0.0.0.0", VnExposureMode::TrustedTailnet).is_err());
+        assert!(ensure_allowed_vn_host("192.168.0.10", VnExposureMode::TrustedTailnet).is_err());
     }
 
     #[test]
@@ -2319,6 +2371,7 @@ premise:
                 world_id: None,
                 host: DEFAULT_HOST.to_owned(),
                 port: 4188,
+                exposure: VnExposureMode::LocalOnly,
             })?),
             vn_token: "test-vn-token".to_owned(),
         };

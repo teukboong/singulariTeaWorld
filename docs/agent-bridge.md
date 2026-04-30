@@ -124,8 +124,10 @@ For Tailscale phone play:
 ```bash
 target/release/singulari-world --store-root .world-store vn-serve \
   --host <tailscale-ip-or-hostname> \
-  --port 4177
+  --port 4177 \
+  --trusted-tailnet
 ```
 
-Do not use a regular LAN bind or `0.0.0.0`; the VN server allowlist is loopback
-plus Tailscale.
+Do not use a regular LAN bind or `0.0.0.0`. The default VN exposure mode is
+loopback-only; `--trusted-tailnet` is required for Tailscale and assumes every
+peer that can fetch `/app.js` is trusted enough to read the CSRF token.

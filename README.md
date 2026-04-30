@@ -173,11 +173,14 @@ URL:
 ```bash
 target/release/singulari-world --store-root .world-store vn-serve \
   --host <tailscale-ip-or-hostname> \
-  --port 4177
+  --port 4177 \
+  --trusted-tailnet
 ```
 
-The VN server allowlist accepts loopback and Tailscale addresses only. Do not
-use `0.0.0.0` as a shortcut.
+The default VN exposure mode is loopback-only. `--trusted-tailnet` is required
+for Tailscale binds because the injected `X-Singulari-VN-Token` only protects
+against blind CSRF; any peer that can fetch `/app.js` can read that token. Do
+not use `0.0.0.0` or regular LAN addresses as a shortcut.
 
 The local Codex MCP server runs over stdio:
 

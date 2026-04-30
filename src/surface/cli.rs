@@ -18,10 +18,10 @@ use singulari_world::{
     BuildCodexViewOptions, BuildResumePackOptions, BuildVnPacketOptions,
     BuildWorldVisualAssetsOptions, ChatRouteOptions, ClaimVisualJobOptions, CodexViewSection,
     CompleteVisualJobOptions, ExportWorldOptions, ImportWorldOptions, ReleaseVisualJobClaimOptions,
-    StartWorldOptions, VnServeOptions, build_host_supervisor_plan, build_projection_health_report,
-    build_vn_packet, build_world_visual_assets, claim_visual_job, clear_world_commit_lock,
-    complete_visual_job, export_world, import_world, recover_turn_commit_journal,
-    release_visual_job_claim, serve_vn,
+    StartWorldOptions, VnExposureMode, VnServeOptions, build_host_supervisor_plan,
+    build_projection_health_report, build_vn_packet, build_world_visual_assets, claim_visual_job,
+    clear_world_commit_lock, complete_visual_job, export_world, import_world,
+    recover_turn_commit_journal, release_visual_job_claim, serve_vn,
 };
 use std::path::{Path, PathBuf};
 
@@ -141,6 +141,10 @@ enum Commands {
 
         #[arg(long, default_value_t = 4177)]
         port: u16,
+
+        /// Allow binding to a Tailscale address. This trusts tailnet peers; the VN token is CSRF-only.
+        #[arg(long)]
+        trusted_tailnet: bool,
     },
 
     /// Print world visual asset status and `image_provider` MCP jobs.
@@ -664,7 +668,8 @@ fn dispatch(cli: Cli) -> Result<()> {
             world_id,
             host,
             port,
-        } => handle_vn_serve(store_root.as_deref(), world_id, host, port)?,
+            trusted_tailnet,
+        } => handle_vn_serve(store_root.as_deref(), world_id, host, port, trusted_tailnet)?,
         Commands::VisualAssets { world_id, json } => {
             handle_visual_assets(store_root.as_deref(), world_id.as_deref(), json)?;
         }
@@ -1080,10 +1085,14 @@ fn handle_vn_serve(
     world_id: Option<String>,
     host: String,
     port: u16,
+    trusted_tailnet: bool,
 ) -> Result<()> {
     let mut options = VnServeOptions::new(world_id, port);
     options.store_root = store_root.map(Path::to_path_buf);
     options.host = host;
+    if trusted_tailnet {
+        options.exposure = VnExposureMode::TrustedTailnet;
+    }
     serve_vn(&options)
 }
 
