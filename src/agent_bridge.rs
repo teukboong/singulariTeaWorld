@@ -67,6 +67,7 @@ use crate::player_intent::{
     PlayerIntentTracePacket, append_player_intent_event_plan, load_player_intent_trace_state,
     prepare_player_intent_event_plan, rebuild_player_intent_trace,
 };
+use crate::player_surface::{concise_player_status_from_blocks, is_player_surface_safe};
 use crate::plot_thread::{
     PlotThreadEvent, PlotThreadPacket, append_plot_thread_audit, append_plot_thread_event_plan,
     compile_plot_thread_packet, load_plot_threads, prepare_plot_thread_event_plan,
@@ -1820,6 +1821,7 @@ fn apply_agent_response_to_render_packet(
     response: &AgentTurnResponse,
 ) {
     packet.narrative_scene = Some(response.visible_scene.clone());
+    let player_status = player_status_from_agent_response(response);
     if let Some(adjudication) = &response.adjudication {
         if let Some(packet_adjudication) = packet.adjudication.as_mut() {
             packet_adjudication
@@ -1840,16 +1842,28 @@ fn apply_agent_response_to_render_packet(
             .visible_state
             .dashboard
             .status
-            .clone_from(&adjudication.summary);
+            .clone_from(&player_status);
     }
     if let Some(canon_event) = &response.canon_event {
-        packet
-            .visible_state
-            .dashboard
-            .status
-            .clone_from(&canon_event.summary);
+        if is_player_surface_safe(canon_event.summary.as_str()) {
+            packet
+                .visible_state
+                .dashboard
+                .status
+                .clone_from(&canon_event.summary);
+        } else {
+            packet
+                .visible_state
+                .dashboard
+                .status
+                .clone_from(&player_status);
+        }
     }
     packet.visible_state.choices = normalize_turn_choices(&response.next_choices);
+}
+
+fn player_status_from_agent_response(response: &AgentTurnResponse) -> String {
+    concise_player_status_from_blocks(&response.visible_scene.text_blocks)
 }
 
 fn persist_agent_next_choices(

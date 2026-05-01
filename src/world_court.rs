@@ -2808,6 +2808,7 @@ mod tests {
             world_id: "stw_court".to_owned(),
             turn_id: "turn_0001".to_owned(),
             current_turn: serde_json::Value::Null,
+            world_premise: serde_json::Value::Null,
             opening_randomizer: serde_json::Value::Null,
             output_contract: serde_json::Value::Null,
             pre_turn_simulation: PreTurnSimulationPass {

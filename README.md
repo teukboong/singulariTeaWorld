@@ -23,6 +23,7 @@ Detailed operator guides:
 - [Architecture V2](docs/architecture-v2.md)
 - [Host Worker Contract](docs/host-worker.md)
 - [Agent Bridge](docs/agent-bridge.md)
+- [VN Engine Player Surface Blueprint](docs/vn-engine-player-surface-blueprint.md)
 - [Visual Canon and Budget Policy](docs/visual-canon-budget.md)
 - [Causal Simulation Upgrade Set](docs/causal-simulation-upgrade-set.md)
 

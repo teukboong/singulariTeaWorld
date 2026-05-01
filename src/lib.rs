@@ -29,6 +29,7 @@ mod models;
 mod narrative_style_state;
 mod pattern_debt;
 mod player_intent;
+mod player_surface;
 mod plot_thread;
 mod pre_turn_simulation;
 mod projection_health;
@@ -286,6 +287,10 @@ pub use player_intent::{
     PlayerIntentEventRecord, PlayerIntentPolicy, PlayerIntentTracePacket,
     append_player_intent_event_plan, load_player_intent_trace_state,
     prepare_player_intent_event_plan, rebuild_player_intent_trace,
+};
+pub use player_surface::{
+    concise_player_status, concise_player_status_from_blocks, concrete_delta_is_specific,
+    is_player_surface_safe, player_surface_forbidden_terms, sanitize_player_surface_line,
 };
 pub use plot_thread::{
     PLOT_THREAD_AUDIT_FILENAME, PLOT_THREAD_AUDIT_SCHEMA_VERSION, PLOT_THREAD_EVENT_SCHEMA_VERSION,

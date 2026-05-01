@@ -9,6 +9,10 @@ use crate::models::{
     TurnChoice, TurnLogEntry, TurnSnapshot, WorldRecord, is_guide_choice_tag,
     normalize_turn_choices, redact_guide_choice_public_hints,
 };
+use crate::player_surface::{
+    concise_player_status, concise_player_status_from_blocks, is_player_surface_safe,
+    sanitize_player_surface_line,
+};
 use crate::render::{RenderPacketLoadOptions, load_render_packet, render_packet_markdown};
 use crate::response_context::{
     AgentContextEventRecord, AgentContextProjection, load_agent_context_event_records,
@@ -127,6 +131,7 @@ pub struct VnChoice {
     pub slot: u8,
     pub tag: String,
     pub label: String,
+    pub surface_text: String,
     pub intent: String,
     pub requires_inline_text: bool,
     pub input_template: String,
@@ -691,13 +696,10 @@ fn vn_scene(
                 }
                 vec![
                     format!(
-                        "`{}`의 표면에서 장면이 열린다. 지금 확정된 변화는 세계의 장부에 남았다.",
-                        dashboard.location
+                        "{}에서 아직 말해지지 않은 장면이 숨을 고른다.",
+                        scene_location
                     ),
-                    format!(
-                        "{} 다음 장면은 아직 플레이어가 확인한 단서 안에 머문다.",
-                        dashboard.status
-                    ),
+                    "다음 행동이 정해지면 풍경도 조금 더 선명해질 것이다.".to_owned(),
                 ]
             },
             |scene| {
@@ -712,7 +714,7 @@ fn vn_scene(
     VnScene {
         location: scene_location,
         current_event: display_event(dashboard.current_event.as_str()),
-        status: redact_guide_choice_public_hints(dashboard.status.as_str()),
+        status: player_safe_scene_status(dashboard.status.as_str(), &text_blocks),
         text_blocks,
         scan_lines: scan_targets
             .iter()
@@ -725,6 +727,20 @@ fn vn_scene(
             .collect(),
         adjudication: packet.adjudication.as_ref().map(vn_adjudication),
     }
+}
+
+fn player_safe_scene_status(status: &str, text_blocks: &[String]) -> String {
+    let redacted = redact_guide_choice_public_hints(status);
+    let sanitized = sanitize_player_surface_line(redacted.as_str());
+    if !sanitized.trim().is_empty()
+        && is_player_surface_safe(sanitized.as_str())
+        && sanitized.chars().count() <= 90
+        && !sanitized.contains("schema")
+    {
+        return concise_player_status(sanitized.as_str())
+            .unwrap_or_else(|| concise_player_status_from_blocks(text_blocks));
+    }
+    concise_player_status_from_blocks(text_blocks)
 }
 
 fn player_visible_dashboard(
@@ -1491,6 +1507,15 @@ fn vn_choices(world: &WorldRecord, choices: &[TurnChoice]) -> Vec<VnChoice> {
             } else {
                 choice.slot.to_string()
             };
+            let surface_text = if requires_inline_text {
+                intent.clone()
+            } else if is_guide_choice_tag(tag.as_str()) {
+                GUIDE_CHOICE_TAG.to_owned()
+            } else if !intent.trim().is_empty() && intent != tag {
+                intent.clone()
+            } else {
+                tag.clone()
+            };
             let command_template = if requires_inline_text {
                 format!(
                     "singulari-world turn --world-id {} --input '{} <action>' --render",
@@ -1505,6 +1530,7 @@ fn vn_choices(world: &WorldRecord, choices: &[TurnChoice]) -> Vec<VnChoice> {
             VnChoice {
                 slot: choice.slot,
                 label: format!("{}. {}", choice.slot, tag),
+                surface_text,
                 tag,
                 intent,
                 requires_inline_text,
@@ -1787,6 +1813,46 @@ premise:
         assert_eq!(choice.intent, GUIDE_CHOICE_REDACTED_INTENT);
         assert!(!choice.label.contains("안내자"));
         assert!(!choice.intent.contains("안내자"));
+        Ok(())
+    }
+
+    #[test]
+    fn vn_choices_project_diegetic_surface_text() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(
+            &seed_path,
+            r#"
+schema_version: singulari.world_seed.v1
+world_id: stw_vn_surface_choice
+title: "표면 선택 세계"
+premise:
+  genre: "중세 판타지"
+  protagonist: "변경 순찰자, 남자 주인공"
+"#,
+        )?;
+        let initialized = init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store),
+            session_id: None,
+        })?;
+        let projected = super::vn_choices(
+            &initialized.world,
+            &[TurnChoice {
+                slot: 1,
+                tag: "문지기에게 다가간다".to_owned(),
+                intent: "창끝을 피해 북문 아래로 한 걸음 다가간다.".to_owned(),
+            }],
+        );
+        let Some(choice) = projected.iter().find(|choice| choice.slot == 1) else {
+            anyhow::bail!("slot 1 choice missing");
+        };
+        assert_eq!(
+            choice.surface_text,
+            "창끝을 피해 북문 아래로 한 걸음 다가간다."
+        );
+        assert_eq!(choice.label, "1. 문지기에게 다가간다");
         Ok(())
     }
 

@@ -139,6 +139,7 @@ pub(super) fn build_webgpt_turn_prompt(prompt_context: &PromptContextPacket) -> 
 - 출력량은 narrative turn packet의 output_contract.narrative_level과 narrative_budget을 따른다. 레벨 간 차이는 확연해야 한다.
 - 레벨 1은 표준 VN 밀도, 레벨 2는 장면 확장 밀도, 레벨 3은 장편 연재 밀도다. 레벨 2/3에서는 같은 사건도 감각, 행동, 반응, 여운, 압박을 더 길게 쌓는다.
 - player_input이 "세계 개막"이면 그것은 선택지가 아니라 시드에서 첫 서사를 여는 bootstrap turn이다.
+- narrative_turn_packet.world_premise는 사용자가 직접 준 player-visible 시드 앵커다. 첫 장면에서는 genre/protagonist/opening_state의 구체 명사와 장소/사물/인물 조건을 우선 보존한다.
 - narrative_turn_packet.opening_randomizer가 있으면 사용자의 시드에 덧붙은 player-visible 개막 seed로 취급한다. 그 안의 location_frame, protagonist_frame, immediate_pressure, first_visible_object, social_weather, opening_question을 첫 장면의 시작 조건으로 반영한다.
 - opening_randomizer가 없으면 사용자 시드와 visible facts만으로 시작한다. 이전 conversation 문구나 일반적인 bootstrap 기본값을 재사용하지 마라.
 - opening_randomizer는 반복 수렴을 피하기 위한 시작 조건이지, 시드에 없는 장르 장치·숨은 과거사·고정 인물 설정을 만드는 권한이 아니다.
@@ -291,7 +292,7 @@ pub(super) fn build_webgpt_turn_form_prompt(
         serde_json::to_string(turn_form).context("failed to serialize webgpt turn form spec")?;
     let narrative_budget = &output_contract.narrative_budget;
     Ok(format!(
-        r#"Singulari World pending turn 하나가 들어왔어. 너는 WebGPT turn form writer다.
+        r#"Singulari World pending turn 하나가 들어왔어. 너는 WebGPT VN scene writer다.
 
 핵심 계약:
 - AgentTurnResponse, ResolutionProposal, WorldCourt packet을 직접 쓰지 않는다.
@@ -301,12 +302,18 @@ pub(super) fn build_webgpt_turn_form_prompt(
 - pressure_movements에는 turn_form_spec.pressure_options에 있는 pressure_id만 쓴다. 없거나 이번 입력이 직접 건드리지 않으면 빈 배열로 둔다.
 - evidence_refs에는 turn_form_spec.allowed_evidence_refs에 있는 문자열만 쓴다.
 - hidden/private/adjudication-only 내용은 narrative, outcome_summary, choices에 절대 누출하지 않는다.
+- 고도화된 구조는 무대 뒤에만 둔다. 플레이어가 보는 narrative.text_blocks와 next_choices[*].surface_text는 세련된 비주얼 노벨 장면/행동 문장이어야 한다.
+- player-facing 문장에는 slot, 선택지, 판정, 처리했다, delayed, partial_success, costly_success, visible, evidence, surface, audit, contract, 메타, 플레이어, 턴, 압력, 가늠 같은 시스템 어휘를 쓰지 않는다.
+- 이번 턴은 반드시 구체 변화 하나를 만든다. actor/object/route/evidence/position/scene-exit 중 하나가 player-visible하게 달라져야 한다. 기척, 결, 흐름, 감각, 정적만 흔들리는 변화는 실패다.
+- 첫 턴은 narrative_turn_packet.world_premise의 구체 앵커를 버리지 않는다. 예를 들어 시드가 북문/문지기/빗장을 주면 장면과 선택지가 그 사물과 인물 앞에서 시작해야 한다.
 - 웹 검색, 외부 사이트 탐색, repo 탐색, 소스 파일 읽기를 하지 마라.
 
 서사 출력 지시:
 - 이번 턴 서사 목표: {level_label}. 기본 선택 턴이면 {standard_blocks}문단 / 약 {target_chars}자까지 충분히 써라.
 - narrative.text_blocks는 짧은 로그나 요약이 아니라 한국어 VN prose다.
-- 문단은 장면, 감각, 행동, 반응, 여운을 나누고, 문고리/문 앞 같은 동일 지점에서 의미 없이 빙빙 돌지 마라.
+- 문단은 장면, 감각, 행동, 반응, 여운을 나누되, 반드시 실제 사람/사물/길/증거 중 하나가 변하게 써라.
+- 선택지는 UI 기능명이 아니라 장면 속 행동 문장이다. “기록 열기”, “흐름 읽기”, “압력 가늠” 같은 말 대신 “품 안의 접힌 기록지를 꺼내 표식을 맞춰 본다”처럼 쓴다.
+- outcome_summary와 adjudication_summary는 개발자 판정문이 아니다. 플레이어에게 보여도 어색하지 않은 짧은 결과 문장으로 쓴다.
 {text_design_directive}
 
 TurnFormSubmission JSON shape:
@@ -333,8 +340,18 @@ TurnFormSubmission JSON shape:
     "tone_notes": []
   }},
   "next_choices": [
-    {{ "slot": 1, "tag": "짧은 선택 라벨", "intent": "선택하면 하려는 구체 행동" }}
+    {{
+      "slot": 1,
+      "tag": "짧은 장면 행동 라벨",
+      "intent": "내부 감독용 의미 요약. 그래도 player-facing 문장처럼 자연스럽게 쓴다.",
+      "surface_text": "버튼에 그대로 보여줄 장면 속 행동 문장"
+    }}
   ],
+  "director_notes": {{
+    "beat_type": "movement|discovery|confrontation|dialogue|cost|reveal|scene_exit",
+    "concrete_delta": "이번 턴에서 실제로 달라진 구체 actor/object/route/evidence/position",
+    "scene_exit_progress": "현재 장면의 종료조건에 가까워진 정도"
+  }},
   "adjudication_summary": "선택 optional"
 }}
 ```
@@ -444,6 +461,7 @@ fn build_narrative_turn_packet(prompt_context: &PromptContextPacket) -> Result<V
         "world_id": prompt_context.world_id,
         "turn_id": prompt_context.turn_id,
         "current_turn": prompt_context.current_turn,
+        "world_premise": prompt_context.world_premise,
         "opening_randomizer": prompt_context.opening_randomizer,
         "output_contract": prompt_context.output_contract,
         "response_contract": {

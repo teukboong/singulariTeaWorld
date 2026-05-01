@@ -36,6 +36,8 @@ pub struct PromptContextPacket {
     pub world_id: String,
     pub turn_id: String,
     pub current_turn: Value,
+    #[serde(default)]
+    pub world_premise: Value,
     pub opening_randomizer: Value,
     pub output_contract: Value,
     pub pre_turn_simulation: PreTurnSimulationPass,
@@ -265,6 +267,10 @@ pub fn assemble_prompt_context_packet(
         world_id: turn_context.world_id.clone(),
         turn_id: turn_context.turn_id.clone(),
         current_turn: required_path(source, "/current_turn")?.clone(),
+        world_premise: source
+            .pointer("/world_premise")
+            .cloned()
+            .unwrap_or(Value::Null),
         opening_randomizer: required_path(source, "/opening_randomizer")?.clone(),
         output_contract: serde_json::to_value(&output_contract)?,
         pre_turn_simulation,
@@ -726,6 +732,11 @@ mod tests {
                 "world_id": "stw_prompt",
                 "turn_id": "turn_0003",
                 "current_turn": {"player_input": "피한 눈을 살핀다"},
+                "world_premise": {
+                    "genre": "중세 변경 도시",
+                    "protagonist": "북문 앞의 순찰자",
+                    "opening_state": "문지기와 빗장 앞에서 시작한다"
+                },
                 "opening_randomizer": null,
                 "output_contract": {
                     "language": "ko",
@@ -966,6 +977,20 @@ mod tests {
                 .pre_turn_simulation
                 .required_resolution_fields
                 .resolution_proposal_required
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn prompt_context_carries_player_visible_world_premise() -> anyhow::Result<()> {
+        let context = assemble_prompt_context_packet(&sample_turn_context())?;
+
+        assert_eq!(
+            context
+                .world_premise
+                .pointer("/opening_state")
+                .and_then(serde_json::Value::as_str),
+            Some("문지기와 빗장 앞에서 시작한다")
         );
         Ok(())
     }

@@ -963,6 +963,10 @@ select {
   border-left: 2px solid transparent;
 }
 
+.choice-button-single {
+  grid-template-columns: 1fr;
+}
+
 .choice-button:hover,
 .choice-button:focus-visible,
 .freeform-row button:hover,
@@ -985,6 +989,12 @@ select {
   line-height: 1.42;
   overflow-wrap: break-word;
   word-break: keep-all;
+}
+
+.choice-button-single .choice-label {
+  color: var(--paper);
+  font-size: 0.98rem;
+  line-height: 1.58;
 }
 
 .choice-intent {

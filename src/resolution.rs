@@ -1402,6 +1402,7 @@ mod tests {
             world_id: "stw_resolution".to_owned(),
             turn_id: "turn_0004".to_owned(),
             current_turn: serde_json::json!({"player_input": "6 문지기에게 둘러댄다"}),
+            world_premise: Value::Null,
             opening_randomizer: Value::Null,
             output_contract: to_json_value(AgentOutputContract {
                 language: "ko".to_owned(),

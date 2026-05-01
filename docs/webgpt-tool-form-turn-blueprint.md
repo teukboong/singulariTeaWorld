@@ -16,6 +16,12 @@ That premise is wrong for live play. The text lane should use MCP tools as the
 input boundary. WebGPT should fill a small turn form through a connector tool,
 and Rust should assemble the canonical `AgentTurnResponse`.
 
+The form is also the player-surface boundary. WebGPT may provide director
+notes, but ordinary choice buttons and scene prose must read like diegetic VN
+text. Rust now requires a concrete visible scene delta and rejects simulator
+vocabulary before the turn can commit. The player-facing rules live in
+[`vn-engine-player-surface-blueprint.md`](vn-engine-player-surface-blueprint.md).
+
 ## Problem
 
 Current draft mode:

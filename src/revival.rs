@@ -150,6 +150,7 @@ pub fn build_agent_revival_packet(options: &AgentRevivalCompileOptions<'_>) -> R
         "world_id": pending.world_id,
         "turn_id": pending.turn_id,
         "engine_session_kind": options.engine_session_kind,
+        "world_premise": world.premise,
         "opening_randomizer": world.opening_randomizer,
         "retrieval_profile": policy,
         "current_turn": {

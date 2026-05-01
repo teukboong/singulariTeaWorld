@@ -938,8 +938,13 @@ function renderChoices(packet) {
     button.type = "button";
     button.className = "choice-button";
     button.innerHTML = `<span class="choice-label"></span><span class="choice-intent"></span>`;
-    button.querySelector(".choice-label").textContent = `${choice.slot}. ${choice.tag}`;
-    button.querySelector(".choice-intent").textContent = choice.intent;
+    const surfaceText = choice.surface_text || choice.intent || choice.tag;
+    button.querySelector(".choice-label").textContent = `${choice.slot}. ${surfaceText}`;
+    const intent = button.querySelector(".choice-intent");
+    const secondaryText = choice.intent && choice.intent !== surfaceText ? choice.intent : "";
+    intent.textContent = secondaryText;
+    intent.hidden = !secondaryText;
+    button.classList.toggle("choice-button-single", !secondaryText);
     button.addEventListener("click", () => chooseSlot(choice));
     if (choice.slot === GUIDE_CHOICE_SLOT) {
       button.classList.add("guide-choice-button");

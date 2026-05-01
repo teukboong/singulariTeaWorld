@@ -9,10 +9,11 @@ use singulari_world::{
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fmt;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
@@ -116,6 +117,15 @@ pub(crate) fn handle_host_worker(
 ) -> Result<()> {
     let interval = Duration::from_millis(options.interval_ms.max(250));
     ensure_webgpt_lane_runtime_isolated(options)?;
+    let Some(_worker_guard) = acquire_host_worker_guard(store_root)? else {
+        emit_host_event(&serde_json::json!({
+            "schema_version": HOST_WORKER_EVENT_SCHEMA_VERSION,
+            "event": "worker_already_running",
+            "world_id": world_id,
+            "consumer": HOST_WORKER_CONSUMER,
+        }))?;
+        return Ok(());
+    };
     let mut emitted = HashSet::new();
     let (lane_completion_tx, lane_completion_rx) = mpsc::channel();
     let mut text_inflight = HashSet::new();
@@ -224,6 +234,70 @@ pub(crate) fn handle_host_worker(
         thread::sleep(interval);
     }
     Ok(())
+}
+
+struct HostWorkerGuard {
+    lock_path: PathBuf,
+}
+
+impl Drop for HostWorkerGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.lock_path);
+    }
+}
+
+fn acquire_host_worker_guard(store_root: Option<&Path>) -> Result<Option<HostWorkerGuard>> {
+    let store_paths = resolve_store_paths(store_root)?;
+    let lock_dir = store_paths.root.join("agent_bridge");
+    fs::create_dir_all(&lock_dir)
+        .with_context(|| format!("failed to create {}", lock_dir.display()))?;
+    let lock_path = lock_dir.join("host-worker.lock");
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock_path)
+    {
+        Ok(mut file) => {
+            writeln!(file, "{}", std::process::id())
+                .with_context(|| format!("failed to write {}", lock_path.display()))?;
+            Ok(Some(HostWorkerGuard { lock_path }))
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            if host_worker_lock_owner_is_alive(&lock_path) {
+                return Ok(None);
+            }
+            fs::remove_file(&lock_path)
+                .with_context(|| format!("failed to remove stale {}", lock_path.display()))?;
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&lock_path)
+                .with_context(|| format!("failed to claim {}", lock_path.display()))?;
+            writeln!(file, "{}", std::process::id())
+                .with_context(|| format!("failed to write {}", lock_path.display()))?;
+            Ok(Some(HostWorkerGuard { lock_path }))
+        }
+        Err(error) => Err(error)
+            .with_context(|| format!("failed to claim host-worker lock {}", lock_path.display())),
+    }
+}
+
+fn host_worker_lock_owner_is_alive(lock_path: &Path) -> bool {
+    let Ok(contents) = fs::read_to_string(lock_path) else {
+        return true;
+    };
+    let Ok(pid) = contents.trim().parse::<u32>() else {
+        return false;
+    };
+    if pid == std::process::id() {
+        return true;
+    }
+    Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 fn prewarm_effective_webgpt_lanes_once(
@@ -1108,6 +1182,33 @@ mod tests {
             emitted.is_empty(),
             "one-shot worker should dispatch directly without prewarm bookkeeping"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn host_worker_guard_blocks_second_worker_for_same_store() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = temp.path().join("store");
+        let first = acquire_host_worker_guard(Some(store.as_path()))?;
+        assert!(first.is_some());
+        let second = acquire_host_worker_guard(Some(store.as_path()))?;
+        assert!(second.is_none());
+        drop(first);
+        let third = acquire_host_worker_guard(Some(store.as_path()))?;
+        assert!(third.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn host_worker_guard_recovers_stale_lock() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = temp.path().join("store");
+        let lock_dir = store.join("agent_bridge");
+        fs::create_dir_all(&lock_dir)?;
+        fs::write(lock_dir.join("host-worker.lock"), "999999999")?;
+
+        let guard = acquire_host_worker_guard(Some(store.as_path()))?;
+        assert!(guard.is_some());
         Ok(())
     }
 

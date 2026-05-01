@@ -124,6 +124,20 @@ singulari-world --store-root .world-store host-worker \
 the form, appends slots 6/7, assembles `AgentTurnResponse`, and then runs the
 normal WorldCourt/commit path. `draft` remains a fallback mode.
 
+The normal player-facing contract is VN-first. `TurnFormSubmission` separates
+player prose/choice surface from director notes. The host rejects player-visible
+text that exposes simulator vocabulary such as slots, audit status, outcome
+enum names, or pressure bookkeeping, and it requires a concrete visible scene
+delta before commit. See
+[`vn-engine-player-surface-blueprint.md`](vn-engine-player-surface-blueprint.md).
+
+Only one resident host worker may own a store root at a time. The worker creates
+`agent_bridge/host-worker.lock` with its PID, exits cleanly with a
+`worker_already_running` event when another live worker owns the lock, and
+recovers stale lock files left by dead processes. This prevents orphaned older
+workers from racing the current VN server and committing a turn with an outdated
+prompt contract.
+
 ## JSONL Events
 
 Every host worker event is one JSON object per line with schema version

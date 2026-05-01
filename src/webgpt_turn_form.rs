@@ -7,6 +7,7 @@ use crate::models::{
     GUIDE_CHOICE_TAG, NARRATIVE_SCENE_SCHEMA_VERSION, NarrativeScene, TurnChoice, TurnInputKind,
     default_freeform_choice, default_guide_choice, normalize_turn_choices,
 };
+use crate::player_surface::{concrete_delta_is_specific, player_surface_forbidden_terms};
 use crate::pre_turn_simulation::CompiledAffordance;
 use crate::prompt_context::PromptContextPacket;
 use crate::resolution::{
@@ -44,6 +45,7 @@ pub struct TurnFormSpec {
     pub allowed_evidence_refs: Vec<String>,
     #[serde(default)]
     pub assembly_rules: Vec<String>,
+    pub player_surface_rules: TurnFormPlayerSurfaceRules,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -77,6 +79,16 @@ pub struct TurnFormPressureOption {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct TurnFormPlayerSurfaceRules {
+    pub product_mode: String,
+    #[serde(default)]
+    pub forbidden_terms: Vec<String>,
+    #[serde(default)]
+    pub choice_text_contract: Vec<String>,
+    pub concrete_delta_required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct TurnFormSubmission {
     pub schema_version: String,
     pub world_id: String,
@@ -92,6 +104,7 @@ pub struct TurnFormSubmission {
     pub narrative: TurnFormNarrativeSubmission,
     #[serde(default)]
     pub next_choices: Vec<TurnFormChoiceSubmission>,
+    pub director_notes: TurnFormDirectorNotes,
     #[serde(default)]
     pub adjudication_summary: Option<String>,
 }
@@ -121,6 +134,15 @@ pub struct TurnFormChoiceSubmission {
     pub slot: u8,
     pub tag: String,
     pub intent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface_text: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct TurnFormDirectorNotes {
+    pub beat_type: String,
+    pub concrete_delta: String,
+    pub scene_exit_progress: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -203,9 +225,44 @@ pub fn build_turn_form_spec(
                 .to_owned(),
             "If a visible pressure is not moved, the backend records a no-op reason automatically."
                 .to_owned(),
-            "Return concise Korean narrative blocks; do not return AgentTurnResponse JSON."
+            "Return polished Korean VN scene prose; do not return AgentTurnResponse JSON."
+                .to_owned(),
+            "Ordinary choices must include surface_text as a diegetic action sentence."
                 .to_owned(),
         ],
+        player_surface_rules: TurnFormPlayerSurfaceRules {
+            product_mode: "visual_novel_engine".to_owned(),
+            forbidden_terms: vec![
+                "slot",
+                "선택지",
+                "판정",
+                "처리했다",
+                "delayed",
+                "partial_success",
+                "costly_success",
+                "visible",
+                "evidence",
+                "surface",
+                "audit",
+                "contract",
+                "메타",
+                "플레이어",
+                "턴",
+                "압력",
+                "가늠",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+            choice_text_contract: vec![
+                "Write ordinary choices as in-scene Korean action sentences.".to_owned(),
+                "Do not name system functions such as records, pressure, audit, slots, or choices."
+                    .to_owned(),
+                "Use concrete actors, objects, routes, or spoken lines when visible evidence allows it."
+                    .to_owned(),
+            ],
+            concrete_delta_required: true,
+        },
     }
 }
 
@@ -255,6 +312,8 @@ pub fn assemble_agent_turn_response_from_form(
         &mut errors,
     );
     validate_next_choices(context, &submission.next_choices, &mut errors);
+    validate_director_notes(&submission, &mut errors);
+    validate_player_surface(&submission, &mut errors);
 
     let (Some(ambiguity), Some(outcome_kind)) = (ambiguity, outcome_kind) else {
         return Err(rejection(pending, errors));
@@ -308,7 +367,12 @@ pub fn assemble_agent_turn_response_from_form(
             .map(|choice| TurnChoice {
                 slot: choice.slot,
                 tag: choice.tag.trim().to_owned(),
-                intent: choice.intent.trim().to_owned(),
+                intent: choice
+                    .surface_text
+                    .as_deref()
+                    .unwrap_or(choice.intent.as_str())
+                    .trim()
+                    .to_owned(),
             })
             .chain([default_freeform_choice(), default_guide_choice()])
             .collect::<Vec<_>>(),
@@ -561,6 +625,11 @@ fn validate_next_choices(
             &choice.intent,
             errors,
         );
+        require_text(
+            &format!("next_choices[{index}].surface_text"),
+            choice.surface_text.as_deref().unwrap_or_default(),
+            errors,
+        );
         if choice.tag == FREEFORM_CHOICE_TAG || choice.tag == GUIDE_CHOICE_TAG {
             errors.push(field_error(
                 &format!("next_choices[{index}].tag"),
@@ -575,6 +644,83 @@ fn validate_next_choices(
                 &[],
             ));
         }
+    }
+}
+
+fn validate_director_notes(submission: &TurnFormSubmission, errors: &mut Vec<TurnFormFieldError>) {
+    require_text(
+        "director_notes.beat_type",
+        &submission.director_notes.beat_type,
+        errors,
+    );
+    require_text(
+        "director_notes.concrete_delta",
+        &submission.director_notes.concrete_delta,
+        errors,
+    );
+    require_text(
+        "director_notes.scene_exit_progress",
+        &submission.director_notes.scene_exit_progress,
+        errors,
+    );
+    if !concrete_delta_is_specific(submission.director_notes.concrete_delta.as_str()) {
+        errors.push(field_error(
+            "director_notes.concrete_delta",
+            "concrete_delta must name a concrete player-visible actor, object, route, evidence, or scene-exit movement",
+            &[],
+        ));
+    }
+}
+
+fn validate_player_surface(submission: &TurnFormSubmission, errors: &mut Vec<TurnFormFieldError>) {
+    for (index, block) in submission.narrative.text_blocks.iter().enumerate() {
+        push_surface_errors(&format!("narrative.text_blocks[{index}]"), block, errors);
+    }
+    for (field, value) in [
+        ("outcome_summary", submission.outcome_summary.as_str()),
+        (
+            "director_notes.concrete_delta",
+            submission.director_notes.concrete_delta.as_str(),
+        ),
+        (
+            "director_notes.scene_exit_progress",
+            submission.director_notes.scene_exit_progress.as_str(),
+        ),
+    ] {
+        push_surface_errors(field, value, errors);
+    }
+    for (index, choice) in submission.next_choices.iter().enumerate() {
+        push_surface_errors(&format!("next_choices[{index}].tag"), &choice.tag, errors);
+        if let Some(surface_text) = &choice.surface_text {
+            push_surface_errors(
+                &format!("next_choices[{index}].surface_text"),
+                surface_text,
+                errors,
+            );
+        }
+        if choice
+            .surface_text
+            .as_deref()
+            .is_some_and(|surface| surface.trim() == choice.tag.trim())
+            && choice.tag.chars().count() > 34
+        {
+            errors.push(field_error(
+                &format!("next_choices[{index}].tag"),
+                "tag should be a short diegetic label; put the full action sentence in surface_text",
+                &[],
+            ));
+        }
+    }
+}
+
+fn push_surface_errors(field_path: &str, value: &str, errors: &mut Vec<TurnFormFieldError>) {
+    let forbidden = player_surface_forbidden_terms(value);
+    if !forbidden.is_empty() {
+        errors.push(field_error(
+            field_path,
+            "player-facing VN surface contains simulator/debug vocabulary",
+            &forbidden,
+        ));
     }
 }
 
@@ -788,6 +934,7 @@ mod tests {
             slot: GUIDE_CHOICE_SLOT,
             tag: GUIDE_CHOICE_TAG.to_owned(),
             intent: GUIDE_CHOICE_REDACTED_INTENT.to_owned(),
+            surface_text: Some(GUIDE_CHOICE_REDACTED_INTENT.to_owned()),
         });
 
         let Err(rejection) = assemble_agent_turn_response_from_form(&pending, &context, submission)
@@ -831,6 +978,42 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn rejects_meta_language_in_player_surface() -> anyhow::Result<()> {
+        let (pending, context) = pending_fixture("stw_turn_form_reject_meta_surface")?;
+        let mut submission = valid_submission(&pending, &context);
+        submission.narrative.text_blocks[0] = "slot 4의 판정을 delayed 결과로 처리했다.".to_owned();
+
+        let Err(rejection) = assemble_agent_turn_response_from_form(&pending, &context, submission)
+        else {
+            anyhow::bail!("meta surface text should be rejected");
+        };
+
+        assert!(rejection.field_errors.iter().any(|error| {
+            error.field_path.starts_with("narrative.text_blocks")
+                && error.message.contains("simulator")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_missing_concrete_delta() -> anyhow::Result<()> {
+        let (pending, context) = pending_fixture("stw_turn_form_reject_delta")?;
+        let mut submission = valid_submission(&pending, &context);
+        submission.director_notes.concrete_delta = "기척과 압력이 조금 흔들렸다".to_owned();
+
+        let Err(rejection) = assemble_agent_turn_response_from_form(&pending, &context, submission)
+        else {
+            anyhow::bail!("abstract-only concrete delta should be rejected");
+        };
+
+        assert!(rejection.field_errors.iter().any(|error| {
+            error.field_path == "director_notes.concrete_delta"
+                && error.message.contains("concrete_delta")
+        }));
+        Ok(())
+    }
+
     fn pending_fixture(world_id: &str) -> anyhow::Result<(PendingAgentTurn, PromptContextPacket)> {
         let temp = tempdir()?;
         let store_root = temp.path().join("store");
@@ -867,8 +1050,7 @@ mod tests {
             intent_summary: "플레이어는 눈앞의 선택을 따라 장면을 실제로 전진시킨다.".to_owned(),
             intent_ambiguity: "clear".to_owned(),
             outcome_kind: "partial_success".to_owned(),
-            outcome_summary: "문 앞의 정체가 조금 더 구체화되고 다음 행동의 압력이 생긴다."
-                .to_owned(),
+            outcome_summary: "문 앞의 정체가 조금 더 구체화되고 다음 행동이 가까워진다.".to_owned(),
             pressure_movements: Vec::new(),
             narrative: TurnFormNarrativeSubmission {
                 speaker: None,
@@ -885,13 +1067,22 @@ mod tests {
                 .filter(|affordance| (1..=5).contains(&affordance.slot))
                 .map(|affordance| TurnFormChoiceSubmission {
                     slot: affordance.slot,
-                    tag: format!("선택 {}", affordance.slot),
+                    tag: format!("성문 행동 {}", affordance.slot),
                     intent: format!(
                         "{}를 바탕으로 다음 행동을 고른다.",
                         affordance.action_contract
                     ),
+                    surface_text: Some(format!(
+                        "성문 아래의 단서 {}를 따라 한 걸음 움직인다.",
+                        affordance.slot
+                    )),
                 })
                 .collect(),
+            director_notes: TurnFormDirectorNotes {
+                beat_type: "discovery".to_owned(),
+                concrete_delta: "문지기가 북문 아래 창끝을 낮추며 길을 막았다.".to_owned(),
+                scene_exit_progress: "북문을 그냥 지날 수 없다는 사실이 드러났다.".to_owned(),
+            },
             adjudication_summary: None,
         }
     }
