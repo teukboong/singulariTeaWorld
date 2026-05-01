@@ -69,7 +69,7 @@ outcome:
 
 visible_scene:
 - text_blocks: 한국어 VN prose 문단 배열. 내용을 쓰는 곳은 여기다.
-- tone_notes: 이번 턴에서 실제 반영한 문체/화법/장면 압력 노트 배열.
+- tone_notes 필드는 생략한다. host가 필요하면 빈 배열로 처리한다.
 - JSON 문자열 내부에는 ASCII 큰따옴표 문자 `"`를 직접 넣지 않는다.
   대사가 필요하면 `「멈춰.」`처럼 JSON escape가 필요 없는 한국어/전각
   따옴표를 쓰거나, 반드시 `\"`로 escape한다.

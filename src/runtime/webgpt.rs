@@ -862,7 +862,7 @@ fn commit_webgpt_dispatch_if_success(
         let error = dispatch_result.error.clone();
         let status = match error.as_deref() {
             Some(error) if is_webgpt_timeout_signal(error) => "waiting_browser",
-            Some(error) if is_webgpt_malformed_output_signal(error) => "commit_failed",
+            Some(error) if is_webgpt_malformed_output_signal(error) => "failed",
             _ => "failed",
         };
         return WebGptCommitResult {
@@ -2980,14 +2980,14 @@ mod tests {
     }
 
     #[test]
-    fn malformed_contract_failure_records_are_not_reprompted() -> anyhow::Result<()> {
+    fn malformed_contract_failures_are_retryable_before_commit() -> anyhow::Result<()> {
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("turn_0003-webgpt.json");
         fs::write(
             &path,
             serde_json::to_vec_pretty(&serde_json::json!({
                 "schema_version": "singulari.webgpt_dispatch_record.v1",
-                "status": "commit_failed",
+                "status": "failed",
                 "turn_id": "turn_0003",
                 "error": "webgpt answer did not contain one complete WebgptTurnDraft JSON object",
             }))?,
@@ -2996,7 +2996,7 @@ mod tests {
         assert!(is_webgpt_malformed_output_signal(
             "webgpt answer did not contain one complete WebgptTurnDraft JSON object"
         ));
-        assert!(!existing_dispatch_is_retryable(&path)?);
+        assert!(existing_dispatch_is_retryable(&path)?);
         Ok(())
     }
 
