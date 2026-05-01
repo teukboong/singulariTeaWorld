@@ -55,10 +55,12 @@ target/release/singulari-world --store-root .world-store host-worker \
   --interval-ms 750
 ```
 
-The text lane calls `webgpt_turn_form`, reuses
-`agent_bridge/webgpt_conversation_binding.json`, records the full WebGPT MCP
-tool result, writes only its `form_submission` object to the response artifact,
-and lets Rust assemble/validate/commit the canonical `AgentTurnResponse`.
+The text lane calls `webgpt_research`, reuses
+`agent_bridge/webgpt_conversation_binding.json`, and instructs WebGPT to use the
+connected Singulari World MCP connector tools: `worldsim_next_turn_form` and
+`worldsim_submit_turn_form`. Assistant text is only operator evidence; the
+durable commit record created by `worldsim_submit_turn_form` is the success
+source.
 
 The image lane calls `webgpt_generate_image`, reuses separate image
 conversation bindings, extracts a PNG, and completes the same visual jobs

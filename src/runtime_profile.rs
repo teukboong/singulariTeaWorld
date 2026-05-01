@@ -9,6 +9,7 @@ pub enum RuntimeCapabilityProfile {
     VnPlayer,
     McpWebReadOnly,
     McpWebPlay,
+    McpWebAuthoring,
     TrustedLocal,
     WebgptText,
     WebgptImage,
@@ -28,6 +29,7 @@ pub enum RuntimeCapability {
     PlayerVisibleRead,
     HiddenAdjudicationRead,
     PlayerInputWrite,
+    TurnFormAuthoringWrite,
     AgentCommitWrite,
     VisualJobCompletionWrite,
     LocalFilesystemPath,
@@ -62,6 +64,13 @@ impl RuntimeCapabilityProfile {
                     RuntimeCapability::PlayerVisibleRead,
                     RuntimeCapability::PlayerInputWrite,
                     RuntimeCapability::VisualJobCompletionWrite,
+                ],
+            ),
+            Self::McpWebAuthoring => (
+                RuntimeSurfaceKind::BackendAdapter,
+                vec![
+                    RuntimeCapability::PlayerVisibleRead,
+                    RuntimeCapability::TurnFormAuthoringWrite,
                 ],
             ),
             Self::TrustedLocal => (
@@ -102,6 +111,7 @@ impl RuntimeCapabilityProfile {
             Self::VnPlayer => "vn_player",
             Self::McpWebReadOnly => "mcp_web_read_only",
             Self::McpWebPlay => "mcp_web_play",
+            Self::McpWebAuthoring => "mcp_web_authoring",
             Self::TrustedLocal => "trusted_local",
             Self::WebgptText => "webgpt_text",
             Self::WebgptImage => "webgpt_image",
@@ -148,6 +158,7 @@ mod tests {
     #[test]
     fn webgpt_lanes_are_backend_adapters_without_hidden_reads() {
         for profile in [
+            RuntimeCapabilityProfile::McpWebAuthoring,
             RuntimeCapabilityProfile::WebgptText,
             RuntimeCapabilityProfile::WebgptImage,
         ] {
@@ -165,6 +176,7 @@ mod tests {
             RuntimeCapabilityProfile::VnPlayer,
             RuntimeCapabilityProfile::McpWebReadOnly,
             RuntimeCapabilityProfile::McpWebPlay,
+            RuntimeCapabilityProfile::McpWebAuthoring,
             RuntimeCapabilityProfile::WebgptText,
             RuntimeCapabilityProfile::WebgptImage,
         ] {

@@ -70,6 +70,11 @@ target/release/singulari-world-mcp-web \
   --profile play
 ```
 
+Use `--profile authoring` instead when the public endpoint is dedicated to the
+WebGPT text backend. The authoring profile exposes bounded turn-form authoring
+tools without exposing hidden pending-turn packets or direct trusted-local
+commit/repair tools.
+
 Start the tunnel updater in another terminal:
 
 ```bash
@@ -102,7 +107,8 @@ retry. Both are runtime state and must stay out of git.
 ## Safety Boundary
 
 - Keep `singulari-world-mcp-web` bound to `127.0.0.1`.
-- Expose only `--profile play` through the public Worker.
+- Expose only `--profile play` or the bounded `--profile authoring` through the
+  public Worker.
 - Do not expose `--profile trusted-local` through Cloudflare.
 - Do not commit Cloudflare tokens, Worker secrets, `.env`, or `.runtime/`.
 - The Worker origin update endpoint requires

@@ -78,6 +78,11 @@ image-ingest probe, plus `worldsim_complete_visual_job_from_base64` for
 host-provided PNG payloads and `worldsim_complete_visual_job_from_url` for
 HTTPS `image/png` URLs. It deliberately withholds hidden pending-turn context,
 direct commit, repair, and generic visual-job completion from local paths.
+`--profile authoring` is the bounded WebGPT text-backend connector profile: it
+exposes `worldsim_next_turn_form` and `worldsim_submit_turn_form` plus
+player-visible read/search tools, but not hidden pending-turn packets, direct
+`worldsim_commit_agent_turn`, player input submission, DB repair, or local-path
+visual completion. Use this profile for the WebGPT turn authoring connector.
 `--profile read-only` removes player input submission and image completion.
 `--profile trusted-local` is for private operator-controlled surfaces only.
 
@@ -200,13 +205,15 @@ target/release/singulari-world --store-root .world-store host-worker \
   --interval-ms 750
 ```
 
-The worker calls `webgpt_turn_form` through this repository's bundled
+The worker sends connector-use instructions through this repository's bundled
 `webgpt-mcp-checkout/scripts/webgpt-mcp.sh` by default. Explicit wrapper
 overrides must still point inside this repository; sibling or parent checkouts
-are rejected so the public-alpha package stays standalone. It records the full
-WebGPT MCP tool result, writes only `form_submission` to the response artifact,
-then validates, assembles, and commits through the same world-store path, so the
-UI, DB, CG queue, and redaction rules stay shared. With `--visual-backend
+are rejected so the public-alpha package stays standalone. In `tool-form` mode,
+WebGPT must call the Singulari World MCP connector tools
+`worldsim_next_turn_form` and `worldsim_submit_turn_form`; the host-worker no
+longer parses TurnFormSubmission JSON from assistant text. The durable commit
+record produced by `worldsim_submit_turn_form` is the success source, so the UI,
+DB, CG queue, and redaction rules stay shared. With `--visual-backend
 webgpt`, it also calls
 `webgpt_generate_image`, receives an extracted PNG path, and completes the same
 visual jobs the browser queued. WebGPT text and image use separate world-scoped

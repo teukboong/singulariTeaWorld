@@ -32,11 +32,13 @@ The text lane:
   `agent_bridge/webgpt_conversation_binding.json`;
 - builds a redacted pending-turn prompt with active memory revival from
   `resume_pack`, Archive View, recall hits, and recent world.db updates;
-- calls `webgpt_turn_form`;
-- records the full WebGPT MCP result and writes only `form_submission` to the
-  response artifact;
-- validates the form, assembles `AgentTurnResponse`, and commits through the
-  Rust validator and hidden-truth redaction checks.
+- calls `webgpt_research` with explicit connector-use instructions;
+- expects WebGPT to call `worldsim_next_turn_form` and
+  `worldsim_submit_turn_form` through the connected Singulari World MCP
+  connector;
+- records assistant text only as operator evidence;
+- treats the durable commit record created by `worldsim_submit_turn_form` as
+  the success source.
 
 `--webgpt-turn-command` can replace the built-in MCP adapter, but the output
 contract is still one validated `TurnFormSubmission` in normal `tool-form`
@@ -120,9 +122,12 @@ singulari-world --store-root .world-store host-worker \
   --interval-ms 750
 ```
 
-`tool-form` mode asks WebGPT for a bounded `TurnFormSubmission`; Rust validates
-the form, appends slots 6/7, assembles `AgentTurnResponse`, and then runs the
-normal WorldCourt/commit path. `draft` remains a fallback mode.
+`tool-form` mode asks WebGPT to use the Singulari World MCP connector tools,
+not to print a JSON form in the chat answer. WebGPT must call
+`worldsim_next_turn_form` and then `worldsim_submit_turn_form`; that connector
+path validates the form, appends slots 6/7, assembles `AgentTurnResponse`, and
+runs the normal WorldCourt/commit path. The host-worker only observes the
+resulting durable commit record. `draft` remains a fallback mode.
 
 The normal player-facing contract is VN-first. `TurnFormSubmission` separates
 player prose/choice surface from director notes. The host rejects player-visible

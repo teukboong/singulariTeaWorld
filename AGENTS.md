@@ -235,6 +235,9 @@ read tools, player input submission, `worldsim_current_cg_image`, and
 `worldsim_complete_visual_job_from_url` PNG completion paths. It does not expose
 hidden pending-turn packets, direct commits, generic visual claim completion
 from local paths, DB repair, or other trusted local-agent tools. Use
+`--profile authoring` for the bounded WebGPT text-backend connector; it exposes
+`worldsim_next_turn_form` and `worldsim_submit_turn_form` without exposing hidden
+pending-turn packets or direct `worldsim_commit_agent_turn`. Use
 `--profile trusted-local` only behind an operator-controlled private boundary.
 
 ChatGPT Apps SDK VN panel experiments are legacy. The supported player-facing

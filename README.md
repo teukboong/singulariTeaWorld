@@ -104,12 +104,14 @@ By default the worker uses the bundled
 `SINGULARI_WORLD_WEBGPT_MCP_WRAPPER` in the process env or repository-local
 `.env` / `--webgpt-mcp-wrapper` only when that path still points inside this
 repository. It does not inspect sibling or parent checkouts; the public-alpha
-package must stay standalone. In `tool-form` mode it calls
-`webgpt_turn_form`, records the full tool result, writes only the returned
-`form_submission` to the response artifact, and lets Rust validate the form,
-append slots 6/7, assemble `AgentTurnResponse`, and commit through the same
-schema, redaction, and world-store path. `draft` and `agent-response` modes
-remain fallback/diagnostic paths.
+package must stay standalone. In `tool-form` mode it sends a connector-use
+instruction through `webgpt_research`; WebGPT must call the Singulari World MCP
+tools `worldsim_next_turn_form` and `worldsim_submit_turn_form`. The host-worker
+does not parse TurnFormSubmission JSON from assistant text. It records the
+assistant text as operator evidence and treats the durable
+`agent_bridge/committed_turns/<turn_id>/commit_record.json` created by
+`worldsim_submit_turn_form` as the success source. `draft` and
+`agent-response` modes remain fallback/diagnostic paths.
 The WebGPT visual backend calls `webgpt_generate_image`, receives a saved PNG
 path from the MCP worker, and completes the queued visual job through the same
 Rust store contract. Each world gets separate persistent ChatGPT conversation
@@ -223,7 +225,11 @@ player input submission, current-CG image output, and
 `worldsim_complete_visual_job_from_url` PNG completion paths. It does not expose
 trusted local-agent tools such as pending hidden adjudication, direct commit, or
 generic completion from local paths. Existing generated CGs can be returned to
-the host as MCP image content through `worldsim_current_cg_image`.
+the host as MCP image content through `worldsim_current_cg_image`. Use
+`--profile authoring` for the WebGPT text backend connector; it exposes
+`worldsim_next_turn_form` and `worldsim_submit_turn_form` plus player-visible
+reads without exposing hidden pending-turn packets, direct trusted-local commit,
+repair, or local-path visual completion.
 The probe tool records which image reference shapes the host can pass back
 (`image_base64`, `image_url`, `resource_uri`, or `file_id`) without persisting
 image bytes. If the host can pass PNG bytes, complete the pending visual job

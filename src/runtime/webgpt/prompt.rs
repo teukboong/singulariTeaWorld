@@ -281,6 +281,7 @@ narrative turn packet JSON:
 pub(super) fn build_webgpt_turn_form_prompt(
     prompt_context: &PromptContextPacket,
     turn_form: &TurnFormSpec,
+    connector_store_root: &std::path::Path,
 ) -> Result<String> {
     let output_contract =
         serde_json::from_value::<AgentOutputContract>(prompt_context.output_contract.clone())
@@ -296,8 +297,12 @@ pub(super) fn build_webgpt_turn_form_prompt(
 
 핵심 계약:
 - AgentTurnResponse, ResolutionProposal, WorldCourt packet을 직접 쓰지 않는다.
-- 아래 turn_form_spec에 맞는 TurnFormSubmission JSON 하나만 작성한다.
-- Rust host가 TurnFormSubmission을 검증하고 AgentTurnResponse를 조립/커밋한다.
+- 답변 텍스트에 JSON을 쓰지 않는다.
+- 반드시 연결된 Singulari World MCP connector tool을 사용한다.
+- 먼저 `worldsim_next_turn_form`을 호출해 현재 form을 확인한다.
+- 그 다음 `worldsim_submit_turn_form`을 호출해 TurnFormSubmission을 제출한다.
+- Rust backend가 TurnFormSubmission을 검증하고 AgentTurnResponse를 조립/커밋한다.
+- connector tool이 보이지 않거나 호출할 수 없으면 JSON을 출력하지 말고 `CONNECTOR_TOOL_UNAVAILABLE` 한 줄만 답한다.
 - slot 1..5만 next_choices에 쓴다. slot 6 자유서술과 slot 7 판단 위임은 backend가 자동 추가한다.
 - pressure_movements에는 turn_form_spec.pressure_options에 있는 pressure_id만 쓴다. 없거나 이번 입력이 직접 건드리지 않으면 빈 배열로 둔다.
 - evidence_refs에는 turn_form_spec.allowed_evidence_refs에 있는 문자열만 쓴다.
@@ -316,47 +321,24 @@ pub(super) fn build_webgpt_turn_form_prompt(
 - outcome_summary와 adjudication_summary는 개발자 판정문이 아니다. 플레이어에게 보여도 어색하지 않은 짧은 결과 문장으로 쓴다.
 {text_design_directive}
 
-TurnFormSubmission JSON shape:
+connector call contract:
+- `worldsim_next_turn_form` arguments:
 ```json
 {{
-  "schema_version": "singulari.webgpt_turn_form_submission.v1",
+  "store_root": "{store_root}",
+  "world_id": "{world_id}"
+}}
+```
+- `worldsim_submit_turn_form` arguments:
+```json
+{{
+  "store_root": "{store_root}",
   "world_id": "{world_id}",
-  "turn_id": "{turn_id}",
-  "intent_summary": "플레이어 입력/선택 해석",
-  "intent_ambiguity": "clear|minor|high",
-  "outcome_kind": "success|partial_success|blocked|costly_success|delayed|escalated",
-  "outcome_summary": "player-visible 결과 요약",
-  "pressure_movements": [
-    {{
-      "pressure_id": "turn_form_spec.pressure_options 중 하나",
-      "change": "moved|softened|increased|resolved|deferred",
-      "summary": "압력이 어떻게 움직였는지",
-      "evidence_refs": ["turn_form_spec.allowed_evidence_refs 중 하나"]
-    }}
-  ],
-  "narrative": {{
-    "speaker": null,
-    "text_blocks": ["한국어 VN prose 문단"],
-    "tone_notes": []
-  }},
-  "next_choices": [
-    {{
-      "slot": 1,
-      "tag": "짧은 장면 행동 라벨",
-      "intent": "내부 감독용 의미 요약. 그래도 player-facing 문장처럼 자연스럽게 쓴다.",
-      "surface_text": "버튼에 그대로 보여줄 장면 속 행동 문장"
-    }}
-  ],
-  "director_notes": {{
-    "beat_type": "movement|discovery|confrontation|dialogue|cost|reveal|scene_exit",
-    "concrete_delta": "이번 턴에서 실제로 달라진 구체 actor/object/route/evidence/position",
-    "scene_exit_progress": "현재 장면의 종료조건에 가까워진 정도"
-  }},
-  "adjudication_summary": "선택 optional"
+  "submission": "<TurnFormSubmission object from the connector tool form>"
 }}
 ```
 
-turn_form_spec JSON:
+local audit copy of the expected TurnFormSpec:
 ```json
 {turn_form_spec}
 ```
@@ -367,8 +349,10 @@ narrative turn packet JSON:
 ```
 
 출력:
-- TurnFormSubmission JSON 하나만 반환한다.
-- Markdown fence, 설명문, 도입문 없이 JSON 본문만 반환한다.
+- 답변 텍스트에 TurnFormSubmission JSON을 출력하지 않는다.
+- 성공하면 짧게 `worldsim_submit_turn_form committed {world_id} {turn_id}`만 말한다.
+- 실패하면 field error를 보고 connector tool을 한 번 더 호출해 수정한다.
+- connector tool이 없으면 `CONNECTOR_TOOL_UNAVAILABLE`만 말한다.
 - world_id는 "{world_id}", turn_id는 "{turn_id}"와 정확히 같아야 한다.
 - next_choices는 turn_form_spec.choice_slots의 slot 1..5를 정확히 한 번씩 포함해야 한다.
 "#,
@@ -376,6 +360,7 @@ narrative turn packet JSON:
         standard_blocks = narrative_budget.standard_choice_turn_blocks,
         target_chars = narrative_budget.target_chars,
         text_design_directive = SEEDLESS_PROSE_CONTRACT,
+        store_root = connector_store_root.display(),
         world_id = prompt_context.world_id,
         turn_id = prompt_context.turn_id,
         turn_form_spec = turn_form_spec,

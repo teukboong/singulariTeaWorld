@@ -280,16 +280,17 @@ Implemented tool-form mode:
 host-worker
   -> claim TextTurn job
   -> compile PromptContextPacket + TurnFormSpec
-  -> call WebGPT MCP tool webgpt_turn_form
-  -> webgpt_turn_form returns structured form_submission
-  -> Rust validates fields and assembles AgentTurnResponse
-  -> existing WorldCourt / commit path runs unchanged
+  -> call WebGPT MCP tool webgpt_research with connector-use instructions
+  -> WebGPT calls Singulari World connector tool worldsim_next_turn_form
+  -> WebGPT calls Singulari World connector tool worldsim_submit_turn_form
+  -> connector validates fields, assembles AgentTurnResponse, and commits
+  -> host-worker observes the durable commit record
 ```
 
 The host-worker no longer treats `answer_markdown` as the commit source in
-`tool-form` mode. `answer_markdown` is retained as operator evidence, while
-`webgpt_turn_form.form_submission` is written to the response artifact and is
-the only object passed to the Rust form assembler.
+`tool-form` mode. `answer_markdown` is retained as operator evidence only. The
+commit source is the `agent_bridge/committed_turns/<turn_id>/commit_record.json`
+created by `worldsim_submit_turn_form`.
 
 Dispatch record additions:
 
@@ -307,7 +308,7 @@ Status rules:
 
 | Failure | Status |
 | --- | --- |
-| `webgpt_turn_form` returns no `form_submission` | `failed_retryable` |
+| connector tools unavailable or no commit record observed | `failed_retryable` |
 | form validation returns field errors | `failed_retryable` |
 | WorldCourt rejects visible content | `failed_retryable` unless max retries exceeded |
 | world.db or commit journal write fails | `commit_failed` / terminal |
@@ -454,13 +455,14 @@ Add:
 --webgpt-output-mode tool-form|draft|agent-response
 ```
 
-In `tool-form` mode, the worker calls `webgpt_turn_form`, records its full tool
-result, writes only `form_submission` to the response artifact, and ignores any
-broader assistant prose for commit purposes.
+In `tool-form` mode, the worker calls `webgpt_research` with connector-use
+instructions. WebGPT must call `worldsim_next_turn_form` and
+`worldsim_submit_turn_form`; the worker ignores assistant prose for commit
+purposes and observes the resulting commit record.
 
 Tests:
 
-- missing `form_submission` => retryable failure;
+- missing connector commit record => retryable failure;
 - field errors => retryable failure;
 - successful submit => completed job;
 - durable commit I/O failure => terminal commit failure.

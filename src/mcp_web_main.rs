@@ -41,6 +41,7 @@ struct Args {
 enum WebToolProfile {
     ReadOnly,
     Play,
+    Authoring,
     TrustedLocal,
 }
 
@@ -49,6 +50,7 @@ impl WebToolProfile {
         match self {
             Self::ReadOnly => WorldsimMcpToolProfile::WebReadOnly,
             Self::Play => WorldsimMcpToolProfile::WebPlay,
+            Self::Authoring => WorldsimMcpToolProfile::WebAuthoring,
             Self::TrustedLocal => WorldsimMcpToolProfile::Full,
         }
     }
@@ -57,6 +59,7 @@ impl WebToolProfile {
         match self {
             Self::ReadOnly => RuntimeCapabilityProfile::McpWebReadOnly,
             Self::Play => RuntimeCapabilityProfile::McpWebPlay,
+            Self::Authoring => RuntimeCapabilityProfile::McpWebAuthoring,
             Self::TrustedLocal => RuntimeCapabilityProfile::TrustedLocal,
         }
     }

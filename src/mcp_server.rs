@@ -79,6 +79,7 @@ pub struct WorldsimMcpServer {
 pub enum WorldsimMcpToolProfile {
     Full,
     WebPlay,
+    WebAuthoring,
     WebReadOnly,
 }
 
@@ -112,6 +113,16 @@ impl WorldsimMcpServer {
                     | "worldsim_probe_image_ingest"
                     | "worldsim_complete_visual_job_from_base64"
                     | "worldsim_complete_visual_job_from_url"
+                    | "worldsim_resume_pack"
+                    | "worldsim_search"
+                    | "worldsim_codex_view"
+                    | "worldsim_validate"
+            ),
+            WorldsimMcpToolProfile::WebAuthoring => matches!(
+                name,
+                "worldsim_current"
+                    | "worldsim_next_turn_form"
+                    | "worldsim_submit_turn_form"
                     | "worldsim_resume_pack"
                     | "worldsim_search"
                     | "worldsim_codex_view"
@@ -440,7 +451,10 @@ impl ServerHandler for WorldsimMcpServer {
 
 impl WorldsimMcpToolProfile {
     const fn chatgpt_app_enabled(self) -> bool {
-        matches!(self, Self::WebPlay | Self::WebReadOnly)
+        matches!(
+            self,
+            Self::Full | Self::WebPlay | Self::WebAuthoring | Self::WebReadOnly
+        )
     }
 }
 
@@ -495,6 +509,26 @@ fn attach_chatgpt_app_tool_metadata(tools: &mut [Tool]) {
                         .open_world(false),
                 );
                 tool.meta = Some(chatgpt_backend_tool_meta("Sending choice…", "Choice sent"));
+            }
+            "worldsim_next_turn_form" => {
+                tool.annotations = Some(ToolAnnotations::new().read_only(true));
+                tool.meta = Some(chatgpt_backend_tool_meta(
+                    "Loading turn form…",
+                    "Turn form ready",
+                ));
+            }
+            "worldsim_submit_turn_form" => {
+                tool.annotations = Some(
+                    ToolAnnotations::new()
+                        .read_only(false)
+                        .destructive(false)
+                        .idempotent(false)
+                        .open_world(false),
+                );
+                tool.meta = Some(chatgpt_backend_tool_meta(
+                    "Submitting turn…",
+                    "Turn committed",
+                ));
             }
             "worldsim_widget_probe" => {
                 tool.annotations = Some(ToolAnnotations::new().read_only(true));
@@ -1747,6 +1781,21 @@ mod tests {
         assert!(!server.tool_allowed("worldsim_next_turn_form"));
         assert!(!server.tool_allowed("worldsim_submit_turn_form"));
         assert!(!server.tool_allowed("worldsim_commit_agent_turn"));
+        assert!(!server.tool_allowed("worldsim_repair_db"));
+    }
+
+    #[test]
+    fn web_authoring_profile_exposes_bounded_turn_form_tools_only() {
+        let server = WorldsimMcpServer::with_profile(WorldsimMcpToolProfile::WebAuthoring);
+        assert!(server.tool_allowed("worldsim_current"));
+        assert!(server.tool_allowed("worldsim_next_turn_form"));
+        assert!(server.tool_allowed("worldsim_submit_turn_form"));
+        assert!(server.tool_allowed("worldsim_resume_pack"));
+        assert!(!server.tool_allowed("worldsim_submit_player_input"));
+        assert!(!server.tool_allowed("worldsim_next_pending_turn"));
+        assert!(!server.tool_allowed("worldsim_commit_agent_turn"));
+        assert!(!server.tool_allowed("worldsim_claim_visual_job"));
+        assert!(!server.tool_allowed("worldsim_complete_visual_job"));
         assert!(!server.tool_allowed("worldsim_repair_db"));
     }
 

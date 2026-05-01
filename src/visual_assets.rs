@@ -6,6 +6,7 @@ use crate::models::{
 use crate::store::{read_json, resolve_store_paths, world_file_paths, write_json};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Write as _};
 use std::path::{Path, PathBuf};
@@ -1510,6 +1511,7 @@ fn turn_scene_prompt(
 ) -> String {
     let dashboard = &packet.visible_state.dashboard;
     let scene_text = turn_cg_scene_hint(packet).unwrap_or_else(|| dashboard.status.clone());
+    let key_frame = turn_cg_key_frame(packet).unwrap_or_else(|| scene_text.clone());
     let scan_targets = packet
         .visible_state
         .scan_targets
@@ -1518,16 +1520,22 @@ fn turn_scene_prompt(
         .map(player_visible_focus_label)
         .collect::<Vec<_>>()
         .join(", ");
+    let visible_anchors = turn_cg_visible_anchors(world, packet, scene_text.as_str());
     let major_character_policy = unresolved_major_character_directive.unwrap_or(
         "All major character designs needed for this scene have accepted reference sheets; keep direct character depictions faithful to those references.",
     );
     format!(
-        "Visualize one full-screen visual novel scene CG for the current turn. Use only player-visible information. World: {}. Turn: {}. Location: {}. Current event: {}. Scene narrative: {}. Visible focus: {}. World style: {} Palette: {} Camera/material language: {} Major character design gate: {} Reference assets, if attached by the runtime, have priority over prose: {}. No rendered text. Do not include spoilers or unrevealed symbols.",
+        "Visualize exactly one full-screen visual novel scene CG for the current turn. Use only player-visible information. World: {}. Turn: {}. Player-visible premise anchors: {} / {} / {}. Location cue: {}. Current event cue: {}. Key frame to depict: {}. Scene narrative / recent scene context, for continuity only: {}. Visible anchor checklist: {}. Visible focus: {}. Composition contract: depict one single moment after this turn, not a storyboard, not variants, not a collage; use clear foreground/midground/background staging; keep the lower third darker, calmer, and low-detail so the VN text box remains readable; preserve readable silhouettes and avoid cropping the main action behind UI. World style: {} Palette: {} Camera/material language: {} Major character design gate: {} Reference assets, if attached by the runtime, have priority over prose: {}. No rendered text, labels, captions, signs, UI, speech bubbles, or title cards. Do not include spoilers, unrevealed symbols, invented characters, invented weapons, or offscreen events.",
         world.title,
         packet.turn_id,
+        world.premise.genre,
+        world.premise.protagonist,
+        world.premise.opening_state,
         dashboard.location,
         dashboard.current_event,
+        key_frame,
         scene_text,
+        visible_anchors,
         scan_targets,
         manifest.style_profile.style_prompt,
         manifest.style_profile.palette_prompt,
@@ -1535,6 +1543,79 @@ fn turn_scene_prompt(
         major_character_policy,
         reference_hint
     )
+}
+
+fn turn_cg_key_frame(packet: &RenderPacket) -> Option<String> {
+    let scene = packet.narrative_scene.as_ref()?;
+    scene
+        .text_blocks
+        .iter()
+        .rev()
+        .map(String::as_str)
+        .map(str::trim)
+        .find(|text| !text.is_empty())
+        .map(|text| truncate_prompt_chars(text, 520))
+}
+
+fn turn_cg_visible_anchors(world: &WorldRecord, packet: &RenderPacket, scene_text: &str) -> String {
+    let scan_text = packet
+        .visible_state
+        .scan_targets
+        .iter()
+        .take(4)
+        .map(player_visible_focus_label)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let haystack = format!(
+        "{} {} {} {} {} {} {}",
+        world.premise.genre,
+        world.premise.protagonist,
+        world.premise.opening_state,
+        packet.visible_state.dashboard.location,
+        packet.visible_state.dashboard.current_event,
+        scene_text,
+        scan_text
+    );
+    let mut anchors = BTreeSet::new();
+    for anchor in [
+        "북문",
+        "성문",
+        "문",
+        "문짝",
+        "문틈",
+        "문턱",
+        "문지기",
+        "빗장",
+        "쇠고리",
+        "창대",
+        "순찰자",
+        "테아",
+        "여신 아바타",
+        "젖은 돌",
+        "돌바닥",
+        "물자국",
+        "젖은 천",
+        "천 조각",
+        "바람",
+        "먼지",
+        "흙냄새",
+        "기록지",
+        "표식",
+        "등불",
+        "골목",
+        "계단",
+        "손",
+        "장갑",
+    ] {
+        if haystack.contains(anchor) {
+            anchors.insert(anchor.to_owned());
+        }
+    }
+    if anchors.is_empty() {
+        "none; prefer environment-only composition using the visible location/status".to_owned()
+    } else {
+        anchors.into_iter().take(12).collect::<Vec<_>>().join(", ")
+    }
 }
 
 fn unresolved_major_character_design_directive(manifest: &WorldVisualAssets) -> Option<String> {
@@ -2095,6 +2176,82 @@ premise:
         assert!(hint.contains("middle-block"));
         assert!(hint.ends_with(" ..."));
         assert!(hint.chars().count() < 1_900);
+    }
+
+    #[test]
+    fn turn_cg_prompt_frames_single_keyframe_with_visible_anchors() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(
+            &seed_path,
+            r#"
+schema_version: singulari.world_seed.v1
+world_id: stw_visual_keyframe
+title: "북문"
+premise:
+  genre: "중세 변경 도시의 봉쇄된 북문"
+  protagonist: "테아의 여신 아바타와 젊은 순찰자"
+"#,
+        )?;
+        let initialized = init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+        let packet = RenderPacket {
+            schema_version: "singulari.render_packet.v1".to_owned(),
+            world_id: "stw_visual_keyframe".to_owned(),
+            turn_id: "turn_0002".to_owned(),
+            mode: "normal".to_owned(),
+            narrative_contract: "agent_authored".to_owned(),
+            narrative_scene: Some(NarrativeScene {
+                schema_version: "singulari.narrative_scene.v1".to_owned(),
+                speaker: None,
+                text_blocks: vec![
+                    "문지기가 빗장 옆에서 손을 멈췄다.".to_owned(),
+                    "빗장 끝 쇠고리에 묶인 젖은 천 조각이 문틈의 바람에 흔들렸다.".to_owned(),
+                ],
+                tone_notes: Vec::new(),
+            }),
+            visible_state: VisibleState {
+                dashboard: DashboardSummary {
+                    phase: "opening".to_owned(),
+                    location: "북문".to_owned(),
+                    anchor_invariant: "player-visible".to_owned(),
+                    current_event: "젖은 천 조각".to_owned(),
+                    status: "빗장 끝의 천이 드러났다".to_owned(),
+                },
+                scan_targets: vec![ScanTarget {
+                    target: "빗장 끝 쇠고리".to_owned(),
+                    class: "object".to_owned(),
+                    distance: "near".to_owned(),
+                    thought: "젖은 천 조각이 묶여 있다".to_owned(),
+                }],
+                choices: Vec::<TurnChoice>::new(),
+            },
+            adjudication: None,
+            codex_view: None,
+            canon_delta_refs: Vec::new(),
+            forbidden_reveals: Vec::new(),
+            style_notes: Vec::new(),
+        };
+        let manifest = build_world_visual_assets(&BuildWorldVisualAssetsOptions {
+            store_root: Some(store),
+            world_id: "stw_visual_keyframe".to_owned(),
+        })?;
+
+        let prompt = compile_turn_visual_prompt(&initialized.world, &packet, &manifest).prompt;
+
+        assert!(prompt.contains("Key frame to depict"));
+        assert!(prompt.contains("Visible anchor checklist"));
+        assert!(prompt.contains("one single moment"));
+        assert!(prompt.contains("lower third"));
+        assert!(prompt.contains("북문"));
+        assert!(prompt.contains("빗장"));
+        assert!(prompt.contains("젖은 천"));
+        assert!(prompt.contains("No rendered text"));
+        Ok(())
     }
 
     #[test]
