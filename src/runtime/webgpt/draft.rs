@@ -3,11 +3,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use singulari_world::{
     AGENT_TURN_RESPONSE_SCHEMA_VERSION, ActionAmbiguity, ActionInputKind, ActionIntent,
-    AgentTurnResponse, ChoicePlan, ChoicePlanKind, FREEFORM_CHOICE_SLOT, FREEFORM_CHOICE_TAG,
-    GUIDE_CHOICE_REDACTED_INTENT, GUIDE_CHOICE_SLOT, GUIDE_CHOICE_TAG,
-    NARRATIVE_SCENE_SCHEMA_VERSION, NarrativeBrief, NarrativeScene, PendingAgentTurn,
-    PressureNoopReason, PromptContextPacket, RESOLUTION_PROPOSAL_SCHEMA_VERSION, ResolutionOutcome,
-    ResolutionOutcomeKind, ResolutionProposal, ResolutionVisibility, TurnChoice, TurnInputKind,
+    AffordanceKind, AgentTurnResponse, ChoicePlan, ChoicePlanKind, ChoiceStrategy,
+    DramaticBeatKind, FREEFORM_CHOICE_SLOT, FREEFORM_CHOICE_TAG, GUIDE_CHOICE_REDACTED_INTENT,
+    GUIDE_CHOICE_SLOT, GUIDE_CHOICE_TAG, NARRATIVE_SCENE_SCHEMA_VERSION, NarrativeBrief,
+    NarrativeScene, ParagraphStrategy, PendingAgentTurn, PressureNoopReason, PromptContextPacket,
+    RESOLUTION_PROPOSAL_SCHEMA_VERSION, ResolutionOutcome, ResolutionOutcomeKind,
+    ResolutionProposal, ResolutionVisibility, SceneDirectorPacket, SceneDirectorProposal,
+    SceneEffect, ScenePhase, SceneTransitionProposal, TensionLevel, TransitionPressure, TurnChoice,
+    TurnInputKind,
 };
 use std::collections::{BTreeSet, HashMap};
 
@@ -111,13 +114,15 @@ pub(super) fn assemble_agent_turn_response(
     let resolution_proposal =
         assemble_resolution_proposal(pending, prompt_context, draft, &reference_index)?;
     let next_choices = assemble_next_choices(prompt_context, draft)?;
+    let scene_director_proposal =
+        assemble_scene_director_proposal(pending, prompt_context, draft, &resolution_proposal);
 
     Ok(AgentTurnResponse {
         schema_version: AGENT_TURN_RESPONSE_SCHEMA_VERSION.to_owned(),
         world_id: pending.world_id.clone(),
         turn_id: pending.turn_id.clone(),
         resolution_proposal: Some(resolution_proposal),
-        scene_director_proposal: None,
+        scene_director_proposal,
         consequence_proposal: None,
         social_exchange_proposal: None,
         encounter_proposal: None,
@@ -352,11 +357,7 @@ fn assemble_next_choices(
             .choices
             .iter()
             .find(|choice| choice.slot == affordance.slot);
-        let tag = draft_choice
-            .and_then(|choice| choice.tag_hint.as_deref())
-            .or_else(|| draft_choice.map(|choice| choice.label.as_str()))
-            .unwrap_or(affordance.action_contract.as_str())
-            .trim();
+        let tag = choice_tag(draft_choice, affordance.affordance_kind);
         let intent = draft_choice
             .map_or(affordance.action_contract.as_str(), |choice| {
                 choice.intent.as_str()
@@ -379,6 +380,139 @@ fn assemble_next_choices(
         intent: GUIDE_CHOICE_REDACTED_INTENT.to_owned(),
     });
     Ok(choices)
+}
+
+fn choice_tag(draft_choice: Option<&WebgptDraftChoice>, affordance_kind: AffordanceKind) -> &str {
+    draft_choice
+        .and_then(|choice| concise_choice_tag(choice.tag_hint.as_deref()))
+        .or_else(|| draft_choice.and_then(|choice| concise_choice_tag(Some(choice.label.as_str()))))
+        .unwrap_or_else(|| fallback_choice_tag(affordance_kind))
+}
+
+fn concise_choice_tag(candidate: Option<&str>) -> Option<&str> {
+    let candidate = candidate?.trim();
+    if candidate.is_empty()
+        || candidate.chars().count() > 14
+        || candidate.contains('.')
+        || candidate.contains(',')
+        || candidate.contains('，')
+        || candidate.contains('。')
+        || candidate.contains("다.")
+        || candidate.contains("한다")
+    {
+        None
+    } else {
+        Some(candidate)
+    }
+}
+
+const fn fallback_choice_tag(affordance_kind: AffordanceKind) -> &'static str {
+    match affordance_kind {
+        AffordanceKind::Move => "움직임",
+        AffordanceKind::Observe => "관찰",
+        AffordanceKind::Contact => "대화",
+        AffordanceKind::ResourceOrBody => "상태",
+        AffordanceKind::PressureResponse => "대응",
+    }
+}
+
+fn assemble_scene_director_proposal(
+    pending: &PendingAgentTurn,
+    prompt_context: &PromptContextPacket,
+    draft: &WebgptTurnDraft,
+    resolution_proposal: &ResolutionProposal,
+) -> Option<SceneDirectorProposal> {
+    let director: SceneDirectorPacket =
+        serde_json::from_value(prompt_context.visible_context.active_scene_director.clone())
+            .ok()?;
+    let transition_needed = matches!(
+        director.pacing_state.transition_pressure,
+        TransitionPressure::High
+    ) || matches!(
+        director.current_scene.scene_phase,
+        ScenePhase::TransitionReady
+    ) || director.pacing_state.unresolved_probe_turns >= 3
+        || director.pacing_state.repeated_choice_shape_count >= 3;
+    if !transition_needed {
+        return None;
+    }
+    let evidence_refs = scene_director_evidence_refs(&director, resolution_proposal);
+    if evidence_refs.is_empty() {
+        return None;
+    }
+    let to_scene_question = next_scene_question(draft);
+    Some(SceneDirectorProposal {
+        schema_version: singulari_world::SCENE_DIRECTOR_PROPOSAL_SCHEMA_VERSION.to_owned(),
+        world_id: pending.world_id.clone(),
+        turn_id: pending.turn_id.clone(),
+        scene_id: director.current_scene.scene_id.clone(),
+        beat_kind: DramaticBeatKind::Transition,
+        turn_function: "반복된 조사 장면을 닫고, 이번 턴의 visible outcome이 만든 다음 문제로 넘긴다."
+            .to_owned(),
+        tension_before: director.current_scene.current_tension,
+        tension_after: lowered_tension(director.current_scene.current_tension),
+        scene_effect: SceneEffect::SceneQuestionTransformed,
+        paragraph_strategy: ParagraphStrategy {
+            opening_shape: "new_visible_change".to_owned(),
+            middle_shape: "changed_problem".to_owned(),
+            closure_shape: "new_scene_question".to_owned(),
+        },
+        choice_strategy: ChoiceStrategy {
+            must_change_choice_shape: false,
+            avoid_recent_choice_tags: Vec::new(),
+        },
+        transition: Some(SceneTransitionProposal {
+            from_scene_id: director.current_scene.scene_id,
+            to_scene_question,
+            transition_reason: "active_scene_director가 반복 조사 한계에 도달했고, 이번 턴 결과가 다음 장면 질문으로 넘어갈 근거를 만들었다."
+                .to_owned(),
+            evidence_refs: evidence_refs.clone(),
+        }),
+        evidence_refs,
+    })
+}
+
+fn scene_director_evidence_refs(
+    director: &SceneDirectorPacket,
+    resolution_proposal: &ResolutionProposal,
+) -> Vec<String> {
+    let mut refs = BTreeSet::new();
+    refs.extend(
+        director
+            .current_scene
+            .evidence_refs
+            .iter()
+            .filter(|reference| !reference.trim().is_empty())
+            .cloned(),
+    );
+    refs.extend(
+        resolution_proposal
+            .outcome
+            .evidence_refs
+            .iter()
+            .filter(|reference| !reference.trim().is_empty())
+            .cloned(),
+    );
+    if refs.is_empty() {
+        refs.insert("current_turn".to_owned());
+    }
+    refs.into_iter().collect()
+}
+
+fn lowered_tension(tension: TensionLevel) -> TensionLevel {
+    match tension {
+        TensionLevel::High => TensionLevel::Medium,
+        other => other,
+    }
+}
+
+fn next_scene_question(draft: &WebgptTurnDraft) -> String {
+    let summary = draft.outcome.summary.trim();
+    if summary.is_empty() {
+        return "드러난 변화 뒤에 무엇을 감수하고 행동할 것인가?".to_owned();
+    }
+    let compact = summary.chars().take(48).collect::<String>();
+    format!("{compact} 이후 무엇을 감수하고 행동할 것인가?")
 }
 
 fn assemble_choice_plan(
@@ -772,6 +906,42 @@ premise:
                 .iter()
                 .any(|target_ref| target_ref.contains("char:anchor"))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn assembler_materializes_transition_when_scene_director_is_stuck() -> Result<()> {
+        let (_temp, pending, mut context) = pending_and_context()?;
+        let mut director = SceneDirectorPacket::default();
+        director.world_id.clone_from(&pending.world_id);
+        director.turn_id.clone_from(&pending.turn_id);
+        director.current_scene.scene_id = "scene:loop".to_owned();
+        director.current_scene.scene_phase = ScenePhase::TransitionReady;
+        director.current_scene.current_tension = TensionLevel::Medium;
+        director.current_scene.evidence_refs = vec!["current_turn".to_owned()];
+        director.pacing_state.transition_pressure = TransitionPressure::High;
+        director.pacing_state.repeated_choice_shape_count = 9;
+        director.pacing_state.unresolved_probe_turns = 10;
+        context.visible_context.active_scene_director = serde_json::to_value(&director)?;
+
+        let mut draft = draft();
+        for choice in &mut draft.choices {
+            choice.tag_hint = None;
+            choice.label = "생활 공간 안에서 이미 일이 벌어진 뒤의 공기가 드러나고, 깨진 손잡이를 중심으로 첫 선택의 압력이 생겼다.".to_owned();
+        }
+        let response = assemble_agent_turn_response(&pending, &context, &draft)?;
+
+        let Some(proposal) = response.scene_director_proposal else {
+            anyhow::bail!("stuck scene director should materialize a transition proposal");
+        };
+        assert_eq!(proposal.beat_kind, DramaticBeatKind::Transition);
+        assert!(proposal.transition.is_some());
+        assert!(
+            !response.next_choices[0]
+                .tag
+                .contains("생활 공간 안에서 이미 일이 벌어진")
+        );
+        assert!(response.next_choices[0].tag.chars().count() <= 14);
         Ok(())
     }
 }
