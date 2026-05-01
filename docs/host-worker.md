@@ -32,12 +32,15 @@ The text lane:
   `agent_bridge/webgpt_conversation_binding.json`;
 - builds a redacted pending-turn prompt with active memory revival from
   `resume_pack`, Archive View, recall hits, and recent world.db updates;
-- calls `webgpt_research`;
-- extracts exactly one `AgentTurnResponse` JSON from `answer_markdown`;
-- commits through the Rust validator and hidden-truth redaction checks.
+- calls `webgpt_turn_form`;
+- records the full WebGPT MCP result and writes only `form_submission` to the
+  response artifact;
+- validates the form, assembles `AgentTurnResponse`, and commits through the
+  Rust validator and hidden-truth redaction checks.
 
 `--webgpt-turn-command` can replace the built-in MCP adapter, but the output
-contract is still one validated `AgentTurnResponse`.
+contract is still one validated `TurnFormSubmission` in normal `tool-form`
+mode.
 
 ## WebGPT Image Lane
 
@@ -113,8 +116,13 @@ Diagnostic loop:
 singulari-world --store-root .world-store host-worker \
   --text-backend webgpt \
   --visual-backend webgpt \
+  --webgpt-output-mode tool-form \
   --interval-ms 750
 ```
+
+`tool-form` mode asks WebGPT for a bounded `TurnFormSubmission`; Rust validates
+the form, appends slots 6/7, assembles `AgentTurnResponse`, and then runs the
+normal WorldCourt/commit path. `draft` remains a fallback mode.
 
 ## JSONL Events
 

@@ -94,6 +94,7 @@ For operator diagnostics, the equivalent worker command is:
 target/release/singulari-world --store-root .world-store host-worker \
   --text-backend webgpt \
   --visual-backend webgpt \
+  --webgpt-output-mode tool-form \
   --interval-ms 750
 ```
 
@@ -102,12 +103,12 @@ By default the worker uses the bundled
 `SINGULARI_WORLD_WEBGPT_MCP_WRAPPER` in the process env or repository-local
 `.env` / `--webgpt-mcp-wrapper` only when that path still points inside this
 repository. It does not inspect sibling or parent checkouts; the public-alpha
-package must stay standalone. It sends the
-pending-turn prompt to `webgpt_research`, extracts one `AgentTurnResponse` JSON
-from `answer_markdown`, and commits it through the same schema, redaction, and
-world-store path. WebGPT receives an active revival packet with a larger resume
-pack, player-visible Archive View, query recall hits, and recent
-entity/relationship updates from world.db.
+package must stay standalone. In `tool-form` mode it calls
+`webgpt_turn_form`, records the full tool result, writes only the returned
+`form_submission` to the response artifact, and lets Rust validate the form,
+append slots 6/7, assemble `AgentTurnResponse`, and commit through the same
+schema, redaction, and world-store path. `draft` and `agent-response` modes
+remain fallback/diagnostic paths.
 The WebGPT visual backend calls `webgpt_generate_image`, receives a saved PNG
 path from the MCP worker, and completes the queued visual job through the same
 Rust store contract. Each world gets separate persistent ChatGPT conversation

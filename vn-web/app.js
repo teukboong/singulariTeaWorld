@@ -1274,11 +1274,13 @@ function renderRuntimeStatus(status) {
   const selection = status?.backend_selection || {};
   const narrative = status?.narrative || {};
   const visual = status?.visual || {};
+  const database = databaseRuntimeLane(status?.database, status?.details?.projection_health);
   const projection = projectionRuntimeLane(status?.details?.projection_health);
   const supervisor = supervisorRuntimeLane(status?.details?.host_supervisor);
   els.runtimeStatusPanel.append(
     runtimeStatusPill("서사", narrative, selection.text_backend),
     runtimeStatusPill("CG", visual, selection.visual_backend),
+    runtimeStatusPill("DB", database, "world.db"),
     runtimeStatusPill("상태", projection, "store"),
     runtimeStatusPill("워커", supervisor, "host-supervisor"),
     worldJobLedgerPanel(status?.details?.world_jobs),
@@ -1296,8 +1298,27 @@ function renderRuntimeLights(status) {
   renderRuntimeLight(
     els.runtimeLightState,
     "DB",
-    projectionRuntimeLane(status?.details?.projection_health),
+    databaseRuntimeLane(status?.database, status?.details?.projection_health),
   );
+}
+
+function databaseRuntimeLane(database, projectionReport) {
+  if (database) {
+    return database;
+  }
+  const component = Array.isArray(projectionReport?.components)
+    ? projectionReport.components.find((item) => item.component === "world_db")
+    : null;
+  const status = component?.status || "unknown";
+  return {
+    label: status === "healthy" ? "DB 정상" : "DB 점검 필요",
+    status,
+    backend: "world.db",
+    online: status === "healthy",
+    detail: component?.detail || "world_db component missing",
+    endpoint: null,
+    latest_dispatch_status: null,
+  };
 }
 
 function projectionRuntimeLane(report) {

@@ -10,7 +10,7 @@ does not change; only the worker engine changes.
 vn-serve browser UI
   -> world-store pending text / visual jobs
   -> host-worker
-       text lane  -> WebGPT MCP webgpt_research
+       text lane  -> WebGPT MCP webgpt_turn_form
        image lane -> WebGPT MCP webgpt_generate_image
   -> validated world-store commit / PNG completion
 ```
@@ -64,7 +64,7 @@ Default lanes:
 
 | Lane | Tool | CDP port | Profile dir | World binding |
 | --- | --- | --- | --- | --- |
-| Text | `webgpt_research` | `9238` | `~/.hesperides/singulari-world/webgpt/text-profile` | `agent_bridge/webgpt_conversation_binding.json` |
+| Text | `webgpt_turn_form` | `9238` | `~/.hesperides/singulari-world/webgpt/text-profile` | `agent_bridge/webgpt_conversation_binding.json` |
 | Turn CG image | `webgpt_generate_image` | `9239` | `~/.hesperides/singulari-world/webgpt/image-profile` | `agent_bridge/webgpt_image_conversation_binding.json` |
 | Reference image | `webgpt_generate_image` | `9240` | `~/.hesperides/singulari-world/webgpt/reference-image-profile` | `agent_bridge/webgpt_reference_asset_conversation_binding.json` |
 

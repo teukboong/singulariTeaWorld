@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde_json::Value;
-use singulari_world::{AgentOutputContract, PromptContextPacket};
+use singulari_world::{AgentOutputContract, PromptContextPacket, TurnFormSpec};
 use std::collections::BTreeSet;
 
 const NARRATIVE_TURN_PACKET_SCHEMA_VERSION: &str = "singulari.narrative_turn_packet.v1";
@@ -274,6 +274,95 @@ narrative turn packet JSON:
         narrative_turn_packet = narrative_turn_packet,
         world_id = prompt_context.world_id,
         turn_id = prompt_context.turn_id,
+    ))
+}
+
+pub(super) fn build_webgpt_turn_form_prompt(
+    prompt_context: &PromptContextPacket,
+    turn_form: &TurnFormSpec,
+) -> Result<String> {
+    let output_contract =
+        serde_json::from_value::<AgentOutputContract>(prompt_context.output_contract.clone())
+            .context("webgpt prompt context output_contract was not an AgentOutputContract")?;
+    let narrative_turn_packet_value = build_narrative_turn_packet(prompt_context)?;
+    let narrative_turn_packet = serde_json::to_string(&narrative_turn_packet_value)
+        .context("failed to serialize webgpt narrative turn packet")?;
+    let turn_form_spec =
+        serde_json::to_string(turn_form).context("failed to serialize webgpt turn form spec")?;
+    let narrative_budget = &output_contract.narrative_budget;
+    Ok(format!(
+        r#"Singulari World pending turn 하나가 들어왔어. 너는 WebGPT turn form writer다.
+
+핵심 계약:
+- AgentTurnResponse, ResolutionProposal, WorldCourt packet을 직접 쓰지 않는다.
+- 아래 turn_form_spec에 맞는 TurnFormSubmission JSON 하나만 작성한다.
+- Rust host가 TurnFormSubmission을 검증하고 AgentTurnResponse를 조립/커밋한다.
+- slot 1..5만 next_choices에 쓴다. slot 6 자유서술과 slot 7 판단 위임은 backend가 자동 추가한다.
+- pressure_movements에는 turn_form_spec.pressure_options에 있는 pressure_id만 쓴다. 없거나 이번 입력이 직접 건드리지 않으면 빈 배열로 둔다.
+- evidence_refs에는 turn_form_spec.allowed_evidence_refs에 있는 문자열만 쓴다.
+- hidden/private/adjudication-only 내용은 narrative, outcome_summary, choices에 절대 누출하지 않는다.
+- 웹 검색, 외부 사이트 탐색, repo 탐색, 소스 파일 읽기를 하지 마라.
+
+서사 출력 지시:
+- 이번 턴 서사 목표: {level_label}. 기본 선택 턴이면 {standard_blocks}문단 / 약 {target_chars}자까지 충분히 써라.
+- narrative.text_blocks는 짧은 로그나 요약이 아니라 한국어 VN prose다.
+- 문단은 장면, 감각, 행동, 반응, 여운을 나누고, 문고리/문 앞 같은 동일 지점에서 의미 없이 빙빙 돌지 마라.
+{text_design_directive}
+
+TurnFormSubmission JSON shape:
+```json
+{{
+  "schema_version": "singulari.webgpt_turn_form_submission.v1",
+  "world_id": "{world_id}",
+  "turn_id": "{turn_id}",
+  "intent_summary": "플레이어 입력/선택 해석",
+  "intent_ambiguity": "clear|minor|high",
+  "outcome_kind": "success|partial_success|blocked|costly_success|delayed|escalated",
+  "outcome_summary": "player-visible 결과 요약",
+  "pressure_movements": [
+    {{
+      "pressure_id": "turn_form_spec.pressure_options 중 하나",
+      "change": "moved|softened|increased|resolved|deferred",
+      "summary": "압력이 어떻게 움직였는지",
+      "evidence_refs": ["turn_form_spec.allowed_evidence_refs 중 하나"]
+    }}
+  ],
+  "narrative": {{
+    "speaker": null,
+    "text_blocks": ["한국어 VN prose 문단"],
+    "tone_notes": []
+  }},
+  "next_choices": [
+    {{ "slot": 1, "tag": "짧은 선택 라벨", "intent": "선택하면 하려는 구체 행동" }}
+  ],
+  "adjudication_summary": "선택 optional"
+}}
+```
+
+turn_form_spec JSON:
+```json
+{turn_form_spec}
+```
+
+narrative turn packet JSON:
+```json
+{narrative_turn_packet}
+```
+
+출력:
+- TurnFormSubmission JSON 하나만 반환한다.
+- Markdown fence, 설명문, 도입문 없이 JSON 본문만 반환한다.
+- world_id는 "{world_id}", turn_id는 "{turn_id}"와 정확히 같아야 한다.
+- next_choices는 turn_form_spec.choice_slots의 slot 1..5를 정확히 한 번씩 포함해야 한다.
+"#,
+        level_label = narrative_budget.level_label,
+        standard_blocks = narrative_budget.standard_choice_turn_blocks,
+        target_chars = narrative_budget.target_chars,
+        text_design_directive = SEEDLESS_PROSE_CONTRACT,
+        world_id = prompt_context.world_id,
+        turn_id = prompt_context.turn_id,
+        turn_form_spec = turn_form_spec,
+        narrative_turn_packet = narrative_turn_packet,
     ))
 }
 

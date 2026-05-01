@@ -196,16 +196,18 @@ WebGPT is the only runtime backend:
 target/release/singulari-world --store-root .world-store host-worker \
   --text-backend webgpt \
   --visual-backend webgpt \
+  --webgpt-output-mode tool-form \
   --interval-ms 750
 ```
 
-The worker calls `webgpt_research` through this repository's bundled
+The worker calls `webgpt_turn_form` through this repository's bundled
 `webgpt-mcp-checkout/scripts/webgpt-mcp.sh` by default. Explicit wrapper
 overrides must still point inside this repository; sibling or parent checkouts
-are rejected so the public-alpha package stays standalone. It extracts one
-`AgentTurnResponse` JSON, then validates and commits it through the same
-world-store path, so the UI, DB, CG queue, and redaction rules stay shared. With
-`--visual-backend webgpt`, it also calls
+are rejected so the public-alpha package stays standalone. It records the full
+WebGPT MCP tool result, writes only `form_submission` to the response artifact,
+then validates, assembles, and commits through the same world-store path, so the
+UI, DB, CG queue, and redaction rules stay shared. With `--visual-backend
+webgpt`, it also calls
 `webgpt_generate_image`, receives an extracted PNG path, and completes the same
 visual jobs the browser queued. WebGPT text and image use separate world-scoped
 ChatGPT conversation URLs: `agent_bridge/webgpt_conversation_binding.json` for

@@ -17,12 +17,13 @@ use serde_json::Value;
 use singulari_world::{
     AgentCommitTurnOptions, AgentSubmitTurnOptions, AgentTurnResponse, BuildCodexViewOptions,
     BuildResumePackOptions, BuildVnPacketOptions, BuildWorldVisualAssetsOptions,
-    ClaimVisualJobOptions, CompleteVisualJobOptions, ReleaseVisualJobClaimOptions,
-    StartWorldOptions, advance_turn, build_codex_view, build_resume_pack, build_vn_packet,
-    build_world_visual_assets, claim_visual_job, commit_agent_turn, complete_visual_job,
-    enqueue_agent_turn, load_pending_agent_turn, refresh_world_docs, release_visual_job_claim,
-    repair_world_db, resolve_store_paths, resolve_world_id, search_world_db, start_world,
-    validate_world,
+    ClaimVisualJobOptions, CompilePromptContextPacketOptions, CompleteVisualJobOptions,
+    ReleaseVisualJobClaimOptions, StartWorldOptions, TurnFormRejection, TurnFormSubmission,
+    advance_turn, assemble_agent_turn_response_from_form, build_codex_view, build_resume_pack,
+    build_turn_form_spec, build_vn_packet, build_world_visual_assets, claim_visual_job,
+    commit_agent_turn, compile_prompt_context_packet, complete_visual_job, enqueue_agent_turn,
+    load_pending_agent_turn, refresh_world_docs, release_visual_job_claim, repair_world_db,
+    resolve_store_paths, resolve_world_id, search_world_db, start_world, validate_world,
 };
 use std::{
     fs,
@@ -131,6 +132,10 @@ impl WorldsimMcpServer {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "MCP tool registry is an explicit dispatch surface"
+)]
 fn worldsim_mcp_tools() -> Vec<Tool> {
     vec![
         Tool::new(
@@ -152,6 +157,16 @@ fn worldsim_mcp_tools() -> Vec<Tool> {
             "worldsim_next_pending_turn",
             "Return the trusted local-agent pending turn packet, including private adjudication context.",
             tool::schema_for_type::<WorldsimWorldParams>(),
+        ),
+        Tool::new(
+            "worldsim_next_turn_form",
+            "Return a bounded form spec for the current pending agent turn. The text backend fills this form instead of authoring AgentTurnResponse JSON.",
+            tool::schema_for_type::<WorldsimWorldParams>(),
+        ),
+        Tool::new(
+            "worldsim_submit_turn_form",
+            "Submit a bounded form for the current pending agent turn. The backend validates fields, assembles AgentTurnResponse, commits it, and returns the VN packet or field errors.",
+            tool::schema_for_type::<WorldsimSubmitTurnFormParams>(),
         ),
         Tool::new(
             "worldsim_commit_agent_turn",
@@ -257,6 +272,10 @@ impl ServerHandler for WorldsimMcpServer {
         std::future::ready(Ok(ListToolsResult::with_all_items(tools)))
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "MCP tool dispatch keeps tool names and parameter parsers auditable"
+    )]
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
@@ -288,6 +307,14 @@ impl ServerHandler for WorldsimMcpServer {
             "worldsim_next_pending_turn" => {
                 let params: WorldsimWorldParams = tool::parse_json_object(arguments)?;
                 blocking_tool(move || worldsim_next_pending_turn(params)).await
+            }
+            "worldsim_next_turn_form" => {
+                let params: WorldsimWorldParams = tool::parse_json_object(arguments)?;
+                blocking_tool(move || worldsim_next_turn_form(params)).await
+            }
+            "worldsim_submit_turn_form" => {
+                let params: WorldsimSubmitTurnFormParams = tool::parse_json_object(arguments)?;
+                blocking_tool(move || worldsim_submit_turn_form(params)).await
             }
             "worldsim_commit_agent_turn" => {
                 let params: WorldsimCommitAgentTurnParams = tool::parse_json_object(arguments)?;
@@ -696,6 +723,15 @@ struct WorldsimCommitAgentTurnParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct WorldsimSubmitTurnFormParams {
+    submission: TurnFormSubmission,
+    #[serde(default)]
+    store_root: Option<String>,
+    #[serde(default)]
+    world_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 struct WorldsimClaimVisualJobParams {
     #[serde(default)]
     store_root: Option<String>,
@@ -852,6 +888,33 @@ enum WorldsimSubmitPlayerInputResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct WorldsimTurnFormResponse {
+    world_id: String,
+    turn_id: String,
+    pending_ref: String,
+    form: singulari_world::TurnFormSpec,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum WorldsimSubmitTurnFormResponse {
+    Committed {
+        world_id: String,
+        turn_id: String,
+        committed: Box<singulari_world::CommittedAgentTurn>,
+    },
+    FieldErrors {
+        rejection: TurnFormRejection,
+    },
+    AuditRejected {
+        world_id: String,
+        turn_id: String,
+        field_errors: Vec<singulari_world::TurnFormFieldError>,
+        retryable: bool,
+    },
+}
+
+#[derive(Debug, Serialize)]
 struct WorldsimSearchResponse {
     world_id: String,
     query: String,
@@ -993,6 +1056,77 @@ fn worldsim_next_pending_turn(
     let store_root = store_root(params.store_root);
     let world_id = resolve_world_id(store_root.as_deref(), params.world_id.as_deref())?;
     load_pending_agent_turn(store_root.as_deref(), world_id.as_str())
+}
+
+fn worldsim_next_turn_form(params: WorldsimWorldParams) -> Result<WorldsimTurnFormResponse> {
+    let store_root = store_root(params.store_root);
+    let world_id = resolve_world_id(store_root.as_deref(), params.world_id.as_deref())?;
+    let pending = load_pending_agent_turn(store_root.as_deref(), world_id.as_str())?;
+    let context = compile_prompt_context_packet(&CompilePromptContextPacketOptions {
+        store_root: store_root.as_deref(),
+        pending: &pending,
+        engine_session_kind: "webgpt_tool_form",
+    })?;
+    let form = build_turn_form_spec(&pending, &context);
+    Ok(WorldsimTurnFormResponse {
+        world_id,
+        turn_id: pending.turn_id,
+        pending_ref: pending.pending_ref,
+        form,
+    })
+}
+
+fn worldsim_submit_turn_form(
+    params: WorldsimSubmitTurnFormParams,
+) -> Result<WorldsimSubmitTurnFormResponse> {
+    let store_root = store_root(params.store_root);
+    let world_id = resolve_world_id(
+        store_root.as_deref(),
+        params
+            .world_id
+            .as_deref()
+            .or(Some(params.submission.world_id.as_str())),
+    )?;
+    if params.submission.world_id != world_id {
+        bail!(
+            "worldsim_submit_turn_form world_id mismatch: argument={world_id}, submission={}",
+            params.submission.world_id
+        );
+    }
+    let pending = load_pending_agent_turn(store_root.as_deref(), world_id.as_str())?;
+    let context = compile_prompt_context_packet(&CompilePromptContextPacketOptions {
+        store_root: store_root.as_deref(),
+        pending: &pending,
+        engine_session_kind: "webgpt_tool_form",
+    })?;
+    let response =
+        match assemble_agent_turn_response_from_form(&pending, &context, params.submission) {
+            Ok(response) => response,
+            Err(rejection) => {
+                return Ok(WorldsimSubmitTurnFormResponse::FieldErrors { rejection });
+            }
+        };
+    match commit_agent_turn(&AgentCommitTurnOptions {
+        store_root,
+        world_id: world_id.clone(),
+        response,
+    }) {
+        Ok(committed) => Ok(WorldsimSubmitTurnFormResponse::Committed {
+            world_id,
+            turn_id: committed.turn_id.clone(),
+            committed: Box::new(committed),
+        }),
+        Err(error) => Ok(WorldsimSubmitTurnFormResponse::AuditRejected {
+            world_id,
+            turn_id: pending.turn_id,
+            field_errors: vec![singulari_world::TurnFormFieldError {
+                field_path: "submission".to_owned(),
+                message: format!("assembled turn response was rejected: {error:#}"),
+                allowed_values: Vec::new(),
+            }],
+            retryable: true,
+        }),
+    }
 }
 
 fn worldsim_commit_agent_turn(
@@ -1610,6 +1744,8 @@ mod tests {
         assert!(server.tool_allowed("worldsim_complete_visual_job_from_base64"));
         assert!(server.tool_allowed("worldsim_complete_visual_job_from_url"));
         assert!(!server.tool_allowed("worldsim_next_pending_turn"));
+        assert!(!server.tool_allowed("worldsim_next_turn_form"));
+        assert!(!server.tool_allowed("worldsim_submit_turn_form"));
         assert!(!server.tool_allowed("worldsim_commit_agent_turn"));
         assert!(!server.tool_allowed("worldsim_repair_db"));
     }

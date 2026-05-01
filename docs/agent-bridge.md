@@ -51,13 +51,14 @@ into the world store, then `vn-serve` wakes `host-worker --once`.
 target/release/singulari-world --store-root .world-store host-worker \
   --text-backend webgpt \
   --visual-backend webgpt \
+  --webgpt-output-mode tool-form \
   --interval-ms 750
 ```
 
-The text lane calls `webgpt_research`, reuses
-`agent_bridge/webgpt_conversation_binding.json`, extracts one
-`AgentTurnResponse`, and commits through the same schema and redaction checks
-as MCP `worldsim_commit_agent_turn`.
+The text lane calls `webgpt_turn_form`, reuses
+`agent_bridge/webgpt_conversation_binding.json`, records the full WebGPT MCP
+tool result, writes only its `form_submission` object to the response artifact,
+and lets Rust assemble/validate/commit the canonical `AgentTurnResponse`.
 
 The image lane calls `webgpt_generate_image`, reuses separate image
 conversation bindings, extracts a PNG, and completes the same visual jobs

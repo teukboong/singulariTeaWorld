@@ -4,6 +4,7 @@ use serde::Serialize;
 use serde_json::Value;
 use singulari_world::{
     AgentCommitTurnOptions, AgentTurnResponse, CompilePromptContextPacketOptions,
+    TurnFormSubmission, assemble_agent_turn_response_from_form, build_turn_form_spec,
     commit_agent_turn, compile_prompt_context_packet, resolve_store_paths,
 };
 use singulari_world::{WorldJobStatus, WriteTextTurnJobOptions, write_text_turn_job};
@@ -29,7 +30,9 @@ pub(super) use image::{
     visual_dispatch_dir_for_world,
 };
 use json_extract::extract_json_object_text;
-use prompt::{build_webgpt_turn_draft_prompt, build_webgpt_turn_prompt};
+use prompt::{
+    build_webgpt_turn_draft_prompt, build_webgpt_turn_form_prompt, build_webgpt_turn_prompt,
+};
 
 #[cfg(test)]
 use image::{
@@ -189,6 +192,7 @@ pub(super) enum WebGptDispatchOutcome {
 pub(crate) enum WebGptTextOutputMode {
     AgentResponse,
     Draft,
+    ToolForm,
 }
 
 impl WebGptTextOutputMode {
@@ -196,6 +200,7 @@ impl WebGptTextOutputMode {
         match self {
             Self::AgentResponse => "agent_response",
             Self::Draft => "draft",
+            Self::ToolForm => "tool_form",
         }
     }
 }
@@ -230,7 +235,10 @@ pub(super) struct WebGptDispatchRecord {
     pub(super) record_path: String,
     pub(super) prompt_path: String,
     pub(super) prompt_context_path: String,
+    pub(super) form_spec_path: Option<String>,
     pub(super) response_path: String,
+    pub(super) tool_result_path: Option<String>,
+    pub(super) field_errors_path: Option<String>,
     pub(super) repair_attempts: u8,
     pub(super) repair_prompt_path: Option<String>,
     pub(super) repair_response_path: Option<String>,
@@ -267,8 +275,11 @@ pub(super) fn dispatch_pending_agent_turn_via_webgpt(
     let prompt_path = dispatch_dir.join(format!("{}-webgpt-prompt.md", pending.turn_id));
     let prompt_context_path =
         dispatch_dir.join(format!("{}-webgpt-prompt-context.json", pending.turn_id));
+    let form_spec_path = dispatch_dir.join(format!("{}-webgpt-turn-form.json", pending.turn_id));
     let response_path =
         dispatch_dir.join(format!("{}-webgpt-agent-response.json", pending.turn_id));
+    let field_errors_path =
+        dispatch_dir.join(format!("{}-webgpt-field-errors.json", pending.turn_id));
     let result_path = dispatch_dir.join(format!("{}-webgpt-result.json", pending.turn_id));
     let stdout_path = dispatch_dir.join(format!("{}-webgpt-stdout.log", pending.turn_id));
     let stderr_path = dispatch_dir.join(format!("{}-webgpt-stderr.log", pending.turn_id));
@@ -291,7 +302,9 @@ pub(super) fn dispatch_pending_agent_turn_via_webgpt(
         turn_id: pending.turn_id.as_str(),
         prompt_path: prompt_path.as_path(),
         prompt_context_path: prompt_context_path.as_path(),
+        form_spec_path: form_spec_path.as_path(),
         response_path: response_path.as_path(),
+        field_errors_path: field_errors_path.as_path(),
         result_path: result_path.as_path(),
         stdout_path: stdout_path.as_path(),
         stderr_path: stderr_path.as_path(),
@@ -324,6 +337,7 @@ pub(super) fn dispatch_pending_agent_turn_via_webgpt(
         store_root,
         pending,
         &prompt_context_path,
+        &form_spec_path,
         &prompt_path,
         output_mode,
     )?;
@@ -365,7 +379,7 @@ pub(super) fn dispatch_pending_agent_turn_via_webgpt(
     let commit_result = commit_webgpt_dispatch_if_success(
         store_root,
         pending,
-        response_path.as_path(),
+        paths,
         &dispatch_result,
         output_mode,
     );
@@ -454,7 +468,7 @@ fn try_commit_existing_webgpt_response(
     let commit_result = commit_webgpt_dispatch_if_success(
         input.store_root,
         input.pending,
-        paths.response_path,
+        paths,
         &dispatch_result,
         input.output_mode,
     );
@@ -508,7 +522,9 @@ fn select_existing_webgpt_response_paths<'a>(
                 turn_id: input.pending.turn_id.as_str(),
                 prompt_path: input.repair_prompt_path,
                 prompt_context_path: input.base_paths.prompt_context_path,
+                form_spec_path: input.base_paths.form_spec_path,
                 response_path: input.repair_response_path,
+                field_errors_path: input.base_paths.field_errors_path,
                 result_path: input.repair_result_path,
                 stdout_path: input.repair_stdout_path,
                 stderr_path: input.repair_stderr_path,
@@ -579,6 +595,7 @@ fn write_webgpt_prompt_artifacts(
     store_root: Option<&Path>,
     pending: &singulari_world::PendingAgentTurn,
     prompt_context_path: &Path,
+    form_spec_path: &Path,
     prompt_path: &Path,
     output_mode: WebGptTextOutputMode,
 ) -> Result<WebGptPromptArtifacts> {
@@ -591,9 +608,21 @@ fn write_webgpt_prompt_artifacts(
     let prompt_context_bytes = prompt_context_raw.len() as u64;
     fs::write(prompt_context_path, prompt_context_raw)
         .with_context(|| format!("failed to write {}", prompt_context_path.display()))?;
+    let turn_form_spec = (output_mode == WebGptTextOutputMode::ToolForm)
+        .then(|| build_turn_form_spec(pending, &prompt_context));
+    if let Some(turn_form_spec) = &turn_form_spec {
+        fs::write(form_spec_path, serde_json::to_vec_pretty(turn_form_spec)?)
+            .with_context(|| format!("failed to write {}", form_spec_path.display()))?;
+    }
     let prompt = match output_mode {
         WebGptTextOutputMode::AgentResponse => build_webgpt_turn_prompt(&prompt_context)?,
         WebGptTextOutputMode::Draft => build_webgpt_turn_draft_prompt(&prompt_context)?,
+        WebGptTextOutputMode::ToolForm => build_webgpt_turn_form_prompt(
+            &prompt_context,
+            turn_form_spec
+                .as_ref()
+                .context("tool-form mode did not build a form spec")?,
+        )?,
     };
     let prompt_bytes = prompt.len() as u64;
     fs::write(prompt_path, prompt.as_bytes())
@@ -619,10 +648,12 @@ fn write_webgpt_repair_prompt(
     let rejected_label = match output_mode {
         WebGptTextOutputMode::AgentResponse => "Rejected AgentTurnResponse",
         WebGptTextOutputMode::Draft => "Rejected WebgptTurnDraft",
+        WebGptTextOutputMode::ToolForm => "Rejected TurnFormSubmission",
     };
     let output_contract = match output_mode {
         WebGptTextOutputMode::AgentResponse => "AgentTurnResponse",
         WebGptTextOutputMode::Draft => "WebgptTurnDraft",
+        WebGptTextOutputMode::ToolForm => "TurnFormSubmission",
     };
     let repair_prompt = format!(
         r"{original_prompt}
@@ -743,7 +774,15 @@ fn webgpt_dispatch_record(
         record_path: record_path.display().to_string(),
         prompt_path: paths.prompt_path.display().to_string(),
         prompt_context_path: paths.prompt_context_path.display().to_string(),
+        form_spec_path: (output_mode == WebGptTextOutputMode::ToolForm)
+            .then(|| paths.form_spec_path.display().to_string()),
         response_path: paths.response_path.display().to_string(),
+        tool_result_path: (output_mode == WebGptTextOutputMode::ToolForm)
+            .then(|| paths.result_path.display().to_string()),
+        field_errors_path: paths
+            .field_errors_path
+            .is_file()
+            .then(|| paths.field_errors_path.display().to_string()),
         repair_attempts: repair.attempts,
         repair_prompt_path: repair.prompt_path,
         repair_response_path: repair.response_path,
@@ -854,7 +893,7 @@ struct WebGptCommitResult {
 fn commit_webgpt_dispatch_if_success(
     store_root: Option<&Path>,
     pending: &singulari_world::PendingAgentTurn,
-    response_path: &Path,
+    paths: WebGptTurnPaths<'_>,
     dispatch_result: &WebGptDispatchResult,
     output_mode: WebGptTextOutputMode,
 ) -> WebGptCommitResult {
@@ -871,18 +910,51 @@ fn commit_webgpt_dispatch_if_success(
             error,
         };
     }
-    match commit_webgpt_agent_response(store_root, pending, response_path, output_mode) {
+    match commit_webgpt_agent_response(store_root, pending, paths, output_mode) {
         Ok(committed) => WebGptCommitResult {
             status: "completed".to_owned(),
             committed: Some(committed),
             error: None,
         },
-        Err(error) => WebGptCommitResult {
-            status: "commit_failed".to_owned(),
-            committed: None,
-            error: Some(format!("{error:#}")),
-        },
+        Err(error) => {
+            let error = format!("{error:#}");
+            WebGptCommitResult {
+                status: webgpt_commit_failure_status(error.as_str()).to_owned(),
+                committed: None,
+                error: Some(error),
+            }
+        }
     }
+}
+
+fn webgpt_commit_failure_status(error: &str) -> &'static str {
+    if is_webgpt_retryable_commit_signal(error) {
+        "failed"
+    } else {
+        "commit_failed"
+    }
+}
+
+fn is_webgpt_retryable_commit_signal(error: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
+    if normalized.contains("world.db")
+        || normalized.contains("turn commit")
+        || normalized.contains("commit record")
+        || normalized.contains("transaction commit")
+        || normalized.contains("failed to write")
+        || normalized.contains("failed to remove")
+        || normalized.contains("failed to rename")
+    {
+        return false;
+    }
+    normalized.contains("failed to parse")
+        || normalized.contains("failed to assemble")
+        || normalized.contains("webgpt answer did not contain")
+        || normalized.contains("missing field")
+        || normalized.contains("unknown variant")
+        || normalized.contains("invalid type")
+        || normalized.contains("proposal audit failed")
+        || normalized.contains("worldcourt")
 }
 
 #[derive(Clone, Copy)]
@@ -891,7 +963,9 @@ struct WebGptTurnPaths<'a> {
     turn_id: &'a str,
     prompt_path: &'a Path,
     prompt_context_path: &'a Path,
+    form_spec_path: &'a Path,
     response_path: &'a Path,
+    field_errors_path: &'a Path,
     result_path: &'a Path,
     stdout_path: &'a Path,
     stderr_path: &'a Path,
@@ -1510,18 +1584,34 @@ fn run_webgpt_mcp_research_turn(
 ) -> Result<WebGptDispatchResult> {
     let prompt = fs::read_to_string(paths.prompt_path)
         .with_context(|| format!("failed to read {}", paths.prompt_path.display()))?;
-    let arguments = build_webgpt_research_arguments(
-        prompt.as_str(),
-        conversation_id,
-        model,
-        reasoning_level,
-        timeout_secs,
-    );
+    let (tool_name, arguments) = match output_mode {
+        WebGptTextOutputMode::ToolForm => (
+            "webgpt_turn_form",
+            build_webgpt_turn_form_arguments(
+                prompt.as_str(),
+                paths.form_spec_path,
+                conversation_id,
+                model,
+                reasoning_level,
+                timeout_secs,
+            )?,
+        ),
+        WebGptTextOutputMode::AgentResponse | WebGptTextOutputMode::Draft => (
+            "webgpt_research",
+            build_webgpt_research_arguments(
+                prompt.as_str(),
+                conversation_id,
+                model,
+                reasoning_level,
+                timeout_secs,
+            ),
+        ),
+    };
     let tool_result = match call_resident_mcp_tool(
         wrapper,
         runtime,
         "singulari-world-webgpt-turn",
-        "webgpt_research",
+        tool_name,
         &arguments,
         true,
     ) {
@@ -1557,11 +1647,11 @@ fn run_webgpt_mcp_research_turn(
     fs::write(paths.result_path, raw_result.as_bytes())
         .with_context(|| format!("failed to write {}", paths.result_path.display()))?;
     let result = serde_json::from_str::<serde_json::Value>(&raw_result)
-        .context("failed to parse webgpt_research result JSON")?;
+        .with_context(|| format!("failed to parse {tool_name} result JSON"))?;
     let answer_markdown = result
         .get("answer_markdown")
         .and_then(serde_json::Value::as_str)
-        .context("webgpt_research result missing answer_markdown")?;
+        .with_context(|| format!("{tool_name} result missing answer_markdown"))?;
     let raw_conversation_id = result
         .get("raw_conversation_id")
         .and_then(serde_json::Value::as_str)
@@ -1579,6 +1669,9 @@ fn run_webgpt_mcp_research_turn(
         WebGptTextOutputMode::Draft => draft::parse_webgpt_turn_draft(answer_markdown)
             .ok()
             .and_then(|draft| serde_json::to_string(&draft).ok()),
+        WebGptTextOutputMode::ToolForm => result
+            .get("form_submission")
+            .and_then(|value| serde_json::to_string_pretty(value).ok()),
     };
     let Some(agent_response_json) = extracted_output else {
         let error = match output_mode {
@@ -1587,6 +1680,9 @@ fn run_webgpt_mcp_research_turn(
             }
             WebGptTextOutputMode::Draft => {
                 "webgpt answer did not contain one complete WebgptTurnDraft JSON object"
+            }
+            WebGptTextOutputMode::ToolForm => {
+                "webgpt_turn_form result did not contain one complete form_submission object"
             }
         }
         .to_owned();
@@ -1650,6 +1746,31 @@ fn build_webgpt_research_arguments(
         }
     }
     arguments
+}
+
+fn build_webgpt_turn_form_arguments(
+    prompt: &str,
+    form_spec_path: &Path,
+    conversation_id: Option<&str>,
+    model: Option<&str>,
+    reasoning_level: Option<&str>,
+    timeout_secs: u64,
+) -> Result<serde_json::Value> {
+    let raw_form_spec = fs::read_to_string(form_spec_path)
+        .with_context(|| format!("failed to read {}", form_spec_path.display()))?;
+    let turn_form_spec = serde_json::from_str::<Value>(&raw_form_spec)
+        .with_context(|| format!("failed to parse {}", form_spec_path.display()))?;
+    let mut arguments = build_webgpt_research_arguments(
+        prompt,
+        conversation_id,
+        model,
+        reasoning_level,
+        timeout_secs,
+    );
+    if let Some(object) = arguments.as_object_mut() {
+        object.insert("turn_form_spec".to_owned(), turn_form_spec);
+    }
+    Ok(arguments)
 }
 
 fn resolve_webgpt_mcp_wrapper(options: &HostWorkerOptions) -> Result<PathBuf> {
@@ -1939,17 +2060,20 @@ fn save_webgpt_conversation_binding(
 fn commit_webgpt_agent_response(
     store_root: Option<&Path>,
     pending: &singulari_world::PendingAgentTurn,
-    response_path: &Path,
+    paths: WebGptTurnPaths<'_>,
     output_mode: WebGptTextOutputMode,
 ) -> Result<singulari_world::CommittedAgentTurn> {
-    let raw_body = fs::read_to_string(response_path)
-        .with_context(|| format!("failed to read {}", response_path.display()))?;
+    let raw_body = fs::read_to_string(paths.response_path)
+        .with_context(|| format!("failed to read {}", paths.response_path.display()))?;
     let response = match output_mode {
         WebGptTextOutputMode::AgentResponse => {
-            parse_webgpt_agent_turn_response(store_root, pending, &raw_body, response_path)?
+            parse_webgpt_agent_turn_response(store_root, pending, &raw_body, paths.response_path)?
         }
         WebGptTextOutputMode::Draft => {
-            parse_webgpt_turn_draft_response(store_root, pending, &raw_body, response_path)?
+            parse_webgpt_turn_draft_response(store_root, pending, &raw_body, paths.response_path)?
+        }
+        WebGptTextOutputMode::ToolForm => {
+            parse_webgpt_turn_form_response(store_root, pending, &raw_body, paths)?
         }
     };
     commit_agent_turn(&AgentCommitTurnOptions {
@@ -1988,6 +2112,37 @@ fn parse_webgpt_turn_draft_response(
     })?;
     draft::assemble_agent_turn_response(pending, &prompt_context, &draft)
         .with_context(|| format!("failed to assemble {}", response_path.display()))
+}
+
+fn parse_webgpt_turn_form_response(
+    store_root: Option<&Path>,
+    pending: &singulari_world::PendingAgentTurn,
+    raw_body: &str,
+    paths: WebGptTurnPaths<'_>,
+) -> Result<AgentTurnResponse> {
+    let submission = serde_json::from_str::<TurnFormSubmission>(raw_body)
+        .with_context(|| format!("failed to parse {}", paths.response_path.display()))?;
+    let prompt_context = compile_prompt_context_packet(&CompilePromptContextPacketOptions {
+        store_root,
+        pending,
+        engine_session_kind: "webgpt_project_session",
+    })?;
+    match assemble_agent_turn_response_from_form(pending, &prompt_context, submission) {
+        Ok(response) => Ok(response),
+        Err(rejection) => {
+            fs::write(
+                paths.field_errors_path,
+                serde_json::to_vec_pretty(&rejection)
+                    .context("failed to serialize turn form rejection")?,
+            )
+            .with_context(|| format!("failed to write {}", paths.field_errors_path.display()))?;
+            Err(anyhow::anyhow!(
+                "turn form rejected: {}",
+                serde_json::to_string(&rejection).unwrap_or_else(|_| "field_errors".to_owned())
+            ))
+            .with_context(|| format!("failed to assemble {}", paths.response_path.display()))
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -2854,8 +3009,15 @@ pub(super) fn existing_dispatch_is_retryable(path: &Path) -> Result<bool> {
         .get("error")
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
+    let repair_attempts = value
+        .get("repair_attempts")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_default();
     Ok(
         (matches!(status, Some("failed")) && !is_webgpt_timeout_signal(error))
+            || (matches!(status, Some("commit_failed"))
+                && repair_attempts == 0
+                && is_webgpt_retryable_commit_signal(error))
             || (matches!(status, Some("dispatching")) && dispatch_record_is_stale(&value)?),
     )
 }
@@ -2953,6 +3115,40 @@ mod tests {
     }
 
     #[test]
+    fn tool_form_arguments_carry_form_spec_to_webgpt_mcp() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let form_spec_path = temp.path().join("turn-form.json");
+        fs::write(
+            &form_spec_path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema_version": "singulari.webgpt_turn_form_spec.v1",
+                "world_id": "stw_form",
+                "turn_id": "turn_0001",
+                "choice_slots": []
+            }))?,
+        )?;
+
+        let arguments = build_webgpt_turn_form_arguments(
+            "write turn",
+            &form_spec_path,
+            Some("conv_123"),
+            Some("gpt-5.5"),
+            Some("high"),
+            60,
+        )?;
+
+        assert_eq!(arguments["prompt"], "write turn");
+        assert_eq!(
+            arguments["turn_form_spec"]["schema_version"],
+            "singulari.webgpt_turn_form_spec.v1"
+        );
+        assert_eq!(arguments["conversation_id"], "conv_123");
+        assert_eq!(arguments["model"], "gpt-5.5");
+        assert_eq!(arguments["reasoning_level"], "high");
+        Ok(())
+    }
+
+    #[test]
     fn timeout_dispatch_failures_are_not_reprompted() -> anyhow::Result<()> {
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("turn_0001-webgpt.json");
@@ -3026,7 +3222,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_claim_does_not_replace_commit_failed_record() -> anyhow::Result<()> {
+    fn dispatch_claim_retries_generated_contract_commit_failure() -> anyhow::Result<()> {
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("turn_0001-webgpt.json");
         fs::write(
@@ -3046,15 +3242,15 @@ mod tests {
             "attempt": "retry",
         });
 
-        assert!(!write_dispatch_claim(&path, &claim)?);
+        assert!(write_dispatch_claim(&path, &claim)?);
         let value: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
-        assert_eq!(value["status"], serde_json::json!("commit_failed"));
-        assert!(value.get("attempt").is_none());
+        assert_eq!(value["status"], serde_json::json!("dispatching"));
+        assert_eq!(value["attempt"], serde_json::json!("retry"));
         Ok(())
     }
 
     #[test]
-    fn commit_failures_are_not_auto_reprompted() -> anyhow::Result<()> {
+    fn generated_response_parse_commit_failures_are_retryable() -> anyhow::Result<()> {
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("turn_0002-webgpt.json");
         fs::write(
@@ -3067,7 +3263,37 @@ mod tests {
             }))?,
         )?;
 
+        assert!(existing_dispatch_is_retryable(&path)?);
+        assert_eq!(
+            webgpt_commit_failure_status(
+                "failed to parse /tmp/turn_0002-webgpt-agent-response.json: missing field `cause` at line 1 column 4061"
+            ),
+            "failed"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn durable_commit_failures_are_not_auto_reprompted() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("turn_0004-webgpt.json");
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema_version": "singulari.webgpt_dispatch_record.v1",
+                "status": "commit_failed",
+                "turn_id": "turn_0004",
+                "error": "world.db record turn transaction commit failed: disk I/O error",
+            }))?,
+        )?;
+
         assert!(!existing_dispatch_is_retryable(&path)?);
+        assert_eq!(
+            webgpt_commit_failure_status(
+                "world.db record turn transaction commit failed: disk I/O error"
+            ),
+            "commit_failed"
+        );
         Ok(())
     }
 

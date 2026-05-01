@@ -390,6 +390,11 @@ impl WebGptMcpServer {
                     tool::schema_for_type::<WebGptResearchParams>(),
                 ),
                 Tool::new(
+                    "webgpt_turn_form",
+                    "Run one WebGPT-backed turn-form authorship pass and return a structured form_submission object extracted inside the WebGPT MCP boundary.",
+                    tool::schema_for_type::<WebGptTurnFormParams>(),
+                ),
+                Tool::new(
                     "webgpt_extract_images",
                     "Extract ChatGPT-generated images from a WebGPT conversation via the live browser page context and save them under the WebGPT MCP image cache.",
                     tool::schema_for_type::<WebGptImageExtractParams>(),
@@ -429,6 +434,10 @@ impl ServerHandler for WebGptMcpServer {
         std::future::ready(Ok(ListToolsResult::with_all_items(self.tools.clone())))
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "MCP dispatch keeps tool names and result serialization in one explicit table"
+    )]
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
@@ -456,6 +465,22 @@ impl ServerHandler for WebGptMcpServer {
                     .map_err(|error| {
                         McpError::internal_error(
                             format!("research task join failed: {error}"),
+                            None,
+                        )
+                    })?
+                    .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+                Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(&answer)
+                        .map_err(|error| McpError::internal_error(error.to_string(), None))?,
+                )]))
+            }
+            "webgpt_turn_form" => {
+                let params: WebGptTurnFormParams = tool::parse_json_object(arguments)?;
+                let answer = tokio::task::spawn_blocking(move || run_turn_form(&params))
+                    .await
+                    .map_err(|error| {
+                        McpError::internal_error(
+                            format!("turn form task join failed: {error}"),
                             None,
                         )
                     })?
@@ -567,6 +592,34 @@ struct WebGptResearchParams {
     auto_recover: Option<bool>,
     #[serde(default)]
     recovery_attempts: Option<u8>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct WebGptTurnFormParams {
+    prompt: String,
+    turn_form_spec: Value,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+    #[serde(default)]
+    conversation_id: Option<String>,
+    #[serde(default)]
+    new_conversation: Option<bool>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    reasoning_level: Option<String>,
+    #[serde(default)]
+    auto_recover: Option<bool>,
+    #[serde(default)]
+    recovery_attempts: Option<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WebGptTurnFormAnswer {
+    #[serde(flatten)]
+    answer: WebGptAnswer,
+    form_submission: Value,
+    form_submission_source: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1529,6 +1582,145 @@ fn run_research(params: &WebGptResearchParams) -> Result<WebGptAnswer> {
     unreachable!("bounded research recovery loop should always return")
 }
 
+fn run_turn_form(params: &WebGptTurnFormParams) -> Result<WebGptTurnFormAnswer> {
+    if params.prompt.trim().is_empty() {
+        bail!("prompt must not be empty");
+    }
+    validate_turn_form_spec(&params.turn_form_spec)?;
+    let research_params = WebGptResearchParams {
+        prompt: params.prompt.clone(),
+        timeout_secs: params.timeout_secs,
+        conversation_id: params.conversation_id.clone(),
+        new_conversation: params.new_conversation,
+        model: params.model.clone(),
+        reasoning_level: params.reasoning_level.clone(),
+        auto_recover: params.auto_recover,
+        recovery_attempts: params.recovery_attempts,
+    };
+    let answer = run_research(&research_params)?;
+    let form_submission = extract_json_object_for_schema(
+        answer.answer_markdown.as_str(),
+        "singulari.webgpt_turn_form_submission.v1",
+        &[
+            "world_id",
+            "turn_id",
+            "intent_summary",
+            "outcome_summary",
+            "narrative",
+            "next_choices",
+        ],
+    )
+    .context("webgpt answer did not contain one complete TurnFormSubmission JSON object")?;
+    Ok(WebGptTurnFormAnswer {
+        answer,
+        form_submission,
+        form_submission_source: "answer_markdown_json_object".to_owned(),
+    })
+}
+
+fn validate_turn_form_spec(value: &Value) -> Result<()> {
+    let Some(object) = value.as_object() else {
+        bail!("turn_form_spec must be an object");
+    };
+    if object.get("schema_version").and_then(Value::as_str)
+        != Some("singulari.webgpt_turn_form_spec.v1")
+    {
+        bail!("turn_form_spec schema_version mismatch");
+    }
+    for required in ["world_id", "turn_id", "choice_slots"] {
+        if !object.contains_key(required) {
+            bail!("turn_form_spec missing required field: {required}");
+        }
+    }
+    Ok(())
+}
+
+fn extract_json_object_for_schema(
+    raw: &str,
+    schema_version: &str,
+    required_keys: &[&str],
+) -> Option<Value> {
+    let accepts = |value: &Value| object_matches_schema(value, schema_version, required_keys);
+    let trimmed = raw.trim();
+    if serde_json::from_str::<Value>(trimmed).is_ok_and(|value| accepts(&value)) {
+        return serde_json::from_str(trimmed).ok();
+    }
+    if let Some(fenced) = extract_fenced_json_text(trimmed, &accepts) {
+        return serde_json::from_str(fenced.as_str()).ok();
+    }
+    extract_first_balanced_json_object(trimmed, accepts)
+}
+
+fn extract_fenced_json_text(raw: &str, accepts: &impl Fn(&Value) -> bool) -> Option<String> {
+    let fence_start = raw.find("```")?;
+    let after_start = &raw[fence_start + 3..];
+    let after_header = after_start
+        .find('\n')
+        .map_or(after_start, |index| &after_start[index + 1..]);
+    let fence_end = after_header.find("```")?;
+    let candidate = after_header[..fence_end].trim();
+    if serde_json::from_str::<Value>(candidate).is_ok_and(|value| accepts(&value)) {
+        Some(candidate.to_owned())
+    } else {
+        None
+    }
+}
+
+fn extract_first_balanced_json_object(
+    raw: &str,
+    accepts: impl Fn(&Value) -> bool,
+) -> Option<Value> {
+    let mut start = None;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (index, ch) in raw.char_indices() {
+        if start.is_none() {
+            if ch == '{' {
+                start = Some(index);
+                depth = 1;
+            }
+            continue;
+        }
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    let candidate = raw[start?..=index].trim();
+                    if let Ok(value) = serde_json::from_str::<Value>(candidate)
+                        && accepts(&value)
+                    {
+                        return Some(value);
+                    }
+                    start = None;
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn object_matches_schema(value: &Value, schema_version: &str, required_keys: &[&str]) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    object.get("schema_version").and_then(Value::as_str) == Some(schema_version)
+        && required_keys.iter().all(|key| object.contains_key(*key))
+}
+
 fn run_image_extract(params: &WebGptImageExtractParams) -> Result<WebGptImageExtraction> {
     let timeout = Duration::from_secs(
         params
@@ -1885,10 +2077,10 @@ fn worker_reader_loop(stdout: impl std::io::Read, tx: &mpsc::Sender<WorkerMessag
             continue;
         };
         if value.get("event").is_none() {
-            if let Ok(response) = serde_json::from_value::<WorkerRpcResponse>(value) {
-                if tx.send(WorkerMessage::Response(response)).is_err() {
-                    break;
-                }
+            if let Ok(response) = serde_json::from_value::<WorkerRpcResponse>(value)
+                && tx.send(WorkerMessage::Response(response)).is_err()
+            {
+                break;
             }
             continue;
         }
@@ -2283,7 +2475,13 @@ mod tests {
 
         assert_eq!(
             normalized,
-            vec![image.canonicalize().unwrap().display().to_string()]
+            vec![
+                image
+                    .canonicalize()
+                    .expect("image fixture should canonicalize")
+                    .display()
+                    .to_string()
+            ]
         );
         let _ = std::fs::remove_dir_all(root);
     }
@@ -2416,6 +2614,33 @@ mod tests {
         assert_eq!(answer.citations, citations);
         assert_eq!(answer.raw_conversation_id.as_deref(), Some("conv_456"));
         assert_eq!(answer.health, Some(WebGptHealthState::Ready));
+    }
+
+    #[test]
+    fn extracts_turn_form_submission_from_answer_markdown() {
+        let raw = r#"좋아.
+```json
+{
+  "schema_version": "singulari.webgpt_turn_form_submission.v1",
+  "world_id": "stw",
+  "turn_id": "turn_0001",
+  "intent_summary": "문을 연다",
+  "outcome_summary": "문 안쪽으로 장면이 움직인다",
+  "narrative": {"text_blocks": ["문이 밀렸다."]},
+  "next_choices": []
+}
+```
+끝."#;
+
+        let value = extract_json_object_for_schema(
+            raw,
+            "singulari.webgpt_turn_form_submission.v1",
+            &["world_id", "turn_id", "narrative", "next_choices"],
+        )
+        .expect("turn form submission should extract");
+
+        assert_eq!(value["world_id"], "stw");
+        assert_eq!(value["turn_id"], "turn_0001");
     }
 
     #[test]

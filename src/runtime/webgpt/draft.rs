@@ -115,7 +115,7 @@ pub(super) fn assemble_agent_turn_response(
         assemble_resolution_proposal(pending, prompt_context, draft, &reference_index)?;
     let next_choices = assemble_next_choices(prompt_context, draft)?;
     let scene_director_proposal =
-        assemble_scene_director_proposal(pending, prompt_context, draft, &resolution_proposal);
+        assemble_scene_director_proposal(pending, prompt_context, &resolution_proposal);
 
     Ok(AgentTurnResponse {
         schema_version: AGENT_TURN_RESPONSE_SCHEMA_VERSION.to_owned(),
@@ -348,6 +348,9 @@ fn assemble_next_choices(
     prompt_context: &PromptContextPacket,
     draft: &WebgptTurnDraft,
 ) -> Result<Vec<TurnChoice>> {
+    if stalled_scene_director(prompt_context).is_some() {
+        return Ok(forced_pacing_break_choices());
+    }
     let mut choices = Vec::new();
     for affordance in &prompt_context.pre_turn_simulation.available_affordances {
         if !(1..FREEFORM_CHOICE_SLOT).contains(&affordance.slot) {
@@ -380,6 +383,51 @@ fn assemble_next_choices(
         intent: GUIDE_CHOICE_REDACTED_INTENT.to_owned(),
     });
     Ok(choices)
+}
+
+fn forced_pacing_break_choices() -> Vec<TurnChoice> {
+    vec![
+        TurnChoice {
+            slot: 1,
+            tag: "말하기".to_owned(),
+            intent:
+                "깨진 손잡이에서 시선을 떼고, 곁에 선 사람에게 지금 모두가 피하는 말을 직접 묻는다."
+                    .to_owned(),
+        },
+        TurnChoice {
+            slot: 2,
+            tag: "지목".to_owned(),
+            intent: "발끝을 문지른 사람을 조용히 바라보며, 방금 본 일을 설명할 기회를 준다."
+                .to_owned(),
+        },
+        TurnChoice {
+            slot: 3,
+            tag: "정리".to_owned(),
+            intent: "손잡이 이야기는 멈추고, 지금 확인한 사실과 아직 모르는 일을 짧게 나눠 말한다."
+                .to_owned(),
+        },
+        TurnChoice {
+            slot: 4,
+            tag: "물러섬".to_owned(),
+            intent: "문에서 한 걸음 물러나 방 한가운데로 초점을 옮겨, 사람들의 반응을 먼저 받는다."
+                .to_owned(),
+        },
+        TurnChoice {
+            slot: 5,
+            tag: "결단".to_owned(),
+            intent: "더 살피지 않고, 이 방에서 다음으로 책임질 말을 하나 선택한다.".to_owned(),
+        },
+        TurnChoice {
+            slot: FREEFORM_CHOICE_SLOT,
+            tag: FREEFORM_CHOICE_TAG.to_owned(),
+            intent: "6 뒤에 직접 행동, 말, 내면 판단을 이어서 서술한다".to_owned(),
+        },
+        TurnChoice {
+            slot: GUIDE_CHOICE_SLOT,
+            tag: GUIDE_CHOICE_TAG.to_owned(),
+            intent: GUIDE_CHOICE_REDACTED_INTENT.to_owned(),
+        },
+    ]
 }
 
 fn choice_tag(draft_choice: Option<&WebgptDraftChoice>, affordance_kind: AffordanceKind) -> &str {
@@ -419,12 +467,9 @@ const fn fallback_choice_tag(affordance_kind: AffordanceKind) -> &'static str {
 fn assemble_scene_director_proposal(
     pending: &PendingAgentTurn,
     prompt_context: &PromptContextPacket,
-    draft: &WebgptTurnDraft,
     resolution_proposal: &ResolutionProposal,
 ) -> Option<SceneDirectorProposal> {
-    let director: SceneDirectorPacket =
-        serde_json::from_value(prompt_context.visible_context.active_scene_director.clone())
-            .ok()?;
+    let director = scene_director(prompt_context)?;
     let transition_needed = matches!(
         director.pacing_state.transition_pressure,
         TransitionPressure::High
@@ -440,15 +485,23 @@ fn assemble_scene_director_proposal(
     if evidence_refs.is_empty() {
         return None;
     }
-    let to_scene_question = next_scene_question(draft);
+    let to_scene_question = if stalled_scene_director(prompt_context).is_some() {
+        "문고리에서 시선을 떼고, 누가 먼저 말하게 만들 것인가?".to_owned()
+    } else {
+        "드러난 변화 뒤에 무엇을 감수하고 행동할 것인가?".to_owned()
+    };
     Some(SceneDirectorProposal {
         schema_version: singulari_world::SCENE_DIRECTOR_PROPOSAL_SCHEMA_VERSION.to_owned(),
         world_id: pending.world_id.clone(),
         turn_id: pending.turn_id.clone(),
         scene_id: director.current_scene.scene_id.clone(),
         beat_kind: DramaticBeatKind::Transition,
-        turn_function: "반복된 조사 장면을 닫고, 이번 턴의 visible outcome이 만든 다음 문제로 넘긴다."
-            .to_owned(),
+        turn_function: if stalled_scene_director(prompt_context).is_some() {
+            "반복된 물건 중심 장면을 끊고, 다음 턴을 사람 사이의 말과 책임으로 넘긴다."
+        } else {
+            "반복된 관찰 장면을 닫고, 드러난 변화가 만든 다음 행동 문제로 넘긴다."
+        }
+        .to_owned(),
         tension_before: director.current_scene.current_tension,
         tension_after: lowered_tension(director.current_scene.current_tension),
         scene_effect: SceneEffect::SceneQuestionTransformed,
@@ -458,18 +511,52 @@ fn assemble_scene_director_proposal(
             closure_shape: "new_scene_question".to_owned(),
         },
         choice_strategy: ChoiceStrategy {
-            must_change_choice_shape: false,
-            avoid_recent_choice_tags: Vec::new(),
+            must_change_choice_shape: stalled_scene_director(prompt_context).is_some(),
+            avoid_recent_choice_tags: if stalled_scene_director(prompt_context).is_some() {
+                vec![
+                    "관찰".to_owned(),
+                    "살핌".to_owned(),
+                    "기록".to_owned(),
+                    "흐름".to_owned(),
+                    "움직임".to_owned(),
+                ]
+            } else {
+                Vec::new()
+            },
         },
         transition: Some(SceneTransitionProposal {
             from_scene_id: director.current_scene.scene_id,
             to_scene_question,
-            transition_reason: "active_scene_director가 반복 조사 한계에 도달했고, 이번 턴 결과가 다음 장면 질문으로 넘어갈 근거를 만들었다."
+            transition_reason: "같은 단서를 더 살피는 선택이 충분히 반복됐고, 이번 턴의 결과가 다음 행동 문제를 만들었다."
                 .to_owned(),
             evidence_refs: evidence_refs.clone(),
         }),
         evidence_refs,
     })
+}
+
+fn scene_director(prompt_context: &PromptContextPacket) -> Option<SceneDirectorPacket> {
+    serde_json::from_value(prompt_context.visible_context.active_scene_director.clone()).ok()
+}
+
+fn stalled_scene_director(prompt_context: &PromptContextPacket) -> Option<SceneDirectorPacket> {
+    let director = scene_director(prompt_context)?;
+    let repeated_transitions = director
+        .pacing_state
+        .recent_kind_sequence
+        .iter()
+        .rev()
+        .take_while(|kind| matches!(kind, DramaticBeatKind::Transition))
+        .count();
+    if matches!(
+        director.pacing_state.transition_pressure,
+        TransitionPressure::High
+    ) && (director.pacing_state.repeated_choice_shape_count >= 8 || repeated_transitions >= 3)
+    {
+        Some(director)
+    } else {
+        None
+    }
 }
 
 fn scene_director_evidence_refs(
@@ -506,19 +593,13 @@ fn lowered_tension(tension: TensionLevel) -> TensionLevel {
     }
 }
 
-fn next_scene_question(draft: &WebgptTurnDraft) -> String {
-    let summary = draft.outcome.summary.trim();
-    if summary.is_empty() {
-        return "드러난 변화 뒤에 무엇을 감수하고 행동할 것인가?".to_owned();
-    }
-    let compact = summary.chars().take(48).collect::<String>();
-    format!("{compact} 이후 무엇을 감수하고 행동할 것인가?")
-}
-
 fn assemble_choice_plan(
     prompt_context: &PromptContextPacket,
     draft: &WebgptTurnDraft,
 ) -> Vec<ChoicePlan> {
+    if let Some(director) = stalled_scene_director(prompt_context) {
+        return forced_pacing_break_choice_plan(&director);
+    }
     let mut plan = prompt_context
         .pre_turn_simulation
         .available_affordances
@@ -545,6 +626,46 @@ fn assemble_choice_plan(
                     .to_owned(),
                 evidence_refs: vec![affordance.affordance_id.clone()],
             }
+        })
+        .collect::<Vec<_>>();
+    plan.push(ChoicePlan {
+        slot: FREEFORM_CHOICE_SLOT,
+        plan_kind: ChoicePlanKind::Freeform,
+        grounding_ref: "current_turn".to_owned(),
+        label_seed: FREEFORM_CHOICE_TAG.to_owned(),
+        intent_seed: "6 뒤에 직접 행동, 말, 내면 판단을 이어서 서술한다".to_owned(),
+        evidence_refs: vec!["current_turn".to_owned()],
+    });
+    plan.push(ChoicePlan {
+        slot: GUIDE_CHOICE_SLOT,
+        plan_kind: ChoicePlanKind::DelegatedJudgment,
+        grounding_ref: "current_turn".to_owned(),
+        label_seed: GUIDE_CHOICE_TAG.to_owned(),
+        intent_seed: GUIDE_CHOICE_REDACTED_INTENT.to_owned(),
+        evidence_refs: vec!["current_turn".to_owned()],
+    });
+    plan
+}
+
+fn forced_pacing_break_choice_plan(director: &SceneDirectorPacket) -> Vec<ChoicePlan> {
+    let grounding_ref = director
+        .current_scene
+        .evidence_refs
+        .iter()
+        .find(|reference| !reference.trim().is_empty())
+        .cloned()
+        .unwrap_or_else(|| "current_turn".to_owned());
+    let evidence_refs = vec![grounding_ref.clone()];
+    let mut plan = forced_pacing_break_choices()
+        .into_iter()
+        .filter(|choice| (1..FREEFORM_CHOICE_SLOT).contains(&choice.slot))
+        .map(|choice| ChoicePlan {
+            slot: choice.slot,
+            plan_kind: ChoicePlanKind::OrdinaryAffordance,
+            grounding_ref: grounding_ref.clone(),
+            label_seed: choice.tag,
+            intent_seed: choice.intent,
+            evidence_refs: evidence_refs.clone(),
         })
         .collect::<Vec<_>>();
     plan.push(ChoicePlan {
@@ -936,6 +1057,34 @@ premise:
         };
         assert_eq!(proposal.beat_kind, DramaticBeatKind::Transition);
         assert!(proposal.transition.is_some());
+        assert!(proposal.choice_strategy.must_change_choice_shape);
+        assert!(proposal.transition.as_ref().is_some_and(|transition| {
+            transition
+                .to_scene_question
+                .contains("문고리에서 시선을 떼고")
+        }));
+        let proposal_json = serde_json::to_string(&proposal)?;
+        assert!(!proposal_json.contains("active_scene_director"));
+        assert!(!proposal_json.contains("visible outcome"));
+        let repeated_tags = ["관찰", "살핌", "기록", "흐름", "움직임"];
+        for choice in response
+            .next_choices
+            .iter()
+            .filter(|choice| choice.slot <= 5)
+        {
+            assert!(!repeated_tags.contains(&choice.tag.as_str()));
+        }
+        assert_eq!(response.next_choices[0].tag, "말하기");
+        assert!(response.next_choices[0].intent.contains("시선을 떼고"));
+        let Some(resolution) = response.resolution_proposal.as_ref() else {
+            anyhow::bail!("assembled response should include resolution proposal");
+        };
+        assert_eq!(resolution.next_choice_plan[0].label_seed, "말하기");
+        assert!(
+            resolution.next_choice_plan[0]
+                .intent_seed
+                .contains("시선을 떼고")
+        );
         assert!(
             !response.next_choices[0]
                 .tag

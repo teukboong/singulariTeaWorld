@@ -526,7 +526,7 @@ enum Commands {
             long,
             env = "SINGULARI_WORLD_WEBGPT_OUTPUT_MODE",
             value_enum,
-            default_value_t = WebGptTextOutputMode::AgentResponse
+            default_value_t = WebGptTextOutputMode::ToolForm
         )]
         webgpt_output_mode: WebGptTextOutputMode,
 

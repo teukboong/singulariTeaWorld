@@ -229,6 +229,7 @@ struct VnRuntimeStatusResponse {
     backend_selection: VnBackendSelectionStatus,
     narrative: VnNarrativeRuntimeStatus,
     visual: VnVisualRuntimeStatus,
+    database: VnDatabaseRuntimeStatus,
     details: VnRuntimeDetails,
 }
 
@@ -268,6 +269,16 @@ struct VnVisualRuntimeStatus {
     completed_slots: Vec<String>,
     jobs: Vec<WorldJob>,
     turn_cg_status: String,
+    latest_dispatch_status: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VnDatabaseRuntimeStatus {
+    label: String,
+    status: String,
+    backend: String,
+    online: bool,
+    detail: String,
     latest_dispatch_status: Option<String>,
 }
 
@@ -864,6 +875,7 @@ fn runtime_status(state: &VnServerState) -> Result<VnRuntimeStatusResponse> {
         latest_visual_dispatch.as_ref(),
         &world_jobs,
     );
+    let database = database_runtime_status(&projection_health);
     let agent_bridge_enabled = agent_bridge_enabled(state);
     let narrative_backend = selection.text_backend.as_str();
     let label = narrative_runtime_label(
@@ -913,6 +925,7 @@ fn runtime_status(state: &VnServerState) -> Result<VnRuntimeStatusResponse> {
             latest_dispatch_status: latest_text_status,
         },
         visual,
+        database,
         details: VnRuntimeDetails {
             backend_selection: selection,
             latest_text_dispatch,
@@ -958,6 +971,33 @@ fn materialized_runtime_details(
         return Ok(None);
     }
     read_json(path.as_path()).with_context(|| format!("failed to read {}", path.display()))
+}
+
+fn database_runtime_status(projection_health: &ProjectionHealthReport) -> VnDatabaseRuntimeStatus {
+    let world_db = projection_health
+        .components
+        .iter()
+        .find(|component| component.component == "world_db");
+    let status = world_db.map_or_else(
+        || "unknown".to_owned(),
+        |component| component.status.to_string(),
+    );
+    let detail = world_db.map_or_else(
+        || "world_db component missing from projection health".to_owned(),
+        |component| component.detail.clone(),
+    );
+    VnDatabaseRuntimeStatus {
+        label: if status == "healthy" {
+            "DB 정상".to_owned()
+        } else {
+            "DB 점검 필요".to_owned()
+        },
+        status: status.clone(),
+        backend: "world.db".to_owned(),
+        online: status == "healthy",
+        detail,
+        latest_dispatch_status: None,
+    }
 }
 
 fn player_safe_projection_health(mut report: ProjectionHealthReport) -> ProjectionHealthReport {
@@ -2179,9 +2219,14 @@ mod tests {
         load_world_response, new_world, read_world_asset, repair_world_db_response, route_request,
         runtime_status, save_request_body, save_world_response, validate_vn_input, world_list,
     };
-    use crate::agent_bridge::{ADVISORY_WARNING_EVENT_SCHEMA_VERSION, AdvisoryWarningEvent};
+    use crate::agent_bridge::{
+        ADVISORY_WARNING_EVENT_SCHEMA_VERSION, AdvisoryWarningEvent, AgentSubmitTurnOptions,
+        enqueue_agent_turn,
+    };
     use crate::backend_selection::{WorldTextBackend, WorldVisualBackend};
-    use crate::job_ledger::{WorldJobKind, WorldJobStatus};
+    use crate::job_ledger::{
+        WorldJobKind, WorldJobStatus, WriteTextTurnJobOptions, write_text_turn_job,
+    };
     use crate::store::{InitWorldOptions, append_jsonl, init_world};
     use crate::transfer::{ExportWorldOptions, export_world};
     use crate::turn::{AdvanceTurnOptions, advance_turn};
@@ -2475,6 +2520,9 @@ premise:
         assert_eq!(status.backend_selection.visual_backend, "webgpt");
         assert_eq!(status.narrative.backend, "webgpt");
         assert_eq!(status.visual.backend, "webgpt");
+        assert_eq!(status.database.backend, "world.db");
+        assert_eq!(status.database.status, "healthy");
+        assert!(status.database.online);
         assert_eq!(
             status.details.projection_health.status.to_string(),
             "healthy"
@@ -2511,6 +2559,61 @@ premise:
             status.narrative.label.as_str(),
             "서사 연결됨" | "WebGPT 서사 연결됨"
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_status_keeps_database_lane_healthy_when_text_job_degrades_projection()
+    -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let store = temp.path().join("store");
+        let seed_path = temp.path().join("seed.yaml");
+        std::fs::write(
+            &seed_path,
+            r#"
+schema_version: singulari.world_seed.v1
+world_id: stw_vn_db_lane
+title: "DB 램프 세계"
+premise:
+  genre: "중세 판타지"
+  protagonist: "변경 순찰자, 남자 주인공"
+"#,
+        )?;
+        init_world(&InitWorldOptions {
+            seed_path,
+            store_root: Some(store.clone()),
+            session_id: None,
+        })?;
+        let pending = enqueue_agent_turn(&AgentSubmitTurnOptions {
+            store_root: Some(store.clone()),
+            world_id: "stw_vn_db_lane".to_owned(),
+            input: "1".to_owned(),
+            narrative_level: None,
+        })?;
+        write_text_turn_job(&WriteTextTurnJobOptions {
+            store_root: Some(store.as_path()),
+            pending: &pending,
+            status: WorldJobStatus::FailedTerminal,
+            output_ref: Some("agent_bridge/dispatches/turn_0001-webgpt.json".to_owned()),
+            claim_owner: Some("webgpt_host_worker".to_owned()),
+            attempt_id: Some("webgpt:turn_0001".to_owned()),
+            last_error: Some("generated text failed audit".to_owned()),
+        })?;
+        let state = VnServerState {
+            store_root: Some(store),
+            world_id: Mutex::new("stw_vn_db_lane".to_owned()),
+            vn_token: "test-vn-token".to_owned(),
+        };
+
+        let status = runtime_status(&state)?;
+
+        assert_eq!(
+            status.details.projection_health.status.to_string(),
+            "degraded"
+        );
+        assert_eq!(status.database.status, "healthy");
+        assert_eq!(status.database.label, "DB 정상");
+        assert!(status.database.online);
         Ok(())
     }
 

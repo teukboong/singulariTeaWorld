@@ -61,6 +61,7 @@ mod visual_assets;
 mod vn;
 mod vn_server;
 mod voice_anchor;
+mod webgpt_turn_form;
 mod world_court;
 mod world_db;
 mod world_docs;
@@ -467,6 +468,13 @@ pub use vn::{
 pub use vn_server::{VnChooseRequest, VnExposureMode, VnServeOptions, serve_vn};
 pub use voice_anchor::{
     ApplyCharacterAnchorOptions, CharacterAnchorReport, apply_character_anchor,
+};
+pub use webgpt_turn_form::{
+    TURN_FORM_SPEC_SCHEMA_VERSION, TURN_FORM_SUBMISSION_SCHEMA_VERSION,
+    TURN_FORM_SUBMIT_RESULT_SCHEMA_VERSION, TurnFormChoiceSlotSpec, TurnFormChoiceSubmission,
+    TurnFormFieldError, TurnFormNarrativeBudget, TurnFormNarrativeSubmission,
+    TurnFormPressureMovement, TurnFormPressureOption, TurnFormRejection, TurnFormSpec,
+    TurnFormSubmission, assemble_agent_turn_response_from_form, build_turn_form_spec,
 };
 pub use world_court::{
     WORLD_COURT_REPAIR_ACTION_SCHEMA_VERSION, WORLD_COURT_VERDICT_SCHEMA_VERSION,
